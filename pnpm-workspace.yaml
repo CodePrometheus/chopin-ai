@@ -1,0 +1,29 @@
+packages:
+  - apps/*
+  - packages/*
+# Transitive postinstall scripts are irrelevant here (only the anthropic provider is used);
+# block them to keep installs deterministic
+allowBuilds:
+  '@deepseek-ai/dsh-subprocess-local': false
+  '@google/genai': false
+  esbuild: false
+  koffi: false
+  node-addon-require-builtin: false
+  node-pty: false
+  protobufjs: false
+autoInstallPeers: true
+linkWorkspacePackages: true
+minimumReleaseAgeExclude:
+  - '@deepseek-ai/cordis@4.0.4'
+  - '@deepseek-ai/cosmokit@1.8.5'
+  - '@deepseek-ai/cordis-plugin-include@1.0.9'
+  - '@deepseek-ai/cordis-plugin-loader@1.0.5'
+  - '@xmoon76/dsh-pi-tui@0.5.0'
+overrides:
+  '@deepseek-ai/cordis': 4.0.4
+  '@deepseek-ai/cordis-plugin-include': 1.0.9
+  '@deepseek-ai/cordis-plugin-loader': 1.0.5
+  '@deepseek-ai/cordis-plugin-logger-console': 1.0.4
+  '@deepseek-ai/schemastery': 3.18.4
+  '@earendil-works/pi-ai': 0.87.1
+preferWorkspacePackages: true

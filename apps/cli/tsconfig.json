@@ -1,0 +1,14 @@
+{
+  "extends": "../../tsconfig.base.json",
+  "compilerOptions": {
+    "rootDir": "src",
+    "outDir": "dist"
+  },
+  "include": ["src"],
+  "references": [
+    { "path": "../../packages/evolution" },
+    { "path": "../../packages/evolution-runtime" },
+    { "path": "../../packages/plugin-adapter" },
+    { "path": "../../packages/plugin-sandbox" }
+  ]
+}

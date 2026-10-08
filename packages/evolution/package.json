@@ -1,0 +1,32 @@
+{
+  "name": "@chopin/evolution",
+  "version": "0.1.0",
+  "license": "Apache-2.0",
+  "private": true,
+  "type": "module",
+  "exports": {
+    ".": "./dist/index.js",
+    "./artifact": "./dist/artifact.js",
+    "./artifact-store": "./dist/artifact-store.js",
+    "./candidate": "./dist/candidate.js",
+    "./events": "./dist/events.js",
+    "./feedback": "./dist/feedback.js",
+    "./fold": "./dist/fold.js",
+    "./legacy": "./dist/legacy.js",
+    "./manifest": "./dist/manifest.js",
+    "./projection": "./dist/projection.js",
+    "./receipts": "./dist/receipts.js",
+    "./store": "./dist/store.js",
+    "./types": "./dist/types.js",
+    "./verifier": "./dist/verifier.js"
+  },
+  "dependencies": {
+    "yaml": "^2.9.1"
+  },
+  "devDependencies": {
+    "@types/node": "^24.13.4",
+    "typescript": "^7.0.2"
+  },
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts"
+}

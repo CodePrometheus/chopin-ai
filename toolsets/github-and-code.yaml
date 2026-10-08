@@ -1,0 +1,113 @@
+name: github-and-code
+description: >-
+  General investigation data sources: prior report search, search inside evidence bundles,
+  read-only code access across repositories. The repository name comes from the configured ${GITHUB_REPO}
+prerequisites:
+  - command: "gh auth status"
+  - command: "git --version"
+tools:
+  - name: issue_history_search
+    description: >
+      Search issues (open AND closed) by exact error phrase. The error string is the
+      stable identifier of a defect; the reporter's wording of the symptom is not.
+    command: >
+      gh issue list --repo ${GITHUB_REPO} --state all --search {{query}} --limit 10
+      --json number,title,state,createdAt
+      --jq '.[] | "\(.number)\t\(.state)\t\(.createdAt[0:10])\t\(.title)"'
+    params:
+      query:
+        description: the exact error phrase to search for
+        allowLeadingDash: true
+
+  - name: issue_view
+    description: View one issue's title, body, and comments.
+    command: gh issue view {{number}} --repo ${GITHUB_REPO} --json number,title,body,createdAt,comments
+    params:
+      number:
+        description: issue number
+    outputBudgetBytes: 65536
+
+  - name: log_grep
+    description: >
+      Grep inside an extracted log bundle (or any log dir). Filter server-side: pass a
+      narrow pattern and use context lines sparingly. Output is budget-clipped.
+    command: grep -rn --include='*' -m 200 -e {{pattern}} {{dir}} | head -300
+    params:
+      pattern:
+        description: regex/fixed pattern to search
+        allowLeadingDash: true
+      dir:
+        description: absolute path of the extracted bundle or a subdirectory
+    outputBudgetBytes: 32768
+
+  - name: bundle_ls
+    description: List the structure of an extracted bundle directory (two levels).
+    command: find {{dir}} -maxdepth 2 | head -100
+    params:
+      dir:
+        description: absolute path of the extracted bundle
+
+  - name: repo_show_at_tag
+    description: >
+      Read a file AS IT WAS at a release tag (the version the user actually ran).
+      Never base findings on main when investigating a tagged release.
+    command: git -C {{repo_dir}} show {{ref}}:{{path}}
+    params:
+      repo_dir:
+        description: absolute path of the repository clone to read
+      ref:
+        description: release tag or commit, e.g. v1.2.3
+      path:
+        description: repo-relative file path
+    outputBudgetBytes: 65536
+
+  - name: repo_grep
+    description: Search a repo's code at HEAD for a string or pattern (read-only).
+    command: git -C {{repo_dir}} grep -n -e {{pattern}} -- {{glob}} | head -100
+    params:
+      repo_dir:
+        description: absolute path of the repo clone
+      pattern:
+        description: pattern to search
+        allowLeadingDash: true
+      glob:
+        description: pathspec to limit the search, e.g. '*.ts'; pass '.' for all
+        required: false
+
+  - name: repo_log_search
+    description: >
+      Find the commit that introduced a distinctive string (git log -S) — then read its PR
+      description for the original design assumption. Root causes are more often expired
+      assumptions than coding mistakes.
+    command: git -C {{repo_dir}} log -S {{needle}} --oneline -- {{path}} | head -20
+    params:
+      repo_dir:
+        description: absolute path of the repo clone
+      needle:
+        description: distinctive string whose introduction to find
+        allowLeadingDash: true
+      path:
+        description: limit to a path; pass '.' for the whole repo
+        required: false
+
+  - name: repo_diff_tags
+    description: Diff a path between the user's release tag and main, to see what changed since.
+    command: git -C {{repo_dir}} diff {{from_ref}}..{{to_ref}} --stat -- {{path}} | head -60
+    params:
+      repo_dir:
+        description: absolute path of the repo clone
+      from_ref:
+        description: older ref (the user's release tag)
+      to_ref:
+        description: newer ref, usually main
+      path:
+        description: limit to a path; pass '.' for the whole repo
+        required: false
+
+  - name: pr_view
+    description: Read a PR's description — it states the design assumption out loud.
+    command: gh pr view {{number}} --repo ${GITHUB_REPO} --json number,title,body,mergedAt
+    params:
+      number:
+        description: PR number
+    outputBudgetBytes: 32768

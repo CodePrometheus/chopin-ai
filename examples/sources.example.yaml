@@ -1,0 +1,27 @@
+# Example source list: point CHOPIN_SOURCES_FILE at your copy. Data spread across several systems is fine;
+# all of it is wired up in this one file.
+# Secrets always come from the environment as ${ENV_VAR}, never written into this file.
+sources:
+  # User reports: open issues assigned to the current gh account
+  - kind: github-issue
+    repo: my-org/my-product
+
+  # Logs: Loki. url may be a direct connection (http://127.0.0.1:3100, usually via port-forward)
+  # or a Grafana datasource proxy (reachable from outside, recommended):
+  #   https://<your-grafana>/api/datasources/proxy/uid/<loki-datasource-uid>
+  # Filtering belongs in the query: scanner noise and the like should not reach triage.
+  # userField names the user identifier field in the log JSON, used for impact scoring.
+  - kind: loki
+    url: ${LOKI_URL}
+    query: '{namespace="my-namespace"} |~ "(?i)error|panic|fatal"'
+    windowMinutes: 1440
+    minScore: 15
+    userField: user_id
+    headers:
+      Authorization: Bearer ${LOKI_TOKEN}
+
+  # Error monitoring: Sentry (through the locally signed-in sentry-cli)
+  - kind: sentry
+    org: my-org
+    project: my-project
+    minEvents: 10

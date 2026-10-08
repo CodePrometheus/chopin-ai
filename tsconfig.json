@@ -1,0 +1,65 @@
+{
+  "files": [],
+  "references": [
+    {
+      "path": "packages/evolution"
+    },
+    {
+      "path": "packages/evolution-authoring"
+    },
+    {
+      "path": "packages/evolution-runtime"
+    },
+    {
+      "path": "packages/evolution-observer"
+    },
+    {
+      "path": "packages/plugin-sdk"
+    },
+    {
+      "path": "packages/plugin-sandbox"
+    },
+    {
+      "path": "packages/plugin-adapter"
+    },
+    {
+      "path": "packages/tool-session"
+    },
+    {
+      "path": "packages/memos-quiet"
+    },
+    {
+      "path": "packages/tool-ledger"
+    },
+    {
+      "path": "packages/report"
+    },
+    {
+      "path": "packages/gate"
+    },
+    {
+      "path": "packages/ledger"
+    },
+    {
+      "path": "packages/signal"
+    },
+    {
+      "path": "packages/toolset"
+    },
+    {
+      "path": "packages/evidence"
+    },
+    {
+      "path": "apps/cli"
+    },
+    {
+      "path": "packages/notify"
+    },
+    {
+      "path": "packages/retry"
+    },
+    {
+      "path": "packages/ultra-mode"
+    }
+  ]
+}

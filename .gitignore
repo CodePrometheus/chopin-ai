@@ -1,0 +1,21 @@
+node_modules/
+dist/
+*.tsbuildinfo
+.DS_Store
+.idea
+
+# Credentials and secrets: no token ever enters the repo; everyone uses their own
+*.token
+token.json
+*.key
+.env
+.env.*
+auth.json
+
+# Machine-local config and runtime output
+config/local.*
+# Anchored to the root so it never matches the packages/ledger/ source package.
+/ledger/
+
+# Working notes (plan / todo), local only
+.agents/

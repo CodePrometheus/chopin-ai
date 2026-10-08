@@ -1,0 +1,62 @@
+{
+  "name": "@chopin/bundle",
+  "version": "0.1.0",
+  "license": "Apache-2.0",
+  "private": true,
+  "type": "module",
+  "files": [
+    "cordis.patch.yml",
+    "presets"
+  ],
+  "dsh": {
+    "bundle": {
+      "patch": [
+        "./cordis.patch.yml",
+        "./presets/chopin/preset.patch.yml"
+      ]
+    }
+  },
+  "dependencies": {
+    "@chopin/cli": "workspace:*",
+    "@chopin/evidence": "workspace:*",
+    "@chopin/evolution-authoring": "workspace:*",
+    "@chopin/evolution-observer": "workspace:*",
+    "@chopin/evolution-runtime": "workspace:*",
+    "@chopin/gate": "workspace:*",
+    "@chopin/ledger": "workspace:*",
+    "@chopin/memos-quiet": "workspace:*",
+    "@chopin/notify": "workspace:*",
+    "@chopin/plugin-adapter": "workspace:*",
+    "@chopin/report": "workspace:*",
+    "@chopin/retry": "workspace:*",
+    "@chopin/signal": "workspace:*",
+    "@chopin/tool-ledger": "workspace:*",
+    "@chopin/tool-session": "workspace:*",
+    "@chopin/toolset": "workspace:*",
+    "@chopin/ultra-mode": "workspace:*",
+    "@deepseek-ai/dsh-agent-instructions": "0.2.0-rc.2",
+    "@deepseek-ai/dsh-llm": "0.2.0-rc.2",
+    "@deepseek-ai/dsh-system-prompt": "0.2.0-rc.2",
+    "@deepseek-ai/dsh-tools": "0.2.0-rc.2",
+    "@deepseek-ai/dsh-user-approval": "0.2.0-rc.2",
+    "@deepseek-ai/dsh-command-compact": "0.2.0-rc.2",
+    "@deepseek-ai/dsh-compaction-basic": "0.2.0-rc.2",
+    "@deepseek-ai/dsh-compaction-tool-result-pruner": "0.2.0-rc.2",
+    "@deepseek-ai/dsh-persona": "0.2.0-rc.2",
+    "@deepseek-ai/dsh-schedule": "0.2.0-rc.2",
+    "@deepseek-ai/dsh-skill-filesystem": "0.2.0-rc.2",
+    "@deepseek-ai/dsh-tool-bash": "0.2.0-rc.2",
+    "@deepseek-ai/dsh-tool-cordis": "0.2.0-rc.2",
+    "@deepseek-ai/dsh-tool-fs": "0.2.0-rc.2",
+    "@deepseek-ai/dsh-tool-fs-search": "0.2.0-rc.2",
+    "@deepseek-ai/dsh-tool-goal": "0.2.0-rc.2",
+    "@deepseek-ai/dsh-tool-jobs": "0.2.0-rc.2",
+    "@deepseek-ai/dsh-tool-ralph": "0.2.0-rc.2",
+    "@deepseek-ai/dsh-tool-skill": "0.2.0-rc.2",
+    "@deepseek-ai/dsh-tool-str-replace-editor": "0.2.0-rc.2",
+    "@deepseek-ai/dsh-tool-subagent": "0.2.0-rc.2",
+    "@deepseek-ai/dsh-tool-subagent-control": "0.2.0-rc.2",
+    "@deepseek-ai/dsh-tool-todo": "0.2.0-rc.2",
+    "@deepseek-ai/dsh-tool-workflow": "0.2.0-rc.2"
+  }
+}

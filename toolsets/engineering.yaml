@@ -1,0 +1,81 @@
+name: engineering
+description: >
+  Verification and self-check tools for engineering work. They exist because gates judge by
+  tool name: a generic shell cannot tell "ran the tests" from "ran ls", so the discipline
+  "must have verified" cannot be expressed with bash. How commands run is project configuration (${VAR}), not the model's guess.
+prerequisites:
+  - command: "git --version"
+tools:
+  - name: run_tests
+    description: >
+      Run this project's test suite. This is the tool the delivery gate checks for:
+      claiming the change works does not count, running this does.
+    command: cd ${REPO_PATH} && ${TEST_COMMAND}
+    outputBudgetBytes: 32768
+    timeoutMs: 900000
+
+  - name: run_build
+    description: Run this project's build. Type errors and broken imports surface here, not in the tests.
+    command: cd ${REPO_PATH} && ${BUILD_COMMAND}
+    outputBudgetBytes: 32768
+    timeoutMs: 900000
+
+  - name: run_lint
+    description: Run this project's linter.
+    command: cd ${REPO_PATH} && ${LINT_COMMAND}
+    outputBudgetBytes: 32768
+    timeoutMs: 300000
+
+  - name: git_diff
+    description: >
+      The complete diff of everything changed so far, staged and unstaged. Read it before
+      delivering: it is the only view that shows what you touched BESIDES what you meant to touch.
+    command: git -C ${REPO_PATH} diff HEAD
+    outputBudgetBytes: 65536
+
+  - name: git_status
+    description: Which files are modified, staged, or untracked.
+    command: git -C ${REPO_PATH} status --short
+    outputBudgetBytes: 8192
+
+  - name: work_queue
+    description: >
+      What is claimable right now, computed from the requirement market rather than judged
+      by eye. A requirement is claimable when nobody has claimed it AND every requirement it
+      links to has already landed in implemented/. Also reports dangling links — a reference
+      to a file that exists nowhere blocks its dependent forever and is invisible to reading.
+      Use this at the start of a goal round instead of re-deriving the dependency graph:
+      the ordering is a fact of the repository, not a judgement call. Empty output means the
+      queue is genuinely drained, which is the only honest reason to stop an unattended run.
+    command: |
+      cd ${REPO_PATH} || exit 0
+      q=.agents/notes
+      [ -d "$q/proposed" ] || { echo "no requirement market at $q/proposed"; exit 0; }
+      claimable=0; blocked=0; dangling=0
+      for f in "$q"/proposed/*.md; do
+        [ -e "$f" ] || continue
+        name=$(basename "$f")
+        owner=$(awk -F':' '/^Owner:/{gsub(/ /,"",$2); print $2; exit}' "$f")
+        miss=""; gone=""
+        for dep in $(grep -oE '[0-9]{4}-[0-9]{2}-[0-9]{2}-[a-z0-9-]+\.md' "$f" | sort -u); do
+          [ "$dep" = "$name" ] && continue
+          if [ -e "$q/implemented/$dep" ]; then continue; fi
+          if [ -e "$q/proposed/$dep" ] || [ -e "$q/rejected/$dep" ]; then miss="$miss $dep"; else gone="$gone $dep"; fi
+        done
+        if [ -n "$gone" ]; then
+          echo "DANGLING  $name -> links to nonexistent:$gone"
+          dangling=$((dangling+1)); continue
+        fi
+        if [ -n "$owner" ]; then
+          echo "CLAIMED   $name (by $owner)"; continue
+        fi
+        if [ -n "$miss" ]; then
+          echo "BLOCKED   $name <- waiting on:$miss"
+          blocked=$((blocked+1)); continue
+        fi
+        echo "CLAIMABLE $name"
+        claimable=$((claimable+1))
+      done
+      echo "--- claimable=$claimable blocked=$blocked dangling=$dangling ---"
+    outputBudgetBytes: 8192
+    timeoutMs: 30000

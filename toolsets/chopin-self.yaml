@@ -1,0 +1,56 @@
+name: chopin-self
+description: >
+  Verification tools for chopin changing itself. Gates judge by tool name, so the names must
+  be honest: `chopin_check_composition` runs the composition check and does not borrow `run_lint`'s name.
+  ${REPO_PATH} is derived by the preset from the bundle package's location, not an environment variable.
+prerequisites:
+  - command: "git --version"
+  - command: "pnpm --version"
+tools:
+  - name: chopin_test
+    description: >
+      Run chopin's own unit tests. The evolution gate checks for this: a capability
+      that was never tested against the gate contract is not delivered.
+    command: cd ${REPO_PATH} && pnpm test
+    outputBudgetBytes: 32768
+    timeoutMs: 600000
+
+  - name: chopin_build
+    description: >
+      Build every chopin package. Type errors in a new plugin surface here. With hot reload
+      on (CHOPIN_HMR=1) the rebuilt code is picked up from dist; otherwise restart chopin.
+    command: cd ${REPO_PATH} && pnpm build
+    outputBudgetBytes: 32768
+    timeoutMs: 600000
+
+  - name: chopin_check_composition
+    description: >
+      Verify that every row in the bundle and in every preset resolves to an installed
+      package, and that every gate names a tool some plugin provides. A preset that fails
+      this deadlocks the mission at startup.
+    command: cd ${REPO_PATH} && pnpm check:composition
+    outputBudgetBytes: 16384
+    timeoutMs: 120000
+
+  - name: chopin_smoke
+    description: >
+      Mount chopin's whole composition in a throwaway profile with the real launcher: create
+      an agent on the chopin preset and confirm every gated and submission tool is visible
+      to it. No model request is made. Run chopin_build first; the smoke loads the built code.
+      The evolution gate checks for this: a plugin that never mounted is a guess.
+    command: cd ${REPO_PATH} && pnpm smoke:composition
+    outputBudgetBytes: 16384
+    timeoutMs: 600000
+
+  - name: chopin_git_diff
+    description: >
+      The complete diff of chopin's own repository, staged and unstaged. Read it before
+      delivering an evolution: it is the only view that shows what you touched BESIDES
+      what you meant to touch. For the diff of the project under work, use git_diff.
+    command: git -C ${REPO_PATH} diff HEAD
+    outputBudgetBytes: 65536
+
+  - name: chopin_git_status
+    description: Which files are modified, staged, or untracked in chopin's own repository.
+    command: git -C ${REPO_PATH} status --short
+    outputBudgetBytes: 8192
