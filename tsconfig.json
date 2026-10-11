@@ -2,7 +2,16 @@
   "files": [],
   "references": [
     {
+      "path": "packages/journal"
+    },
+    {
       "path": "packages/evolution"
+    },
+    {
+      "path": "packages/team"
+    },
+    {
+      "path": "packages/team-runtime"
     },
     {
       "path": "packages/evolution-authoring"

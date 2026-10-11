@@ -1,0 +1,20 @@
+# Overlay for the team e2e: no terminal UI, no alerts, a scratch team directory, and the probe.
+# Passed by team-e2e.mjs via --patch.
+- id: tui-app
+  disabled: true
+
+- id: tui-startup
+  disabled: true
+
+- id: chopin-notify
+  disabled: true
+
+- id: chopin-team
+  config:
+    dir: !!js process.env.CHOPIN_TEAM_DIR
+    workerPreset: chopin
+    leadOnlyTools: ['submit_*', 'evolution_*', 'curation_*', 'ledger_write']
+
+- insert:
+    - id: chopin-team-e2e
+      name: ./team-e2e-plugin.mjs

@@ -67,6 +67,18 @@
     - id: chopin-notify
       name: '@chopin/notify'
 
+    # Team mode: a deterministic engine drives fresh, bounded workers in fixed worktree slots and
+    # delivers their work. It runs in the process of the session leading a project's team, and
+    # each worker round is that session's sub-agent. A service here because the engines and the
+    # worker provider are shared by every session of the process.
+    - id: chopin-team
+      name: '@chopin/team-runtime'
+      config:
+        dir: !!js process.env.CHOPIN_TEAM_DIR ?? process.getBuiltinModule('node:path').join(process.getBuiltinModule('node:os').homedir(), '.chopin', 'team')
+        workerPreset: chopin
+        # Curation, evolution and ledger writes happen in the lead's session, with a person present.
+        leadOnlyTools: ['submit_*', 'evolution_*', 'curation_*', 'ledger_write']
+
     # Retry known transient tool failures automatically. Some failures have nothing to do with
     # the call and pass on rerun, but unattended they count as the command really failing, and
     # judgement then rests on a false premise.

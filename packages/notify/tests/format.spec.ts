@@ -7,7 +7,7 @@
  */
 
 import { describe, expect, it } from "vitest";
-import { humanDuration, workspaceLabel } from "../src/index.js";
+import { humanDuration, spokenByPerson, workspaceLabel } from "../src/index.js";
 
 describe("humanDuration", () => {
   it("gives only seconds under a minute", () => {
@@ -42,5 +42,12 @@ describe("workspaceLabel", () => {
   it("falls back to a fixed name for the root path", () => {
     expect(workspaceLabel("/")).toBe("chopin");
     expect(workspaceLabel("")).toBe("chopin");
+  });
+});
+
+describe("spokenByPerson", () => {
+  it("counts only messages a person typed, not briefs a host injected", () => {
+    expect(spokenByPerson([{ type: "user/message", data: { source: { kind: "team" } } }])).toBe(false);
+    expect(spokenByPerson([{ type: "assistant/message", data: {} }, { type: "user/message", data: { source: { kind: "user" } } }])).toBe(true);
   });
 });

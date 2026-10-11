@@ -422,6 +422,17 @@
           - id: tool-ledger
             name: '@chopin/tool-ledger'
 
+          # ── Team mode, the lead's side ────────────────────────────────────────────────────────
+          #
+          # Submit a batch after interviewing the person, have them approve it once its acceptance
+          # checks exist, relay their decisions and confirm landed work. The team's state rides in
+          # every request, so a fresh session picks up where the last one stopped. Workers run under
+          # this same preset; the host refuses them these tools.
+          - id: chopin-team-lead
+            name: '@chopin/team-runtime/lead'
+            config:
+              requiredSkills: ['grilling', 'grill-me']
+
           # ── Output and discipline ──────────────────────────────────────────────────────────────
           #
           # Four submit tools coexist, each with its own gates. Guards register by the name of the

@@ -10,54 +10,13 @@
  * The evolve submit gate's trial-run accepts nothing else: a plugin that was never mounted is a guess about the runtime.
  */
 
-import { execFile } from "node:child_process";
-import { access, mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
-import { tmpdir } from "node:os";
-import { dirname, join, resolve } from "node:path";
-import { fileURLToPath } from "node:url";
-import { promisify } from "node:util";
+import { readFile, rm } from "node:fs/promises";
+import { join } from "node:path";
 import { collectGatedTools, collectRows, parseComposition, presetDeclarations, submissionTools } from "./composition-rules.mjs";
+import { PROFILE, prepareProfile, repoRoot } from "./real-profile.mjs";
 
-const repoRoot = resolve(dirname(fileURLToPath(import.meta.url)), "..");
-const run = promisify(execFile);
-const PROFILE = "chopin-tui";
 const BOOT_TIMEOUT_MS = 180_000;
-
-try {
-  await access(join(repoRoot, "apps/cli/dist/installation.js"));
-} catch {
-  console.error("smoke: apps/cli is not built; run `pnpm build` first");
-  process.exit(1);
-}
-const { SHARED_BUNDLES } = await import(join(repoRoot, "apps/cli/dist/installation.js"));
-const { dshBin } = await import(join(repoRoot, "apps/cli/dist/environment.js"));
-
-const home = await mkdtemp(join(tmpdir(), "chopin-smoke-"));
-const workspace = join(home, "workspace");
-await mkdir(workspace);
-const log = join(home, "smoke.log");
-const env = { ...process.env, DSH_HOME: home, DSH_TELEMETRY_DISABLED: "1" };
-
-async function step(label, args, options = {}) {
-  try {
-    const { stdout, stderr } = await run(process.execPath, args, { env, maxBuffer: 64 * 1024 * 1024, ...options });
-    await writeFile(log, `## ${label}\n${stdout}\n${stderr}\n`, { flag: "a" });
-  } catch (error) {
-    await writeFile(log, `## ${label} (failed)\n${error.stdout ?? ""}\n${error.stderr ?? ""}\n`, { flag: "a" });
-    console.error(`smoke: ${label} failed: ${error.message.split("\n")[0]}\n       log: ${log}`);
-    process.exit(1);
-  }
-}
-
-await step("prepare profile", [join(repoRoot, "apps/cli/dist/main.js"), "install", "--prepare-only"]);
-const manifestPath = join(home, "profiles", PROFILE, "package.json");
-const manifest = JSON.parse(await readFile(manifestPath, "utf8"));
-for (const { name } of SHARED_BUNDLES) delete manifest.dependencies[name];
-manifest.dsh.profile.bundles = manifest.dsh.profile.bundles.filter((bundle) => !SHARED_BUNDLES.some((shared) => shared.name === bundle));
-await writeFile(manifestPath, `${JSON.stringify(manifest, null, 2)}\n`);
-
-const dsh = await dshBin();
-await step("install profile", [dsh, "plugin", "--profile", PROFILE, "install"], { env: { ...env, npm_config_ignore_scripts: "true" } });
+const { home, workspace, env, log, dsh, step } = await prepareProfile("chopin-smoke-");
 
 const bundleDir = join(repoRoot, "packages/bundle");
 const bundleManifest = JSON.parse(await readFile(join(bundleDir, "package.json"), "utf8"));

@@ -24,7 +24,7 @@ did this does not.
 
 ## 安装
 
-需要 Node 22.19+ 或 24，pnpm 12。chopin 为自己生成的可执行代码只在 macOS 上运行。
+需要 Node 24.8+（当前的 LTS 版本线），pnpm 12。chopin 为自己生成的可执行代码只在 macOS 上运行。
 
 ```bash
 pnpm install --frozen-lockfile --ignore-scripts
@@ -49,6 +49,7 @@ pnpm exec chopin           # 终端界面；`chopin web` 打开网页界面
 | `CHOPIN_REPO_PATH` | 要处理的项目（默认：当前目录） |
 | `CHOPIN_TEST_COMMAND`、`CHOPIN_BUILD_COMMAND`、`CHOPIN_LINT_COMMAND` | 项目自己的检查命令（默认：pnpm 脚本） |
 | `CHOPIN_LEDGER_DIR` | 已批准结论的存放处（默认 `~/.chopin/ledger`） |
+| `CHOPIN_TEAM_DIR` | 团队模式的事件日志（默认 `~/.chopin/team`） |
 | `CHOPIN_GITHUB_REPO` | issue 历史用的 `owner/repo` |
 | `CHOPIN_SOURCES_FILE` | 要轮询的信号源（模板见 `examples/sources.example.yaml`） |
 | `CHOPIN_LLM_PROXY` | 模型端点的代理 |
@@ -107,6 +108,31 @@ pnpm exec chopin           # 终端界面；`chopin web` 打开网页界面
 `chopin service` 生成 launchd plist（装不装由你），回合在瞬时故障后自动续跑，`ralph` 跑长任务，
 `schedule_*` 工具按时执行。进化只在你在场时发生。
 
+## 团队模式
+
+一个项目上并行跑多个 worker，你只和一个主会话（master）说话。在项目目录里开一个 chopin 会话，终端或网页都行：它先用
+`grilling` 和你逐题定方案，再提交一批结构化任务。验收任务先把定好的验收标准写成可执行检查，检查写好后由你批准整批，
+批准时会显示本批的请求数上限。之后由确定性的编排器接管：每个任务在自己的工作树槽位里按轮次起全新、有上限的 worker，
+每一轮都是主会话的子 agent，在 `/tasks` 里能实时看到。改动超出任务的写入范围就拦下，把改动变基到主干后提交在任务自己
+的分支上，由你合并；提交进入主干才算完成。需要你决定的事都在主会话里等你。关掉主会话，进行中的轮次会暂停；重新打开它，
+或在项目里新开会话，就接着跑。第二个会话只能旁观，你明确要求接管时才切过去。什么都不删：暂停的工作保存在任务分支上。
+
+项目在 `.chopin/team.yaml` 里描述自己：
+
+```yaml
+slots:                          # 你建好的工作树，同一时间一个槽位只跑一个任务
+  - { name: slot-1, path: ../myproject-1 }
+  - { name: slot-2, path: ../myproject-2 }
+checks:                         # 改了哪些路径，就要通过哪些检查
+  - { paths: ['packages/api/**'], run: pnpm --filter api test }
+fullCheck: { run: pnpm test }   # 每批跑一次；写 `{ where: ci }` 则交给 CI
+delivery: local                 # 默认；push 直推主干，pull-request 推送任务分支
+stages:                         # 进入主干之后的阶段；没有 verify 的阶段由你确认
+  - { name: deployed, verify: ./scripts/deployed.sh {commit} }
+```
+
+槽位不要放在系统临时目录下：每个 worker 的沙箱都可以写那里。
+
 ## 开发
 
 ```bash
@@ -115,6 +141,7 @@ pnpm test                 # 单元测试
 pnpm test:e2e             # 真实 dsh 组合
 pnpm check:composition    # 每一行都装得出来，每条门禁都点名真实工具
 pnpm smoke:composition    # 在临时运行配置里挂一遍整套组合
+pnpm e2e:team             # 团队模式端到端：临时运行配置 + 脚本化的假模型
 ```
 
 架构与约定见 `CLAUDE.md`。

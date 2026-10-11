@@ -19,6 +19,8 @@
  *
  * Ring once only when the turn really ends, and only when it took longer than the
  * threshold -- after a turn that returns in seconds the person is still looking at the screen.
+ * Sessions no person has spoken in, such as team workers, end their turns without a sound; a
+ * team task that stops for a decision does make one.
  *
  * @module @chopin/notify
  */
@@ -28,6 +30,8 @@ import { platform } from "node:process";
 import type { Context } from "@deepseek-ai/cordis";
 // Imported so the agent/status event declaration enters the type system: dsh-agent registers it via module augmentation
 import type { Agent, AgentStatus } from "@deepseek-ai/dsh-agent";
+import type {} from "@deepseek-ai/dsh-agent-loop";
+import type {} from "@chopin/team-runtime";
 
 export const name = "chopin-notify";
 
@@ -48,6 +52,20 @@ export function humanDuration(ms: number): string {
   if (seconds < 60) return `${seconds}s`;
   const minutes = Math.floor(seconds / 60);
   return seconds % 60 === 0 ? `${minutes}m` : `${minutes}m${seconds % 60}s`;
+}
+
+/** Whether a person has typed into this session; only their turns are worth a sound. */
+export function spokenByPerson(events: readonly { type: string; data: unknown }[]): boolean {
+  return events.some((event) => event.type === "user/message" && (event.data as { source?: { kind?: string } }).source?.kind === "user");
+}
+
+/** Get the person's attention: the bell, then the multiplexer, or a system notification without one. */
+export function alert(label: string, message: string): void {
+  ring();
+  feedMultiplexer(`${label}: ${message}`, (ok) => {
+    // Fall back to the system notification only when the multiplexer is unavailable, so one event does not pop twice
+    if (!ok && platform === "darwin") notifyDesktop(`chopin · ${label}`, message);
+  });
 }
 
 /** Write a BEL. Bypasses the notification center, so permissions and host identity do not matter */
@@ -95,6 +113,10 @@ export function apply(ctx: Context): void {
   // disappears when the agent is collected, no cleanup needed on disposed.
   const startedAt = new WeakMap<Agent, number>();
 
+  ctx.on("chopin-team/attention", (root, task) => {
+    alert(workspaceLabel(root), `${task.spec.id} waits for a decision: ${task.attention?.reason ?? "attention"}`);
+  });
+
   ctx.on("agent/status", (payload: { agent: Agent; status: AgentStatus }) => {
     const { agent, status } = payload;
     if (status === "running") {
@@ -109,15 +131,8 @@ export function apply(ctx: Context): void {
     if (began === undefined) return;
 
     const elapsed = Date.now() - began;
-    if (elapsed < QUIET_BELOW_MS) return;
+    if (elapsed < QUIET_BELOW_MS || !spokenByPerson(agent.session.snapshotEvents())) return;
 
-    ring();
-
-    const label = workspaceLabel((ctx as { cwd?: string }).cwd ?? process.cwd());
-    const message = `Turn finished in ${humanDuration(elapsed)}`;
-    feedMultiplexer(`${label}: ${message}`, (ok) => {
-      // Fall back to the system notification only when the multiplexer is unavailable, so one event does not pop twice
-      if (!ok && platform === "darwin") notifyDesktop(`chopin · ${label}`, message);
-    });
+    alert(workspaceLabel((ctx as { cwd?: string }).cwd ?? process.cwd()), `Turn finished in ${humanDuration(elapsed)}`);
   });
 }

@@ -162,7 +162,7 @@ export class RsiExecutor extends Service implements ExperimentCoordinator {
   private async runtimeDigest(): Promise<string> {
     const modules = ["rsi-engine", "rsi-project", "rsi-project-worker", "rsi-session", "rsi-context", "rsi-capability", "rsi-host", "rsi-trial", "rsi-replay", "rsi-search", "rsi-input", "rsi-check", "rsi-history", "rsi-generation", "rsi-evidence"];
     const sources = await Promise.all(modules.map(module => readFile(new URL(`./${module}.js`, import.meta.url), "utf8")));
-    for (const name of ["@chopin/evolution", "@chopin/evolution-runtime", "@chopin/plugin-adapter", "@chopin/plugin-sandbox"]) {
+    for (const name of ["@chopin/journal", "@chopin/evolution", "@chopin/evolution-runtime", "@chopin/plugin-adapter", "@chopin/plugin-sandbox"]) {
       const root = new URL(".", import.meta.resolve(name));
       const files = (await readdir(root, { withFileTypes: true })).filter(file => file.isFile() && file.name.endsWith(".js"))
         .map(file => file.name).sort();

@@ -10,7 +10,7 @@
   "packageManager": "pnpm@12.4.1",
   "type": "module",
   "engines": {
-    "node": "^22.19.0 || >=24.0.0"
+    "node": ">=24.8.0"
   },
   "scripts": {
     "build": "tsc -b",
@@ -19,6 +19,7 @@
     "test:e2e": "vitest run --config vitest.e2e.config.ts",
     "check:composition": "node scripts/check-composition.mjs",
     "smoke:composition": "node scripts/smoke-composition.mjs",
+    "e2e:team": "node scripts/team-e2e.mjs",
     "cache:stats": "node scripts/cache-stats.mjs"
   },
   "devDependencies": {

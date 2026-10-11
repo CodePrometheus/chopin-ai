@@ -21,6 +21,7 @@
     "./verifier": "./dist/verifier.js"
   },
   "dependencies": {
+    "@chopin/journal": "workspace:*",
     "yaml": "^2.9.1"
   },
   "devDependencies": {

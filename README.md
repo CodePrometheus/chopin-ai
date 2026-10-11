@@ -25,7 +25,7 @@ did this does not.
 
 ## Install
 
-Requires Node 22.19+ or 24 and pnpm 12. Executable code chopin generates for itself runs only on macOS.
+Requires Node 24.8+ (the current LTS line) and pnpm 12. Executable code chopin generates for itself runs only on macOS.
 
 ```bash
 pnpm install --frozen-lockfile --ignore-scripts
@@ -50,6 +50,7 @@ Optional, in `~/.dsh/.env`:
 | `CHOPIN_REPO_PATH` | project to work on (default: current directory) |
 | `CHOPIN_TEST_COMMAND`, `CHOPIN_BUILD_COMMAND`, `CHOPIN_LINT_COMMAND` | the project's checks (default: pnpm scripts) |
 | `CHOPIN_LEDGER_DIR` | approved conclusions (default `~/.chopin/ledger`) |
+| `CHOPIN_TEAM_DIR` | team mode logs (default `~/.chopin/team`) |
 | `CHOPIN_GITHUB_REPO` | `owner/repo` for issue history |
 | `CHOPIN_SOURCES_FILE` | signal sources to poll (template `examples/sources.example.yaml`) |
 | `CHOPIN_LLM_PROXY` | proxy for the model endpoint |
@@ -111,6 +112,35 @@ capability that fails more often than it passes is quarantined.
 failures, `ralph` runs long tasks and `schedule_*` tools run on a clock. Evolution happens only while you
 are present.
 
+## Team mode
+
+Several workers on one project while you talk to one lead session. Open a chopin session in the project,
+in the terminal or on the web: it interviews you with `grilling`, then submits a batch of structured
+tasks. Acceptance tasks first turn the agreed criteria into executable checks, and you approve the batch
+once they exist, with its request cap shown. A deterministic engine then runs each task in its own
+worktree slot as fresh, bounded worker rounds. Every round is a sub-agent of the lead session, so `/tasks`
+shows it live. The engine refuses changes outside the task's write scope and commits the work on the
+task's own branch, rebased on the trunk, for you to merge; a task is done once its commit reaches the
+trunk. Whatever needs you waits in the lead session. Close the lead and its rounds pause; open it again,
+or a new session in the project, and they resume. A second session only watches until you ask it to
+take over. Nothing is deleted: paused work stays on its task branch.
+
+The project describes itself in `.chopin/team.yaml`:
+
+```yaml
+slots:                          # worktrees you create, one task each at a time
+  - { name: slot-1, path: ../myproject-1 }
+  - { name: slot-2, path: ../myproject-2 }
+checks:                         # changed paths select the checks a task must pass
+  - { paths: ['packages/api/**'], run: pnpm --filter api test }
+fullCheck: { run: pnpm test }   # once per batch; `{ where: ci }` leaves it to CI
+delivery: local                 # default; push lands on the trunk, pull-request pushes the branch
+stages:                         # after the trunk; a stage without verify is yours to confirm
+  - { name: deployed, verify: ./scripts/deployed.sh {commit} }
+```
+
+Keep slots outside the temporary directory: every worker sandbox may write there.
+
 ## Development
 
 ```bash
@@ -119,6 +149,7 @@ pnpm test                 # unit tests
 pnpm test:e2e             # real dsh compositions
 pnpm check:composition    # every row resolves, every gate names a real tool
 pnpm smoke:composition    # mount the whole composition in a throwaway profile
+pnpm e2e:team             # team mode end to end in a throwaway profile, scripted model
 ```
 
 Architecture and conventions are in `CLAUDE.md`.

@@ -11,6 +11,7 @@
     "chopin": "./dist/main.js"
   },
   "dependencies": {
+    "@chopin/journal": "workspace:*",
     "@chopin/evolution": "workspace:*",
     "@chopin/evolution-runtime": "workspace:*",
     "@chopin/ledger": "workspace:*",

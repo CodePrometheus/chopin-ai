@@ -30,6 +30,7 @@
     "@chopin/report": "workspace:*",
     "@chopin/retry": "workspace:*",
     "@chopin/signal": "workspace:*",
+    "@chopin/team-runtime": "workspace:*",
     "@chopin/tool-ledger": "workspace:*",
     "@chopin/tool-session": "workspace:*",
     "@chopin/toolset": "workspace:*",
