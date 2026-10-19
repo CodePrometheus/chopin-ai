@@ -1,0 +1,24 @@
+{
+  "name": "@chopin-ai/workspace",
+  "version": "0.2.0",
+  "description": "Per-user workspace lifecycle interface with directory and container implementations",
+  "license": "Apache-2.0",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/CodePrometheus/chopin-rsi.git",
+    "directory": "packages/workspace"
+  },
+  "type": "module",
+  "engines": {
+    "node": ">=24.8.0"
+  },
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "default": "./dist/index.js"
+    }
+  },
+  "files": [
+    "dist"
+  ]
+}
