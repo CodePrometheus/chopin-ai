@@ -1,0 +1,7 @@
+# Mounts the adapter. The layer is a volume an evaluation fills; each session's transcript lands under /tmp.
+- insert:
+    - id: chopin-harness
+      name: '@chopin-ai/harness-dsh'
+      config:
+        layer: /opt/chopin/layer
+        transcripts: /tmp/chopin-transcripts

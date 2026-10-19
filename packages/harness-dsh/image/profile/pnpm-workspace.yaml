@@ -1,0 +1,5 @@
+
+# The adapter's own packages ship in the image, not on a registry.
+overrides:
+  '@chopin-ai/core': file:/opt/chopin/packages/chopin-ai-core.tgz
+  '@chopin-ai/workspace': file:/opt/chopin/packages/chopin-ai-workspace.tgz
