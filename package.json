@@ -1,6 +1,6 @@
 {
-  "name": "chopin-rsi",
-  "description": "An RSI (recursive self-improvement) executor built on DeepSeek Harness",
+  "name": "chopin-ai-monorepo",
+  "description": "A self-improving coding agent with a harness-agnostic RSI core",
   "repository": {
     "type": "git",
     "url": "git+https://github.com/CodePrometheus/chopin-rsi.git"
@@ -13,61 +13,13 @@
     "node": ">=24.8.0"
   },
   "scripts": {
-    "build": "tsc -b",
-    "typecheck": "tsc -b && node scripts/typecheck-tests.mjs",
-    "test": "vitest run",
-    "test:e2e": "vitest run --config vitest.e2e.config.ts",
-    "check:composition": "node scripts/check-composition.mjs",
-    "smoke:composition": "node scripts/smoke-composition.mjs",
-    "e2e:team": "node scripts/team-e2e.mjs",
-    "cache:stats": "node scripts/cache-stats.mjs"
+    "build": "tsc -b && pnpm --filter @chopin-ai/web build",
+    "typecheck": "tsc -b && tsc -p tsconfig.test.json && tsc -p apps/web",
+    "test": "vitest run"
   },
   "devDependencies": {
-    "@deepseek-ai/cordis": "4.0.4",
-    "@deepseek-ai/cordis-plugin-include": "1.0.9",
-    "@deepseek-ai/cordis-plugin-loader": "1.0.5",
-    "@deepseek-ai/cordis-plugin-logger-console": "1.0.4",
-    "@deepseek-ai/dsh-agent": "0.2.0-rc.2",
-    "@deepseek-ai/dsh-agent-loop": "0.2.0-rc.2",
-    "@deepseek-ai/dsh-app-boot": "0.2.0-rc.2",
-    "@deepseek-ai/dsh-commands": "0.2.0-rc.2",
-    "@deepseek-ai/dsh-llm": "0.2.0-rc.2",
-    "@deepseek-ai/dsh-loader-smoke": "0.2.0-rc.2",
-    "@deepseek-ai/dsh-session": "0.2.0-rc.2",
-    "@deepseek-ai/dsh-session-checkpoint-policy": "0.2.0-rc.2",
-    "@deepseek-ai/dsh-session-persistence-jsonl": "0.2.0-rc.2",
-    "@deepseek-ai/dsh-session-projection": "0.2.0-rc.2",
-    "@deepseek-ai/dsh-subagent": "0.2.0-rc.2",
-    "@deepseek-ai/dsh-subagent-spawn-in-process": "0.2.0-rc.2",
-    "@deepseek-ai/dsh-system-prompt": "0.2.0-rc.2",
-    "@deepseek-ai/dsh-tools": "0.2.0-rc.2",
-    "@deepseek-ai/dsh-user-approval": "0.2.0-rc.2",
     "@types/node": "^24.13.4",
-    "@xmoon76/dsh-pi-tui": "0.5.0",
     "typescript": "^7.0.2",
     "vitest": "^5.0.0"
-  },
-  "dependencies": {
-    "@chopin/cli": "workspace:*",
-    "@chopin/evidence": "workspace:*",
-    "@chopin/evolution": "workspace:*",
-    "@chopin/evolution-authoring": "workspace:*",
-    "@chopin/evolution-observer": "workspace:*",
-    "@chopin/evolution-runtime": "workspace:*",
-    "@chopin/gate": "workspace:*",
-    "@chopin/ledger": "workspace:*",
-    "@chopin/memos-quiet": "workspace:*",
-    "@chopin/plugin-sdk": "workspace:*",
-    "@chopin/plugin-adapter": "workspace:*",
-    "@chopin/plugin-sandbox": "workspace:*",
-    "@chopin/report": "workspace:*",
-    "@chopin/signal": "workspace:*",
-    "@chopin/tool-ledger": "workspace:*",
-    "@chopin/tool-session": "workspace:*",
-    "@chopin/toolset": "workspace:*",
-    "@chopin/ultra-mode": "workspace:*",
-    "@deepseek-ai/dsh": "0.2.0-rc.2",
-    "@deepseek-ai/dsh-agent-preset": "0.2.0-rc.2",
-    "yaml": "^2.9.1"
   }
 }

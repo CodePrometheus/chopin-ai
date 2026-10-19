@@ -4,7 +4,7 @@ dist/
 .DS_Store
 .idea
 
-# Credentials and secrets: no token ever enters the repo; everyone uses their own
+# No credential ever enters the repository
 *.token
 token.json
 *.key
@@ -12,10 +12,8 @@ token.json
 .env.*
 auth.json
 
-# Machine-local config and runtime output
+# Machine-local configuration
 config/local.*
-# Anchored to the root so it never matches the packages/ledger/ source package.
-/ledger/
 
-# Working notes (plan / todo), local only
+# Working notes (plan, todo), local only
 .agents/

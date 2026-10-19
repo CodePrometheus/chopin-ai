@@ -1,107 +1,62 @@
-# chopin-rsi
+# chopin-ai
 
-An RSI (recursive self-improvement) executor: built for one long-running engineering project, and it changes itself
-while doing that project.
-**One mission (task type) = one preset patch**; root-cause investigation is only one of them.
-Gates, the ledger and running unattended are not three parallel features but the preconditions for
-self-evolution: gates trust only the tool-call log, conclusions settle into a ledger that is searchable
-across sessions, and without both, a system that edits itself only drifts further each round.
-**The code carries no product knowledge** — onboarding a project means writing configuration, not code.
+A self-improving coding agent. Its RSI (recursive self-improvement) core is harness-agnostic: it improves the
+agent by changing a mutable layer, and a change is accepted only when a sealed evaluator says so. Two harnesses
+are first-class targets, each behind its own adapter.
 
-Task progress lives in `.agents/todo.md` (local, not in git).
+The design record is `.agents/plan-oss-agent.md` and task progress lives in `.agents/todo.md` (both local, not
+in git). `v0.1.0` archives the previous design; nothing from it is carried over.
 
 ## Architecture
 
-chopin is **a set of dsh (DeepSeek Harness) plugins + one bundle + preset patches**, not a standalone
-agent. The agent loop, sessions, persistence, UI, skill loading and model access all come from dsh;
-chopin only writes the few things that are its own.
+pnpm monorepo, split by boundary rather than by feature:
 
-A mission is a `dsh-agent-preset` declaration in `packages/bundle/presets/<name>/preset.patch.yml`,
-listed in the bundle manifest's `dsh.bundle.patch`. Adding a kind of work is adding a patch, not code.
-Today there is one preset, `chopin`: one identity, every tool, four submission tools each carrying its
-own gates (root-cause report, delivery, evolution, curation).
+- `packages/core` — harness-agnostic: mutable-layer formats, ACP events with `_meta` extensions, evaluation and
+  acceptance, the `chopin` commands. It imports no harness.
+- `packages/workspace` — the per-user workspace lifecycle (provision, pause and resume, idle reclaim, persistent
+  volume, isolation, connection) and its local container implementation. Cloud implementations belong to
+  integrators.
+- `packages/harness-pi` — the durable harness: an agent service that keeps one store per user outside the
+  workspace and runs tools inside it through the execution daemon, the client protocol with its client library,
+  and the ACP bridge.
+- `packages/harness-dsh` — the plugin harness: one plugin that loads the mutable layer, and headless task runs.
+- `apps/web` — the browser UI, a client of the protocol.
+- `apps/tui` — the `chopin` command, published as `chopin-ai`. Local use takes no options: the current directory is
+  the workspace, each project's service runs in the background, owned by no terminal, which every `chopin`, browser
+  and editor joins, and providers and models are picked in the terminal. `chopin serve` runs container workspaces for
+  shared use.
 
-Two planes, with a hard boundary:
+Every adapter does exactly three things: load the mutable layer, run one task headless and return its transcript
+and workspace diff, and convert transcripts to ACP events. Anything else a harness offers stays in its adapter.
 
-- **Host plane** (`packages/bundle/cordis.patch.yml`) holds only services and cross-session registries.
-- **Agent plane** (the preset patches) holds model-facing tools, identity and gate rules. A service row
-  in a preset lands in the root realm; the second session mounting the same preset collides, and dsh
-  rejects the mount outright.
+## Hard constraints
 
-pnpm monorepo:
-
-- `packages/gate` — gates: `ctx.chopinGates`, blocking submissions through the monotonic `ctx.tools.guard()`
-- `packages/report` — the core declaration of a mission: output shape + what must have happened before submission (one configuration row)
-- `packages/ledger` — error-string normalization, the conclusion ledger service `ctx.chopinLedger`
-- `packages/tool-ledger` — `ledger_search` / `ledger_write` (writes go through approval)
-- `packages/tool-session` — deterministic signals from session logs (scrubbing, normalized merging, cross-session counting) + pending-area tools
-- `packages/toolset` — declarative YAML tools: loading, prerequisites, template execution, output budgets → `ctx.tools`
-- `packages/evidence` — evidence bundle download and extraction, Pi harness trace parsing (native tools)
-- `packages/signal` — source adapters and deterministic triage: `ctx.chopinSignals` service + `triage_run` tool
-- `packages/journal` — the authoritative JSONL log shared by evolution and team mode: cross-process lock, replay validation before every append
-- `packages/evolution` — authoritative JSONL events, Candidate/ArtifactVersion state machines, CAS, receipts and feedback verdicts
-- `packages/evolution-observer` — appends real failure evidence from committed session events; records session outcomes at turn end and folds them into the cumulative feedback window
-- `packages/evolution-authoring` — Candidate classification and controlled staging tools; `evolution_correction_record` turns a user correction into evidence through approval; source revisions are generated by the host
-- `packages/evolution-runtime` — experience index (trigger `when` + structured hard filters) and `experience_read`, exact approval, `advance()` (host-driven: verify / deploy / retire / resolved), the evolution queue, session outcomes and the host feedback API
-- `packages/plugin-sdk` — the stable ABI generated capabilities depend on; exposes no DSH prerelease types
-- `packages/plugin-sandbox` — OS subprocess + VM module isolation for executable capabilities, and the fixture runner
-- `packages/plugin-adapter` — registers sandboxed context/guard/tool proxies with DSH; hot-activates and rolls back in-process at model step boundaries
-- `packages/ultra-mode` — `/mode ultra|standard`; max reasoning + 2–3 bounded parallel DSH workers, standard effort restored from JSONL
-- `packages/team` — team mode's deterministic core, free of dsh: task and event model, fold, scheduler, completion gates, host-side git and the orchestration engine
-- `packages/team-runtime` — team mode as a dsh plugin that needs nothing else from chopin: the service `ctx.chopinTeam`, a sub-agent provider that runs each worker round as a one-shot sub-agent of the session leading the team, the worker's `team_check`/`team_report`, and the lead's preset row (`/lead`)
-- `packages/memos-quiet` — silences MemOS terminal logging (it reads no configuration in embedded mode); runs as a `node --import` preload
-- `packages/notify`, `packages/retry` — end-of-turn notice; one retry of transient tool failures
-- `packages/bundle` — the chopin bundle: `dsh.bundle.patch` host composition plus the preset patches under `presets/`
-- `apps/cli` — the entry point and the RSI experiment host: `chopin` opens the terminal UI (profile `chopin-tui`), `chopin web` the web UI (profile `chopin`);
-  `chopin service` generates a launchd plist (the process layer for unattended runs; it only writes the file, never runs `launchctl` for you);
-  `chopin install` prepares both profiles, links the plugin packages and writes the model catalog; development hot reload is opt-in through `CHOPIN_HMR=1`
-- The default model is overridden to Claude by the bundle (`agent-default-model` row); the base default is DeepSeek, and without the override the wrong model is used
-- `toolsets/` — shared tool definitions; `config/` — the model catalog and the evolution reconcile composition
-
-The base is pinned to `0.2.0-rc.2`, consumed as published packages; upstream dependencies are not part of
-this workspace. First-time setup follows the README and needs no locally produced packages. When checking
-for releases read each package's own dist-tags; do not assume all tags move together.
-After upgrading dependencies always run `pnpm exec tsc -b --force` to re-check every cross-package interface.
-
-## Hard architectural constraints
-
-- **No package may contain product names or internal information** (organization names, internal hostnames, cluster names, absolute paths). These belong only in configuration (environment variables, the sources file, toolset YAML), with paths as `${ENV_VAR}`
-- **No token or secret enters the repository**; always `${ENV_VAR}`. Credentials are per person and never shared
-- Ledger lookup is exact match only; no vector or semantic search — a false recurrence link is worse than no memory
-- Ledger writes happen only after user approval, enforced in code: an approval the user spoke in the session log, else dsh's approval prompt (`ledger_write` asks); never by process convention
-- The ledger is not partitioned by mission: what engineering leaves behind is exactly what root-cause needs next time
-- Experience has three layers: MemOS (conversational facts, automatic), the pending area (candidates; curation writes freely because it is not trusted anyway), and the ledger (conclusions; `ledger_write` through approval). Admission guards only the last layer — let candidates into the ledger directly and the ledger stops being "what you signed off on"
-- Signal extraction from session logs is deterministic; the model never reads raw logs: they contain credentials and their value density is too low
-- The evolution JSONL is the only authority; every append replays and validates old history + the new event inside one cross-process lock. Never write around the Store
-- Team mode follows the same rule with its own log. Workers never commit or push: the host delivers after re-running the completion gate, and done means a commit reachable from the trunk. The engine runs in the process of the session leading the team, and workers are its one-shot sub-agents with only their slot writable, approvals asked of the person under a timeout, and lead-only tools refused
-- A batch runs only after the person approves it, once its acceptance checks exist; those checks are pinned by content and land with the change they gate
-- Assistant self-reports are not trusted evidence; the model may not submit feedback aggregates, approval receipts or rollback targets
-- An executable capability must be bound to an exact fixture and user approval, and canaried in a new generation's OS sandbox. A smoke mount is not promotion evidence, and the controller's canary/active receipts cannot be self-certified by the current production process; only after the controller confirms active may the production adapter hot-mount at a model step boundary and write a runtime-loaded receipt for the current process generation
-- Trust and enabled are separate: without eligible exposure a capability can only be inactive; trusted comes only from host-owned feedback receipts
-- Prefer the highest-starred community plugin, but check contributor count, issue throughput and whether there is an in-tree dsh adapter — projects with similar stars can be entirely different things
-- Gate satisfaction is derived only from the session log, and only from calls that completed successfully; model self-reports do not count
-- Gates must use `ctx.tools.guard()` (the monotonic guard), not the `tools/pre-execute` waterfall — a waterfall decision can be relaxed by a later listener, and a discipline another plugin can relax is not a discipline
-- The guard is registered by the row that declares the gates (`@chopin/report`), scoped to the caller; no flat host-level registry — dsh lets several generations of the same preset coexist in one process, and a flat table collides on the second generation
-- If none of the tools a gate names is registered, that is a configuration error, not an ordinary denial; otherwise the mission deadlocks forever
-- The signal layer (triage) is deterministic code; no LLM and no MCP
-- An unavailable source is marked skip/error with a reason, never swallowed silently
-- **Skill text is the methodological authority and is never condensed**: skill content is not summarized into the system prompt or rewritten as code — condensing loses detail and drifts when the original updates. The system prompt keeps only identity, output shape and gate descriptions
-- Read-only is not a global constraint and is not enforced by hiding tools: the one preset carries every tool, and discipline lives in the gates (what must have been called successfully), not in the tool surface. Writes still go through dsh approval
-- Repository clones used for investigation are never written to
-- Credentials live in dsh's credential store or `ANTHROPIC_API_KEY`; chopin stores no tokens
-- The model endpoint proxy comes from `CHOPIN_LLM_PROXY` (process environment or `$DSH_HOME/.env`); the `chopin` entry injects it as `HTTPS_PROXY` into the dsh process environment and dsh applies it to every `fetch`. It cannot be `HTTPS_PROXY` inside `.env`: the dsh launcher refuses proxy variables from `.env` layers by design, so a bare `dsh --profile` launch is not proxied — always start through `chopin`, including `chopin --session <id>`
-
-- Do not reinvent what dsh already has: a mission is an agent preset, scheduling is dsh's schedule, approval is `ctx.approval`
-- Unattended operation has four layers: process (launchd), turn (auto-continue), long task (ralph), schedule (schedule). The UI bundle disables dsh's own rows for these; the chopin layer re-enables them — the engines live on the host plane, the tool surface in the preset
-- `tool-cordis` is read-only runtime inspection (`cordis_inspect_*`); persistent change is only ever a repository file. The evolution submission gate requires `chopin_smoke`: the whole composition mounted in a real profile after the build
-- The durable form of self-evolution is repository files + PR only
+- The mutable layer has two tiers. Portable: skills (`<name>/SKILL.md`), AGENTS.md instructions, MCP servers and
+  gate rules, shared by both harnesses; a change is accepted only if neither harness regresses and at least one
+  improves. Native: a harness's own code, delivered as a pull request and evaluated on that harness alone.
+- Evaluation runs the same tasks and verifiers on both harnesses, each against its own baseline and noise band,
+  in sandboxes obtained only through the workspace interface.
+- What the agent must not change stays out of its reach: credentials, conversation storage, the evaluator and its
+  tasks, memory. The plugin harness still shares a container with its agent, and local single-user mode runs the
+  agent as the user; those are known exceptions, not precedents, and evaluation runs in container workspaces.
+- A store belongs to one process at a time; scale out by assigning users to processes.
+- Identity comes from short-lived tokens signed by the integrator and verified with its public key. Local
+  single-user mode moves a launch token from the address into an `HttpOnly` cookie, and a WebSocket from another
+  origin is refused. There are no accounts.
+- Both harnesses reach models through the same model library. Credentials are per person, injected by the
+  integrator, and never stored in the repository.
+- Prefer open standards to formats of our own: ACP for events and integration, Agent Skills, AGENTS.md, MCP.
+- No product names, internal information, secrets or absolute paths in code; configuration comes from the
+  environment.
+- A dependency is added when code first uses it, not ahead of time.
 
 ## Conventions
 
-- Comments are written in English; identifiers, logs and error messages are English
-- File and directory names are kebab-case
-- Cross-package references go through package.json export subpaths (`@chopin/ledger/store`)
-- A plugin package's default export is the cordis loader's framework contract — the one exception to "no default exports"
-- Async I/O only (`fs/promises`), no sync variants
-- Named exports, no default exports; type imports use `import type`
-- Toolsets are declarative YAML first; native ToolDefinitions only for what a shell template cannot express (such as trace parsing)
+- English everywhere: comments, identifiers, logs, errors, docs and commit messages.
+- File and directory names are kebab-case.
+- Named exports only, except a default export a tool requires, such as its config file; an import of types alone
+  uses `import type`, and one that mixes values and types marks its types inline.
+- Async I/O only (`fs/promises`).
+- Cross-package imports go through package exports.
+- Comments state intent and constraints; history belongs in commit messages.
+- Tests live in `<package>/tests/*.spec.ts`, or `*.spec.tsx` for those that render components.

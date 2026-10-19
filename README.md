@@ -1,159 +1,60 @@
-# chopin-rsi
+# chopin-ai
 
-[中文](README.zh-CN.md)
+A coding agent built to improve itself. Its RSI (recursive self-improvement) loop is meant to change a mutable
+layer of skills, instructions, tools and harness code, and to accept a change only when a sealed evaluator, which
+the agent cannot touch, shows that it helps.
 
-Chopin is an RSI (recursive self-improvement) executor built on [DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness) (dsh).
-It drives a long-running engineering project and improves itself along the way, under gates that trust
-only the tool-call log.
+> **Status:** `v0.2.0` ships the agent, both harness adapters, the workspace layer and the mutable-layer formats.
+> The RSI loop itself is not built yet. [`v0.1.0`](https://github.com/CodePrometheus/chopin-ai/releases/tag/v0.1.0)
+> archives the previous design.
 
-dsh provides the agent loop, sessions, UI, skills and model access. Chopin adds:
+## Design
 
-- **Gates**: a submission is refused until the session log shows the required tool calls succeeded.
-- **Ledger**: conclusions persist across sessions, are searched by exact match, and are written only with your approval.
-- **Evolution**: chopin changes itself only through repository files that pass its own checks.
-- **Config, not code**: onboarding a project is YAML.
+- **Harness-agnostic core.** Two harnesses are first-class targets. Each adapter only loads the mutable layer,
+  runs tasks headless and converts transcripts to ACP events.
+- **Open formats.** Skills follow Agent Skills, instructions follow AGENTS.md, tools are MCP servers and
+  transcripts are ACP events, so an improvement can be measured on other agents too.
+- **A workspace per user.** A lifecycle interface for isolated, persistent workspaces; a local container
+  implementation ships, and cloud implementations plug in.
+- **Built for integrators.** Identity comes from the integrator's signed tokens, credentials are injected per
+  person, and agents are reachable through a client protocol or ACP.
 
-A refused submission:
-
-```
-Rejected by 1 unmet investigation gate(s):
-- recurrence-ledger: Search the defect ledger first. Recurring N times means the previous
-  N-1 fixes were at the wrong layer, which changes what counts as a root cause here.
-Satisfy them with real tool calls. Only the tool-call log counts; stating that you already
-did this does not.
-```
-
-## Install
-
-Requires Node 24.8+ (the current LTS line) and pnpm 12. Executable code chopin generates for itself runs only on macOS.
+## Usage
 
 ```bash
-pnpm install --frozen-lockfile --ignore-scripts
-pnpm build
-pnpm exec chopin install   # prepare the dsh profiles
-pnpm exec chopin           # terminal UI; `chopin web` for the browser
+cd my-project
+chopin        # talk to an agent working in this directory
+chopin web    # the same conversation in the browser
+chopin acp    # for editors and other ACP clients
+chopin login  # connect a provider by its sign-in or an API key
 ```
 
-Put `ANTHROPIC_API_KEY` in `~/.dsh/.env`, or use `/login` in the UI; any credential is subject to its
-provider's terms. Always start through `chopin`, including `chopin --session <id>` to resume: it applies
-the proxy and preloads. `/mode ultra` adds parallel workers to the current session.
+The first run connects a provider and picks a model. In a conversation, `/login` and `/logout` manage providers and
+`/model` switches the model; a provider's usual environment variable works too.
 
-Install turns off the bundled memory plugin's usage telemetry. Feedback you submit in the UI uploads that
-session to dsh's collector; set `DSH_TELEMETRY_DISABLED=1` to turn that off too.
+`chopin serve` runs agents in containers instead, for shared or remote use; build its workspace image first with
+`pnpm --filter @chopin-ai/harness-pi image`.
 
-### Configuration
+## Packages
 
-Optional, in `~/.dsh/.env`:
-
-| Variable | Meaning |
+| Package | Purpose |
 |---|---|
-| `CHOPIN_REPO_PATH` | project to work on (default: current directory) |
-| `CHOPIN_TEST_COMMAND`, `CHOPIN_BUILD_COMMAND`, `CHOPIN_LINT_COMMAND` | the project's checks (default: pnpm scripts) |
-| `CHOPIN_LEDGER_DIR` | approved conclusions (default `~/.chopin/ledger`) |
-| `CHOPIN_TEAM_DIR` | team mode logs (default `~/.chopin/team`) |
-| `CHOPIN_GITHUB_REPO` | `owner/repo` for issue history |
-| `CHOPIN_SOURCES_FILE` | signal sources to poll (template `examples/sources.example.yaml`) |
-| `CHOPIN_LLM_PROXY` | proxy for the model endpoint |
-| `CHOPIN_USER_INSTRUCTIONS` | your rule files as a JSON array (default `~/.claude/CLAUDE.md` if present) |
-| `CHOPIN_CLAUDE_SKILLS_DIR` | extra skill directory (default `~/.claude/skills`) |
-| `CHOPIN_HMR=1` | hot reload while developing chopin |
-
-## Onboarding a project
-
-Project constants are the variables above. Signal sources (issues, logs, error monitoring) go in the file
-named by `CHOPIN_SOURCES_FILE`. Commands are YAML toolsets in `toolsets/`, enabled by name in the
-preset's `chopin-toolset` row. Hand-written playbooks go in `~/.agents/skills/` and are used verbatim.
-
-```yaml
-- name: repo_show_at_tag
-  description: Show a file as it was at a release tag.
-  command: git -C ${REPO_PATH} show {{tag}}:{{path}}
-  params:
-    tag: { description: the release tag }
-    path: { description: repo-relative file path }
-  outputBudgetBytes: 32768
-```
-
-`${VAR}` is a config constant. `{{param}}` is model input, single-quoted, and refused if it starts with
-`-` unless marked `allowLeadingDash: true`. A toolset whose prerequisites fail is not registered and is
-named in the log.
-
-## Adding a mission
-
-A mission is one `@chopin/report` row in the preset: its output schema and its gates.
-
-```yaml
-- id: chopin-report-root-cause
-  name: '@chopin/report'
-  config:
-    tool:
-      name: submit_root_cause_report
-      description: File the finished analysis.
-      parameters: { type: object, required: [problem, rootCause], properties: { ... } }
-    gates:
-      - id: recurrence-ledger
-        description: Search the defect ledger first.
-        satisfiedByTools: [ledger_search]
-```
-
-Then run `pnpm check:composition`: it fails if a gate names a tool nothing provides.
-
-## How chopin evolves
-
-Experience climbs from MemOS facts to pending candidates to the ledger you approved; a recurring lesson
-becomes a toolset or a gate rule. `submit_evolution` requires a runtime contract query, a full mount in a
-throwaway profile, chopin's tests and a diff review. Generated executable code runs sandboxed, needs your
-approval and is canaried before it goes live. Gate changes never activate automatically, and a deployed
-capability that fails more often than it passes is quarantined.
-
-## Unattended operation
-
-`chopin service` writes a launchd plist (loading it is your call), turns auto-continue after transient
-failures, `ralph` runs long tasks and `schedule_*` tools run on a clock. Evolution happens only while you
-are present.
-
-## Team mode
-
-Several workers on one project while you talk to one lead session. Open a chopin session in the project,
-in the terminal or on the web: it interviews you with `grilling`, then submits a batch of structured
-tasks. Acceptance tasks first turn the agreed criteria into executable checks, and you approve the batch
-once they exist, with its request cap shown. A deterministic engine then runs each task in its own
-worktree slot as fresh, bounded worker rounds. Every round is a sub-agent of the lead session, so `/tasks`
-shows it live. The engine refuses changes outside the task's write scope and commits the work on the
-task's own branch, rebased on the trunk, for you to merge; a task is done once its commit reaches the
-trunk. Whatever needs you waits in the lead session. Close the lead and its rounds pause; open it again,
-or a new session in the project, and they resume. A second session only watches until you ask it to
-take over. Nothing is deleted: paused work stays on its task branch.
-
-The project describes itself in `.chopin/team.yaml`:
-
-```yaml
-slots:                          # worktrees you create, one task each at a time
-  - { name: slot-1, path: ../myproject-1 }
-  - { name: slot-2, path: ../myproject-2 }
-checks:                         # changed paths select the checks a task must pass
-  - { paths: ['packages/api/**'], run: pnpm --filter api test }
-fullCheck: { run: pnpm test }   # once per batch; `{ where: ci }` leaves it to CI
-delivery: local                 # default; push lands on the trunk, pull-request pushes the branch
-stages:                         # after the trunk; a stage without verify is yours to confirm
-  - { name: deployed, verify: ./scripts/deployed.sh {commit} }
-```
-
-Keep slots outside the temporary directory: every worker sandbox may write there.
+| `@chopin-ai/core` | Mutable-layer formats, ACP transcripts and the `chopin layer check` command |
+| `@chopin-ai/workspace` | Workspace lifecycle interface with directory and container implementations |
+| `@chopin-ai/harness-pi` | Durable harness adapter: agent service, client protocol, ACP bridge |
+| `@chopin-ai/harness-dsh` | Plugin harness adapter: mutable-layer loading, headless runs |
+| `chopin-ai` | The `chopin` command: terminal client, web app, ACP and the project service |
 
 ## Development
 
-```bash
-pnpm typecheck            # packages and tests
-pnpm test                 # unit tests
-pnpm test:e2e             # real dsh compositions
-pnpm check:composition    # every row resolves, every gate names a real tool
-pnpm smoke:composition    # mount the whole composition in a throwaway profile
-pnpm e2e:team             # team mode end to end in a throwaway profile, scripted model
-```
+Requires Node 24.8 or later and pnpm 12.
 
-Architecture and conventions are in `CLAUDE.md`.
+```bash
+pnpm install
+pnpm typecheck   # packages and tests
+pnpm test
+```
 
 ## License
 
-Apache-2.0. The bundled `grilling` and `grill-me` skills keep their MIT license.
+Apache-2.0
