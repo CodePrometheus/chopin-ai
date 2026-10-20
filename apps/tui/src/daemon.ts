@@ -1,5 +1,5 @@
 import type { Command } from "@chopin-ai/core";
-import { runDaemon } from "./project.js";
+import { HAND_OVER, runDaemon } from "./project.js";
 
 /** The background service of one project; the other commands start it when they need it. */
 export const daemonCommand: Command = {
@@ -14,7 +14,10 @@ export const daemonCommand: Command = {
     }
     const stop = new AbortController();
     for (const signal of ["SIGINT", "SIGTERM", "SIGHUP"] as const) process.once(signal, () => stop.abort());
-    await runDaemon(directory, { signal: stop.signal });
+    const retire = new AbortController();
+    // Asked again while it finishes its work, it keeps finishing rather than ending at once.
+    process.on(HAND_OVER, () => retire.abort());
+    await runDaemon(directory, { signal: stop.signal, retire: retire.signal });
     // Its lock and record are released; nothing left open may keep a finished daemon around.
     process.exit(0);
   },

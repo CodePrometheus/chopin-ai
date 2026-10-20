@@ -1,4 +1,16 @@
-export { entryUpdates, inputText, inWrittenOrder, isRunning, liveUpdates, runInputs, toolText } from "./acp.js";
+export {
+  compactionFailure,
+  entryTranscript,
+  entryUpdates,
+  inputText,
+  inWrittenOrder,
+  isCompacting,
+  isRunning,
+  liveUpdates,
+  runInputs,
+  toolText,
+  userText,
+} from "./acp.js";
 export { serveAcp } from "./bridge.js";
 export type { BridgeOptions } from "./bridge.js";
 export { layerExtension } from "./layer.js";
@@ -10,4 +22,6 @@ export type { Authenticate, IntegratorTokenOptions } from "./auth.js";
 export { ModeDoc } from "./mode.js";
 export type { Mode } from "./protocol.js";
 export { createAgentHost, listen } from "./server.js";
+export { ShellEntry, shellText } from "./shell.js";
+export type { ShellRun } from "./shell.js";
 export type { Listening, ListenOptions } from "./server.js";

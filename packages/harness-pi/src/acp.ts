@@ -1,6 +1,7 @@
 import type { ContentBlock, StopReason, ToolCallContent, ToolKind, SessionUpdate, Usage as AcpUsage } from "@agentclientprotocol/sdk";
-import type { AssistantMessage, ImageContent, Message, TextContent, Usage } from "@earendil-works/pi-ai";
+import type { AssistantMessage, ImageContent, Message, TextContent, Usage, UserMessage } from "@earendil-works/pi-ai";
 import type { ConversationView, EntryRecord } from "@earendil-works/pi-durable";
+import type { TranscriptEntry } from "@chopin-ai/core";
 
 /** A tool call's input as clients show it: its JSON, or nothing when it has none or no JSON says it. */
 export function inputText(rawInput: unknown): string {
@@ -8,9 +9,23 @@ export function inputText(rawInput: unknown): string {
   return text === undefined || text === "{}" ? "" : text;
 }
 
+/** The text of what a user sent, its text blocks one after another. */
+export function userText(content: UserMessage["content"]): string {
+  return typeof content === "string" ? content : content.flatMap((block) => (block.type === "text" ? [block.text] : [])).join("\n");
+}
+
 /** Text with its direction overrides and isolates marked, so a client shows it in the order it was written. */
 export function inWrittenOrder(text: string): string {
   return text.replace(/[\u202a-\u202e\u2066-\u2069]/g, "\ufffd");
+}
+
+/** A conversation's entries as transcript lines, each at its message's time, or at `now` when it has none. */
+export function entryTranscript(sessionId: string, entries: readonly EntryRecord[], now = new Date().toISOString()): TranscriptEntry[] {
+  return entries.flatMap((entry) => {
+    const time = entry.model?.find((message) => "timestamp" in message)?.timestamp;
+    const at = time === undefined ? now : new Date(time).toISOString();
+    return entryUpdates(entry).map((update) => ({ at, notification: { sessionId, update } }));
+  });
 }
 
 /** What a committed entry says, in ACP. Entries without a model-facing message say nothing. */
@@ -27,6 +42,16 @@ export function liveUpdates(view: ConversationView): SessionUpdate[] {
 /** Whether the conversation has a run in progress. */
 export function isRunning(view: ConversationView): boolean {
   return view.docs["pi.live"]?.run !== undefined;
+}
+
+/** Whether the conversation's history is being summarized. */
+export function isCompacting(view: ConversationView): boolean {
+  return ((view.docs["pi.live"]?.compactions as unknown[] | undefined)?.length ?? 0) > 0;
+}
+
+/** The newest compaction that failed, until one produces a summary: its task, and why. */
+export function compactionFailure(view: ConversationView): { taskId: number; error: string } | undefined {
+  return view.docs["pi.live"]?.compactionFailure as { taskId: number; error: string } | undefined;
 }
 
 /** The submissions the run in progress serves, none between runs. */

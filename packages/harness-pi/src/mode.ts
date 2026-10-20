@@ -11,6 +11,16 @@ export const ModeDoc = defineDoc<{ mode: Mode }>({
   initial: () => ({ mode: "full" }),
 });
 
+/** A conversation's name, as its owner gave it; empty until then. */
+export const NameDoc = defineDoc<{ name: string }>({
+  kind: "chopin.name",
+  version: 1,
+  scope: "conversation",
+  history: "latest",
+  fork: "current",
+  initial: () => ({ name: "" }),
+});
+
 export function modeExtension(readOnly: (tool: string) => boolean): Extension {
   return defineExtension({
     name: "chopin-mode",

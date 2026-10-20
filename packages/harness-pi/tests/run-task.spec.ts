@@ -6,29 +6,13 @@ import { promisify } from "node:util";
 import { BACKGROUND_CONTEXT as context } from "@earendil-works/chord/context";
 import { createModels } from "@earendil-works/pi-ai";
 import { fauxAssistantMessage, fauxProvider, fauxToolCall } from "@earendil-works/pi-ai/providers/faux";
-import { localDaemon } from "@earendil-works/pi-env";
 import { chopinMeta } from "@chopin-ai/core";
-import type { Workspace, WorkspaceProvider } from "@chopin-ai/workspace";
 import { describe, expect, it } from "vitest";
-import { AgentService, DAEMON_PATH } from "../src/index.js";
+import { AgentService } from "../src/index.js";
+import { localWorkspace } from "./local-workspace.js";
 
 const exec = promisify(execFile);
 const git = async (args: string[]) => (await exec("git", args)).stdout;
-
-/** A workspace on this machine: the daemon is this machine's own, and commands run in the root as everywhere. */
-function localWorkspace(root: string): WorkspaceProvider {
-  return {
-    open: (owner): Workspace => ({
-      owner, root,
-      state: async () => "running", start: async () => {}, pause: async () => {}, stop: async () => {}, destroy: async () => {},
-      command: (argv) => ({
-        argv: ["sh", "-c", 'cd "$1" && shift && exec "$@"', "sh", root, ...(argv[0] === DAEMON_PATH ? [localDaemon(), ...argv.slice(1)] : argv)],
-        env: {},
-      }),
-    }),
-    list: async () => [],
-  };
-}
 
 describe("AgentService.runTask", () => {
   it("returns the run as ACP updates and the change it made as a patch", async () => {

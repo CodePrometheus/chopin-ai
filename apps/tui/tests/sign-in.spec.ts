@@ -1,81 +1,90 @@
 import { mkdtemp, readFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { createModels, type Provider } from "@earendil-works/pi-ai";
+import type { Provider } from "@earendil-works/pi-ai";
 import { fauxProvider } from "@earendil-works/pi-ai/providers/faux";
+import { initTheme } from "@earendil-works/pi-coding-agent";
+import { Container, TuiMainScreen } from "@earendil-works/pi-tui";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import type { Asker } from "../src/ask.js";
+import { stageIn } from "../src/ask.js";
 import { FileCredentialStore } from "../src/credentials.js";
-import { chooseModel, signIn } from "../src/sign-in.js";
+import { pickModel, signIn, signOut } from "../src/sign-in.js";
+import { runtimeWith } from "./models.js";
+import { ScriptedTerminal } from "./scripted-terminal.js";
 
 afterEach(() => vi.unstubAllEnvs());
 
-/** A provider whose only way in is a key entered, kept where `file` says. */
-async function keyed() {
+async function until(test: () => boolean): Promise<void> {
+  for (let i = 0; i < 200 && !test(); i++) await new Promise((resolve) => setTimeout(resolve, 10));
+  if (!test()) throw new Error("timed out");
+}
+
+/** A screen to show dialogs on, and a runtime whose one extra provider is entered with a key kept in a file. */
+async function setUp() {
   const home = await mkdtemp(join(tmpdir(), "chopin-sign-in-"));
   vi.stubEnv("CHOPIN_HOME", home);
-  const faux = fauxProvider({ models: [{ id: "alpha", name: "Alpha" }] });
-  const provider: Provider = {
+  initTheme();
+  const faux = fauxProvider({ provider: "keyed", models: [{ id: "alpha", name: "Alpha" }, { id: "beta", name: "Beta" }] });
+  const keyed: Provider = {
     ...faux.provider,
+    name: "Keyed",
     auth: {
       apiKey: {
-        name: "Faux key",
-        login: async (interaction) => ({ type: "api_key", key: await interaction.prompt({ type: "secret", message: "Enter the key" }) }),
+        name: "Keyed API key",
+        login: async (interaction) => ({ type: "api_key", key: await interaction.prompt({ type: "secret", message: "Enter the Keyed API key" }) }),
         resolve: async ({ credential }) => (credential?.key === undefined ? undefined : { auth: { apiKey: credential.key } }),
       },
     },
   };
   const file = join(home, "auth.json");
-  const models = createModels({ credentials: new FileCredentialStore(file) });
-  models.setProvider(provider);
-  return { models, provider, file };
+  const runtime = await runtimeWith([keyed], new FileCredentialStore(file));
+  const terminal = new ScriptedTerminal();
+  const tui = new TuiMainScreen(terminal);
+  const slot = new Container();
+  tui.addChild(slot);
+  tui.start();
+  return { runtime, terminal, tui, stage: stageIn(tui, slot), file, keyed };
 }
 
-describe("signing in", () => {
-  it("asks for a key as a secret, keeps it, and then offers the provider's models", async () => {
-    const { models, provider, file } = await keyed();
-    const asked: string[] = [];
-    const asker = {
-      enter: async (message: string, secret: boolean) => {
-        asked.push(`${message} (${secret ? "secret" : "plain"})`);
-        return "sk-test";
-      },
-      choose: async (_title: string, items: readonly { value: string }[]) => items.at(-1)?.value ?? "",
-      tell: () => {},
-    } as unknown as Asker;
-    expect(await models.getAvailable()).toEqual([]);
-    expect(await signIn(models, asker, provider.id)).toBe(provider.id);
-    expect(asked).toEqual(["Enter the key (secret)"]);
-    expect(JSON.parse(await readFile(file, "utf8"))).toEqual({ [provider.id]: { type: "api_key", key: "sk-test" } });
-    expect(await chooseModel(models, asker)).toEqual({ provider: provider.id, modelId: "alpha" });
+describe("dialogs", () => {
+  it("connect a provider by its key, pick one of its models, and sign out of it", async () => {
+    const { runtime, terminal, tui, stage, file, keyed } = await setUp();
+    try {
+      const connected = signIn(stage, runtime, keyed.id);
+      await until(() => terminal.screen().includes("Enter the Keyed API key"));
+      terminal.type("\x1b[200~sk-test\x1b[201~");
+      await until(() => terminal.screen().includes("•••••••"));
+      terminal.type("\r");
+      expect(await connected).toBe(keyed.id);
+      expect(terminal.screen()).not.toContain("sk-test");
+      expect(JSON.parse(await readFile(file, "utf8"))).toEqual({ [keyed.id]: { type: "api_key", key: "sk-test" } });
+
+      // Whatever else the environment connects, typing narrows the list to the model wanted.
+      const picked = pickModel(stage, runtime);
+      for (const key of "keyed beta") terminal.type(key);
+      await until(() => terminal.screen().includes("beta [keyed]"));
+      terminal.type("\r");
+      expect(await picked).toEqual({ provider: keyed.id, modelId: "beta" });
+
+      const signedOut = signOut(stage, runtime);
+      await until(() => terminal.screen().includes("Select provider to logout"));
+      terminal.type("\r");
+      expect(await signedOut).toBe(keyed.id);
+      expect(JSON.parse(await readFile(file, "utf8"))).toEqual({});
+    } finally {
+      tui.stop();
+    }
   });
 
-  it("goes back from the models to connecting a provider, and then to the models again", async () => {
-    const { models, provider } = await keyed();
-    const shown: string[] = [];
-    let first = true;
-    const asker = {
-      enter: async (message: string) => {
-        shown.push(`asked: ${message}`);
-        return "sk-test";
-      },
-      choose: async (title: string, items: readonly { value: string; label: string }[]) => {
-        shown.push(`${title}: ${items.map((item) => item.label).join(", ")}`);
-        // The first list is the models with only the way back, the next the models again.
-        if (title === "Select a model" && first) {
-          first = false;
-          return items[0]?.value ?? "";
-        }
-        return items.at(-1)?.value ?? "";
-      },
-      tell: () => {},
-    } as unknown as Asker;
-    expect(await chooseModel(models, asker)).toEqual({ provider: provider.id, modelId: "alpha" });
-    // With one provider and one way in, connecting goes straight to its key.
-    expect(shown).toEqual([
-      "Select a model: ← Connect a provider",
-      "asked: Enter the key",
-      "Select a model: ← Connect a provider, alpha",
-    ]);
+  it("come back with nothing when the user backs out", async () => {
+    const { runtime, terminal, tui, stage } = await setUp();
+    try {
+      const connected = signIn(stage, runtime);
+      await until(() => terminal.screen().includes("Select provider to configure"));
+      terminal.type("\x1b");
+      expect(await connected).toBeUndefined();
+    } finally {
+      tui.stop();
+    }
   });
 });

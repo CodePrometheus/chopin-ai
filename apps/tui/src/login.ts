@@ -1,5 +1,4 @@
 import type { Command } from "@chopin-ai/core";
-import { Declined } from "./ask.js";
 import { chopinModels } from "./credentials.js";
 import { onScreen, signIn } from "./sign-in.js";
 
@@ -13,15 +12,13 @@ export const loginCommand: Command = {
       io.err("usage: chopin login [provider]");
       return 2;
     }
-    const models = chopinModels();
-    try {
-      const id = await onScreen((asker) => signIn(models, asker, args[0]));
-      io.err(`chopin: connected ${models.getProvider(id)?.name ?? id}`);
-      return 0;
-    } catch (error) {
-      if (!(error instanceof Declined)) throw error;
+    const runtime = await chopinModels();
+    const id = await onScreen((stage) => signIn(stage, runtime, args[0]));
+    if (id === undefined) {
       io.err("chopin: nothing was connected");
       return 1;
     }
+    io.err(`chopin: connected ${runtime.getProvider(id)?.name ?? id}`);
+    return 0;
   },
 };

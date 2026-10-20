@@ -4,7 +4,7 @@ import { fileURLToPath } from "node:url";
 import { loadLayer } from "@chopin-ai/core";
 import type { AgentServiceOptions } from "@chopin-ai/harness-pi";
 import { chopinModels } from "./credentials.js";
-import { chopinHome } from "./home.js";
+import { layerDirectory } from "./home.js";
 import { notInteractive, resolveModel } from "./model.js";
 
 /**
@@ -12,10 +12,10 @@ import { notInteractive, resolveModel } from "./model.js";
  * conversation starts, and the layer in its home when there is one.
  */
 export async function agentSetup(): Promise<Pick<AgentServiceOptions, "models" | "agent" | "layer">> {
-  const models = chopinModels();
+  const models = await chopinModels();
   // A service with no model to start conversations with says so now rather than at its first conversation.
   await resolveModel(models, notInteractive);
-  const directory = join(chopinHome(), "layer");
+  const directory = layerDirectory();
   const layer = await stat(directory).then(() => loadLayer(directory), () => undefined);
   if (layer?.ok === false) throw new Error(`invalid layer ${directory}:\n${layer.problems.join("\n")}`);
   return {

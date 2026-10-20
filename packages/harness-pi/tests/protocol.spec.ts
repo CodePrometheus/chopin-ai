@@ -1,4 +1,6 @@
+import { once } from "node:events";
 import type { IncomingMessage } from "node:http";
+import { createServer, type AddressInfo } from "node:net";
 import { mkdtemp } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -11,7 +13,7 @@ import { generateKeyPair, SignJWT } from "jose";
 import { describe, expect, it } from "vitest";
 import { credentialOf } from "../src/auth.js";
 import { AgentService, integratorTokens, launchToken, listen } from "../src/index.js";
-import { connect, Conversation, Conversations, endText, errorChain, errorText, heldList, lastFailure } from "../src/protocol.js";
+import { CallTimeout, connect, Conversation, Conversations, endText, errorChain, errorText, heldList, lastFailure, openConversations } from "../src/protocol.js";
 
 const nowhere: WorkspaceProvider = {
   open: (owner): Workspace => ({
@@ -296,6 +298,21 @@ describe("client protocol", () => {
       await client.close();
       await server.close();
       await service.close(context);
+    }
+  });
+
+  it("waits within its bound for a link while none is up, rather than failing at once", async () => {
+    const vacant = createServer().listen(0, "127.0.0.1");
+    await once(vacant, "listening");
+    const { port } = vacant.address() as AddressInfo;
+    vacant.close();
+    const client = connect(`ws://127.0.0.1:${port}/?token=secret`);
+    try {
+      // The first dial has failed by now, so there is no link when the call is made.
+      await new Promise((resolve) => setTimeout(resolve, 200));
+      await expect(openConversations(client, { timeoutMs: 400 })).rejects.toBeInstanceOf(CallTimeout);
+    } finally {
+      await client.close();
     }
   });
 

@@ -29,13 +29,22 @@ export interface DaemonOptions {
   idleMs?: number;
   /** Ends the service early. */
   signal?: AbortSignal;
+  /** Ends the service once its agent has nothing left to do, clients or not, so a newer build can take over. */
+  retire?: AbortSignal;
+  /** The build the service records; this one's by default. */
+  build?: string;
 }
 
 interface ServiceRecord {
   pid: number;
   url: string;
   token: string;
+  /** The build of chopin serving; absent in a record written before builds were recorded. */
+  build?: string;
 }
+
+/** The signal that asks a project's service to hand over once its agent has nothing left to do. */
+export const HAND_OVER = "SIGUSR2";
 
 interface Paths {
   /** The chopin home these paths are under, which the daemon must use too. */
@@ -59,8 +68,14 @@ const LEAVE_GRACE_MS = 10_000;
 export async function openProject(directory: string, choose: ChooseModel): Promise<Project> {
   const paths = await projectPaths(directory);
   const running = await current(paths);
-  if (running !== undefined) return joined(running);
-  await resolveModel(chopinModels(), choose);
+  const ours = await buildId();
+  if (running !== undefined && running.build === ours) return joined(running);
+  // Only a later build takes over, so two installs used on one project never take turns pushing each other out.
+  if (running?.build !== undefined && laterBuild(running.build, ours)) {
+    throw new Error(`the service of ${paths.root} runs a later chopin; use that one, or update this one`);
+  }
+  if (running !== undefined) await handOver(paths, running);
+  await resolveModel(await chopinModels(), choose);
   const logged = (await stat(paths.log).catch(() => undefined))?.size ?? 0;
   let daemon = await spawnDaemon(paths);
   for (let wait = 0; wait < 300; wait++) {
@@ -115,9 +130,10 @@ export async function runDaemon(directory: string, options: DaemonOptions = {}):
       const token = randomBytes(32).toString("base64url");
       const server = await listen(service, { authenticate: launchToken(token), web: webApp() });
       try {
-        await writeRecord(paths.record, { pid: process.pid, url: `ws://127.0.0.1:${server.port}/`, token });
+        await writeRecord(paths.record, { pid: process.pid, url: `ws://127.0.0.1:${server.port}/`, token, build: options.build ?? await buildId() });
         for (;;) {
-          await untilIdle(server, service, options.idleMs ?? IDLE_MS, options.signal);
+          await untilIdle(server, service, options.idleMs ?? IDLE_MS, options.signal, options.retire);
+          if (options.retire?.aborted === true) break;
           // A chopin on its way, a browser slowest of all, still finds the service while it lingers.
           const leaving = Date.now();
           const grace = Math.min(LEAVE_GRACE_MS, options.idleMs ?? IDLE_MS);
@@ -146,13 +162,71 @@ async function agentService(paths: Paths): Promise<AgentService> {
   });
 }
 
-async function untilIdle(server: Listening, service: AgentService, idleMs: number, signal?: AbortSignal): Promise<void> {
+async function untilIdle(server: Listening, service: AgentService, idleMs: number, signal?: AbortSignal, retire?: AbortSignal): Promise<void> {
   let since = Date.now();
+  const woken = signal === undefined ? retire : retire === undefined ? signal : AbortSignal.any([signal, retire]);
+  const retiring = () => retire?.aborted === true;
   while (signal?.aborted !== true) {
-    await sleep(Math.min(idleMs, 5_000), undefined, signal && { signal }).catch(() => {});
+    // Asked to hand over, the service waits only for its agent's work.
+    if (retiring()) {
+      if ((await service.working()).length === 0) return;
+      await sleep(500, undefined, signal && { signal }).catch(() => {});
+      continue;
+    }
+    await sleep(Math.min(idleMs, 5_000), undefined, woken && { signal: woken }).catch(() => {});
+    if (retiring()) continue;
     if (server.clients > 0 || (await service.working()).length > 0) since = Date.now();
     else if (Date.now() - Math.max(since, server.reachedAt) >= idleMs) return;
   }
+}
+
+/**
+ * Asks a service started by another build to hand over once its agent has finished the work in hand, and waits for
+ * it to let go of the project. A service of a build that predates the request ends at it all the same.
+ */
+async function handOver(paths: Paths, running: ServiceRecord): Promise<void> {
+  process.stderr.write("chopin: the project's service was started by another build of chopin; it hands over once its agent has finished the work in hand\n");
+  try {
+    process.kill(running.pid, HAND_OVER);
+  } catch (error) {
+    // One already gone has nothing to hand over; one that cannot take the request ends instead.
+    if ((error as NodeJS.ErrnoException).code !== "ESRCH") process.kill(running.pid, "SIGTERM");
+  }
+  while ((await current(paths)) !== undefined || !lockFree(paths)) await sleep(100);
+}
+
+let build: Promise<string> | undefined;
+
+/**
+ * This build of chopin, so a service an earlier build started is told apart: its packages' versions, which tell
+ * releases apart, as an install gives every file the same time, and when their code last changed, which tells builds
+ * of one version apart.
+ */
+function buildId(): Promise<string> {
+  build ??= (async () => {
+    const roots = [dirname(BIN), ...["@chopin-ai/core", "@chopin-ai/workspace", "@chopin-ai/harness-pi"].map((name) => dirname(fileURLToPath(import.meta.resolve(name))))];
+    const versions: string[] = [];
+    let newest = 0;
+    for (const root of roots) {
+      versions.push((JSON.parse(await readFile(join(root, "..", "package.json"), "utf8")) as { version: string }).version);
+      for (const entry of await readdir(root, { recursive: true, withFileTypes: true })) {
+        if (entry.isFile() && entry.name.endsWith(".js")) newest = Math.max(newest, (await stat(join(entry.parentPath, entry.name))).mtimeMs);
+      }
+    }
+    return `${versions.join(",")}:${Math.round(newest)}`;
+  })();
+  return build;
+}
+
+/** Whether build `a` is later than `b`: by its packages' versions, then by when its code last changed. */
+export function laterBuild(a: string, b: string): boolean {
+  const order = (build: string) => {
+    const [versions = "", changed = "0"] = build.split(":");
+    return [...versions.split(",").flatMap((version) => (version.split("-")[0] ?? "").split(".").map(Number)), Number(changed)];
+  };
+  const [left, right] = [order(a), order(b)];
+  const at = left.findIndex((part, index) => part !== right[index]);
+  return at !== -1 && (left[at] ?? 0) > (right[at] ?? 0);
 }
 
 /** A daemon being started, and why it could not be, once that is known. */

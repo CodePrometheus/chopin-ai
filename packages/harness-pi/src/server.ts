@@ -3,15 +3,18 @@ import { createServer, type IncomingMessage } from "node:http";
 import type { AddressInfo } from "node:net";
 import { acceptWebSockets, createHost, forbidden, invalid, type Context, type Ctx, type Host } from "@earendil-works/chord";
 import { BACKGROUND_CONTEXT, withAbortSignal } from "@earendil-works/chord/context";
-import { configure, type ConversationId, type ConversationView, type Submission, type SubmissionId } from "@earendil-works/pi-durable";
+import type { ModelThinkingLevel } from "@earendil-works/pi-ai";
+import { configure, InboxDoc, type ConversationId, type ConversationView, type ModelRef, type Submission, type SubmissionId, type UserInput } from "@earendil-works/pi-durable";
 import { Type } from "typebox";
 import { WebSocketServer } from "ws";
 import { credentialOf, type Authenticate } from "./auth.js";
 import { httpHandler } from "./http.js";
-import { ModeDoc } from "./mode.js";
-import { Conversation, Conversations, HOST, ModeSchema, SubmissionSchema, type Principal } from "./protocol.js";
+import { ModeDoc, NameDoc } from "./mode.js";
+import { userText } from "./acp.js";
+import { Conversation, Conversations, HOST, ModeSchema, RunningSchema, SubmissionSchema, type Principal } from "./protocol.js";
 import { backoff } from "./backoff.js";
 import type { AgentService } from "./service.js";
+import { shellEntry } from "./shell.js";
 import { lost, merge, outcomeOf, progressOf, RECENT_SUBMISSIONS, type Outcome } from "./submissions.js";
 
 
@@ -48,11 +51,13 @@ export function createAgentHost(service: AgentService): Host<Principal> {
     return {
       variant: "owner",
       ids,
+      loaded: async () => service.loaded,
       create: async (ctx) => {
         const conversation = await service.newConversation(owner, durable(ctx));
         add(ctx, conversation.id);
         return conversation.id;
       },
+      summaries: (ctx) => service.summaries(owner, durable(ctx)),
       fork: async ({ conversation, at }, ctx) => {
         const fork = await service.fork(owner, conversation, at, durable(ctx));
         if (fork === undefined) throw invalid("unknown_conversation", `no conversation ${conversation}`);
@@ -95,6 +100,9 @@ export function createAgentHost(service: AgentService): Host<Principal> {
     const mode = self.state("mode", ModeSchema, {
       init: async (ctx) => (await opened.value.harness.snapshot(ModeDoc, id as ConversationId, durable(ctx)))?.mode ?? "full",
     });
+    const name = self.state("name", Type.String(), {
+      init: async (ctx) => (await opened.value.harness.snapshot(NameDoc, id as ConversationId, durable(ctx)))?.name ?? "",
+    });
     // How submissions ended is the store's to say: every one the harness has not settled, the latest few, and any
     // a client still waits on, however old.
     const read = async (running: readonly number[]) => {
@@ -118,7 +126,7 @@ export function createAgentHost(service: AgentService): Host<Principal> {
         });
       },
     });
-    const running = () => Object.keys(submissions.value).filter((id) => submissions.value[id]?.status === "pending").map(Number);
+    const unsettled = () => Object.keys(submissions.value).filter((id) => submissions.value[id]?.status === "pending").map(Number);
     let reading = false;
     let stale = false;
     const retries = backoff(1_000, 30_000);
@@ -129,7 +137,7 @@ export function createAgentHost(service: AgentService): Host<Principal> {
       void (async () => {
         do {
           stale = false;
-          const known = await read(running());
+          const known = await read(unsettled());
           await host.root((root) => submissions.change(root, (draft) => merge(draft, known)));
         } while (stale);
         clearTimeout(retry);
@@ -150,6 +158,9 @@ export function createAgentHost(service: AgentService): Host<Principal> {
       progress = now;
       reread();
     });
+    // One command of the user's runs at a time, until it ends, esc stops it, or this object closes.
+    const running = self.state("running", RunningSchema, { init: () => null });
+    let stopCommand: AbortController | undefined;
     // Each unsettled submission is waited on once, so its end is read from the store however it comes about, with
     // or without a new entry; however the wait ends, the store says how it did.
     const awaited = new Set<number>();
@@ -166,7 +177,9 @@ export function createAgentHost(service: AgentService): Host<Principal> {
       variant: "owner",
       view,
       mode,
+      name,
       submissions,
+      running,
       submit: async ({ text, steer, request }, ctx) => {
         service.touch(owner);
         const submission = await opened.value.conversation.submit({
@@ -184,11 +197,64 @@ export function createAgentHost(service: AgentService): Host<Principal> {
         service.touch(owner);
         await opened.value.conversation.abort(durable(ctx));
       },
+      stopCommand: async () => {
+        service.touch(owner);
+        stopCommand?.abort();
+      },
+      transcript: async (_args, ctx) => service.transcript(owner, opened.value.conversation, durable(ctx)),
+      shell: async ({ command, excluded = false }, ctx) => {
+        service.touch(owner);
+        if (stopCommand !== undefined) throw invalid("command_running", "a command is already running; esc stops it");
+        const stop = (stopCommand = new AbortController());
+        const shown = { command, output: "", excluded };
+        running.replace(ctx, shown);
+        try {
+          const run = await service.shell(owner, command, (output) => host.root((root) => running.replace(root, { ...shown, output })),
+            withAbortSignal(AbortSignal.any([stop.signal, closing.signal]), BACKGROUND_CONTEXT));
+          await opened.value.conversation.submit({ type: "write", entry: shellEntry({ command, excluded, ...run }) }, BACKGROUND_CONTEXT);
+        } finally {
+          stopCommand = undefined;
+          await host.root((root) => running.replace(root, null)).catch(() => {});
+        }
+      },
+      withdraw: async (_args, ctx) => {
+        service.touch(owner);
+        const { harness, conversation } = opened.value;
+        const inbox = await harness.snapshot(InboxDoc, conversation.id, durable(ctx));
+        const texts: string[] = [];
+        for (const item of inbox?.items ?? []) {
+          if (item.mode === "write") continue;
+          // One the agent took up meanwhile is no longer queued, and stays sent; one that cannot be withdrawn stays
+          // queued, so what was taken back is still given back.
+          const withdrawn = await harness.abortSubmission(item.id, durable(ctx), conversation.id).catch(() => undefined);
+          if (withdrawn === "aborted") texts.push(userText(item.content as UserInput));
+        }
+        reread();
+        return texts;
+      },
       setModel: async ({ provider, modelId }, ctx) => {
         service.touch(owner);
         const problem = await service.modelProblem(owner, { provider, modelId });
         if (problem !== undefined) throw invalid("unusable_model", problem);
         await opened.value.conversation.commit((tx) => configure(tx, opened.value.conversation.id, { model: { provider, modelId } }), durable(ctx));
+      },
+      setName: async ({ name: next }, ctx) => {
+        service.touch(owner);
+        await opened.value.conversation.commit(async (tx) => {
+          (await tx.doc(NameDoc, opened.value.conversation.id)).name = next;
+        }, durable(ctx));
+        name.replace(ctx, next);
+      },
+      setThinking: async ({ level }, ctx) => {
+        service.touch(owner);
+        const model = (view.value as ConversationView).docs["pi.agent"]?.model as ModelRef | undefined;
+        const problem = model === undefined ? "the conversation has no model yet" : service.thinkingProblem(owner, model, level);
+        if (problem !== undefined) throw invalid("unusable_thinking", problem);
+        await opened.value.conversation.commit((tx) => configure(tx, opened.value.conversation.id, { thinkingLevel: level as ModelThinkingLevel }), durable(ctx));
+      },
+      compact: async ({ instructions }, ctx) => {
+        service.touch(owner);
+        await opened.value.conversation.compact(instructions, durable(ctx));
       },
       setMode: async ({ mode: next }, ctx) => {
         service.touch(owner);

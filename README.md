@@ -29,8 +29,9 @@ chopin acp    # for editors and other ACP clients
 chopin login  # connect a provider by its sign-in or an API key
 ```
 
-The first run connects a provider and picks a model. In a conversation, `/login` and `/logout` manage providers and
-`/model` switches the model; a provider's usual environment variable works too.
+The first run connects a provider and picks a model. In a conversation, `/login` and `/logout` manage providers,
+`/model` (or `ctrl+l`) switches the model, `/resume` goes back to another conversation, `!command` runs a command
+the agent then sees, and `/hotkeys` lists the keys; a provider's usual environment variable works too.
 
 `chopin serve` runs agents in containers instead, for shared or remote use; build its workspace image first with
 `pnpm --filter @chopin-ai/harness-pi image`.

@@ -3,13 +3,15 @@ import { mkdir, mkdtemp, readdir, readFile, realpath, writeFile } from "node:fs/
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { DatabaseSync } from "node:sqlite";
-import { builtinModels } from "@earendil-works/pi-ai/providers/all";
 import { Conversations, connect } from "@chopin-ai/harness-pi/protocol";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { changeSettings, readSettings } from "../src/home.js";
 import { resolveModel, type ChooseModel } from "../src/model.js";
-import { openProject, runDaemon } from "../src/project.js";
+import { laterBuild, openProject, runDaemon } from "../src/project.js";
+import { runtimeWith } from "./models.js";
 
-const [first] = builtinModels().getModels();
+const catalog = await runtimeWith();
+const [first] = catalog.getModels();
 const choose: ChooseModel = async () => ({ provider: first?.provider ?? "", modelId: first?.id ?? "" });
 const refuse: ChooseModel = async () => { throw new Error("should not ask"); };
 
@@ -104,6 +106,28 @@ describe("openProject", () => {
     expect(await daemons()).toHaveLength(1);
   }, 15_000);
 
+  it("has a service another build started hand over once its agent is idle, and starts this build's", async () => {
+    const directory = await mkdtemp(join(tmpdir(), "chopin-project-"));
+    process.env.CHOPIN_MODEL = `${first?.provider}/${first?.id}`;
+    const retire = new AbortController();
+    const asked = () => retire.abort();
+    process.once("SIGUSR2", asked);
+    try {
+      const older = runDaemon(directory, { build: "an earlier build", retire: retire.signal });
+      for (let i = 0; i < 100 && (await daemons()).length === 0; i++) await new Promise((resolve) => setTimeout(resolve, 20));
+      expect(await daemons()).toEqual([process.pid]);
+
+      const opened = await openProject(directory, refuse);
+      await older;
+      expect(retire.signal.aborted).toBe(true);
+      const [pid] = await daemons();
+      expect(pid).not.toBe(process.pid);
+      expect(opened.token).toBeTruthy();
+    } finally {
+      process.off("SIGUSR2", asked);
+    }
+  }, 20_000);
+
   it("reports why the service could not start", async () => {
     const directory = await mkdtemp(join(tmpdir(), "chopin-project-"));
     process.env.CHOPIN_MODEL = "nobody/nothing";
@@ -128,14 +152,28 @@ describe("runDaemon", () => {
 
 describe("settings", () => {
   it("are never seen half written by a chopin reading at the same moment", async () => {
-    const models = builtinModels();
-    const asked = Promise.all(Array.from({ length: 20 }, () => resolveModel(models, choose)));
+    const asked = Promise.all(Array.from({ length: 20 }, () => resolveModel(catalog, choose)));
     await expect(asked).resolves.toHaveLength(20);
+  });
+
+  it("keep every change, applied in the order made", async () => {
+    void changeSettings({ hideThinking: true });
+    await Promise.all([changeSettings({ theme: "light" }), changeSettings({ hideThinking: false })]);
+    expect(await readSettings()).toMatchObject({ theme: "light", hideThinking: false });
+  });
+});
+
+describe("laterBuild", () => {
+  it("orders builds by their versions, then by when their code changed", () => {
+    expect(laterBuild("0.10.0,0.10.0:5", "0.9.9,0.9.9:9")).toBe(true);
+    expect(laterBuild("0.2.0,0.2.0:9", "0.2.0,0.2.0:5")).toBe(true);
+    expect(laterBuild("0.2.0,0.2.0:5", "0.2.0,0.2.0:5")).toBe(false);
+    expect(laterBuild("0.2.0-beta.1,0.2.0:5", "0.3.0,0.3.0:1")).toBe(false);
   });
 });
 
 describe("resolveModel", () => {
-  const models = builtinModels();
+  const models = catalog;
 
   it("asks once and keeps the answer", async () => {
     const asked = await resolveModel(models, choose);
@@ -148,5 +186,12 @@ describe("resolveModel", () => {
     expect(await resolveModel(models, refuse)).toEqual({ provider: first?.provider, modelId: first?.id });
     process.env.CHOPIN_MODEL = "nobody/nothing";
     await expect(resolveModel(models, refuse)).rejects.toThrow("unknown model nobody/nothing");
+  });
+
+  it("looks again in the catalogs kept on disk for a model fetched since it started", async () => {
+    let refreshed = false;
+    const later = { getModel: (provider: string, id: string) => (refreshed && provider === "late" && id === "model" ? {} : undefined), refresh: async () => void (refreshed = true) };
+    process.env.CHOPIN_MODEL = "late/model";
+    expect(await resolveModel(later as unknown as typeof models, refuse)).toEqual({ provider: "late", modelId: "model" });
   });
 });

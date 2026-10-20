@@ -3,8 +3,9 @@ import { chmod, mkdir } from "node:fs/promises";
 import { join } from "node:path";
 import type { Context } from "@earendil-works/chord";
 import { BACKGROUND_CONTEXT } from "@earendil-works/chord/context";
-import type { AssistantMessage, Models } from "@earendil-works/pi-ai";
+import { getSupportedThinkingLevels, type AssistantMessage, type Models } from "@earendil-works/pi-ai";
 import {
+  CompactionEntry,
   createRegistry,
   Harness,
   ROOT_CONVERSATION_ID,
@@ -26,11 +27,13 @@ import { CodingTools } from "@earendil-works/pi-durable/tools";
 import { Connection, RemoteExecutionEnv } from "@earendil-works/pi-env";
 import { checkGates, isMcpToolOf, withChopinMeta, type Layer, type TaskRun, type TranscriptEntry } from "@chopin-ai/core";
 import { diff, reclaimIdle, snapshot, type Workspace, type WorkspaceProvider } from "@chopin-ai/workspace";
-import { entryUpdates, stopReason, totalUsage, unansweredText } from "./acp.js";
+import { entryTranscript, stopReason, totalUsage, unansweredText, userText } from "./acp.js";
 import { layerExtension } from "./layer.js";
 import { McpServers } from "./mcp.js";
 import { drain } from "./pages.js";
-import { modeExtension } from "./mode.js";
+import { modeExtension, NameDoc } from "./mode.js";
+import type { Loaded, Summary } from "./protocol.js";
+import { runShell, ShellEntry, type ShellRun } from "./shell.js";
 
 /** Built-in tools that change nothing, so a read-only conversation may still use them. */
 const READ_ONLY = new Set(["read", "skill"]);
@@ -67,6 +70,8 @@ export interface AgentServiceOptions {
 interface Opened {
   harness: Harness;
   storage: Storage;
+  /** The owner's workspace as the agent's tools reach it. */
+  env(): RemoteExecutionEnv;
   close(context: Context): Promise<void>;
 }
 
@@ -93,6 +98,8 @@ export class AgentService {
   readonly #made = new Set<(owner: string, conversation: number) => void>();
   /** How many client objects hold each owner's agent. */
   readonly #holds = new Map<string, number>();
+  /** How many of each owner's own commands are running. */
+  readonly #commands = new Map<string, number>();
   /** When this service started, which is as recent as anything it knows of an owner it has not seen. */
   readonly #started = Date.now();
   readonly #lastActive = new Map<string, number>();
@@ -136,9 +143,74 @@ export class AgentService {
     return Number(fork.id);
   }
 
-  /** Why the owner's agent cannot run with `model`: no such model, or no credentials for its provider; else undefined. */
+  /**
+   * A line about each of the owner's conversations, last changed first: its name, its first message, how many
+   * messages it holds, and when it began and last changed.
+   */
+  async summaries(owner: string, context: Context): Promise<Summary[]> {
+    const harness = await this.harness(owner);
+    const lines = await Promise.all((await this.conversations(owner)).map(async (id): Promise<Summary> => {
+      const conversation = await harness.conversation(id as ConversationId, context);
+      const messages = conversation === undefined ? [] : (await allEntries(conversation, context))
+        .flatMap((entry) => entry.kind === CompactionEntry.kind || entry.kind === ShellEntry.kind ? [] : entry.model ?? [])
+        .filter((message) => message.role === "user" || message.role === "assistant");
+      const first = messages.find((message) => message.role === "user");
+      const times = messages.map((message) => message.timestamp).filter((time) => Number.isFinite(time));
+      return {
+        id,
+        name: (await harness.snapshot(NameDoc, id as ConversationId, context))?.name ?? "",
+        first: first === undefined ? "" : userText(first.content),
+        messages: messages.length,
+        created: times.length === 0 ? 0 : Math.min(...times),
+        modified: times.length === 0 ? 0 : Math.max(...times),
+      };
+    }));
+    return lines.sort((a, b) => b.modified - a.modified);
+  }
+
+  /** What every agent here loads besides its tools: whether it has instructions, its skills and its MCP servers. */
+  get loaded(): Loaded {
+    const layer = this.#options.layer;
+    return { instructions: layer?.instructions !== undefined, skills: layer?.skills.map((skill) => skill.name) ?? [], mcpServers: Object.keys(layer?.mcpServers ?? {}) };
+  }
+
+  /** A conversation of the owner's whole, as transcript lines. */
+  async transcript(owner: string, conversation: Conversation, context: Context): Promise<TranscriptEntry[]> {
+    this.touch(owner);
+    return entryTranscript(String(conversation.id), await allEntries(conversation, context));
+  }
+
+  /** Runs a command of the owner's in their workspace, as the agent's shell tool runs its own. */
+  async shell(owner: string, command: string, onOutput: (kept: string) => Promise<unknown>, context: Context): Promise<Omit<ShellRun, "command" | "excluded">> {
+    const env = (await this.#openedFor(owner)).env();
+    // A command at work is the agent at work: nothing hands over or reclaims under it.
+    this.#commands.set(owner, (this.#commands.get(owner) ?? 0) + 1);
+    try {
+      return await runShell(env, command, onOutput, context);
+    } finally {
+      const left = (this.#commands.get(owner) ?? 1) - 1;
+      if (left > 0) this.#commands.set(owner, left);
+      else this.#commands.delete(owner);
+      this.touch(owner);
+    }
+  }
+
+  /** Why the owner's agent cannot think at `level` with `model`, or undefined when it can. */
+  thinkingProblem(owner: string, model: ModelRef, level: string): string | undefined {
+    const found = this.#options.models(owner).getModel(model.provider, model.modelId);
+    if (found === undefined) return `there is no model ${model.provider}/${model.modelId}`;
+    const levels: readonly string[] = getSupportedThinkingLevels(found);
+    return levels.includes(level) ? undefined : `${model.modelId} thinks at ${levels.join(", ")}, not ${level}`;
+  }
+
+  /**
+   * Why the owner's agent cannot run with `model`: no such model, or no credentials for its provider; else undefined.
+   * A model the catalogs here do not know yet is looked for again in those kept on disk, which a client may have
+   * refreshed meanwhile.
+   */
   async modelProblem(owner: string, model: ModelRef): Promise<string | undefined> {
     const models = this.#options.models(owner);
+    if (models.getModel(model.provider, model.modelId) === undefined) await models.refresh({ allowNetwork: false });
     if (models.getModel(model.provider, model.modelId) === undefined) return `there is no model ${model.provider}/${model.modelId}`;
     if ((await models.checkAuth(model.provider)) === undefined) return `there are no credentials for ${model.provider}`;
     return undefined;
@@ -169,8 +241,7 @@ export class AgentService {
     const entries = await allEntries(conversation, context);
     const sessionId = String(conversation.id);
     const now = new Date().toISOString();
-    const transcript: TranscriptEntry[] = entries.flatMap((entry) =>
-      entryUpdates(entry).map((update) => ({ at: timestamp(entry) ?? now, notification: { sessionId, update } })));
+    const transcript: TranscriptEntry[] = entryTranscript(sessionId, entries, now);
     const answers = entries.flatMap((entry) => (entry.model ?? []).filter((m): m is AssistantMessage => m.role === "assistant"));
     const last = answers.at(-1);
     const { usage, cost } = totalUsage(answers);
@@ -214,9 +285,10 @@ export class AgentService {
   }
 
 
-  /** Owners whose agents still have work: a live task or an unsettled submission. */
+  /** Owners whose agents still have work: a live task, an unsettled submission, or a command of theirs running. */
   async working(): Promise<string[]> {
     const owners = await Promise.all([...this.#agents].map(async ([owner, agent]) => {
+      if (this.#commands.has(owner)) return [owner];
       // One still opening is working, for a while: it is not waited on, so a slow open holds up nobody else, and
       // one that never finishes does not keep its workspace from being reclaimed.
       if (agent.ready === undefined) return Date.now() - agent.since < OPEN_PATIENCE_MS ? [owner] : [];
@@ -343,6 +415,10 @@ export class AgentService {
       for (const extension of extensions) registry.install(extension);
 
       const id = `workspace:${fingerprint(owner)}`;
+      const env = (cwd = workspace.root) => {
+        this.touch(owner);
+        return new RemoteExecutionEnv({ connection, id, cwd });
+      };
       // Conversations are private to their owner; nobody else on the machine reads the store.
       await mkdir(this.#options.dataDir, { recursive: true });
       await chmod(this.#options.dataDir, 0o700);
@@ -350,10 +426,7 @@ export class AgentService {
       harness = await Harness.open(storage, {
         models: this.#options.models(owner),
         registry,
-        env: ({ cwd }) => {
-          this.touch(owner);
-          return new RemoteExecutionEnv({ connection, id, cwd: cwd ?? workspace.root });
-        },
+        env: ({ cwd }) => env(cwd),
         onReport: report,
       }, context);
       const agent = await this.#agent(owner);
@@ -379,6 +452,7 @@ export class AgentService {
       return {
         harness: opened,
         storage,
+        env,
         close: async (closing) => {
           clearInterval(retrying);
           try {
@@ -465,11 +539,6 @@ export class AgentService {
 
 function allEntries(conversation: Conversation, context: Context): Promise<EntryRecord[]> {
   return drain((cursor: Cursor | undefined) => conversation.entries({ order: "ascending" }, 256, cursor, context));
-}
-
-function timestamp(entry: EntryRecord): string | undefined {
-  const at = entry.model?.find((message) => "timestamp" in message)?.timestamp;
-  return at === undefined ? undefined : new Date(at).toISOString();
 }
 
 function toolNames(extensions: readonly Extension[]): string[] {

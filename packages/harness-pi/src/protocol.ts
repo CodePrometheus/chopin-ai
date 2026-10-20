@@ -1,5 +1,5 @@
-import { createHost, hostNamed, method, remote, webSocketLink, type Ctx, type Host, type Ref } from "@earendil-works/chord";
-import { Type, type Static, type TNumber, type TObject, type TSchema } from "typebox";
+import { createHost, hostNamed, isChordError, method, remote, webSocketLink, type Ctx, type Host, type Ref } from "@earendil-works/chord";
+import { Type, type Static, type TArray, type TNumber, type TObject, type TSchema, type TUnknown } from "typebox";
 import { unansweredText } from "./acp.js";
 import { backoff } from "./backoff.js";
 
@@ -50,6 +50,36 @@ const ModeArgs = Type.Object({ mode: ModeSchema });
 /** A model as the model library names it: its provider and its id there. */
 const ModelArgs = Type.Object({ provider: Type.String({ minLength: 1 }), modelId: Type.String({ minLength: 1 }) });
 const NoArgs = Type.Object({});
+const NameArgs = Type.Object({ name: Type.String({ maxLength: 200 }) });
+/** A thinking level as the model library names them; the service takes only those the conversation's model has. */
+const ThinkingArgs = Type.Object({ level: Type.String({ minLength: 1 }) });
+const CompactArgs = Type.Object({ instructions: Type.Optional(Type.String()) });
+/** A command of the user's, run in the workspace; an excluded one the model never sees. */
+const ShellArgs = Type.Object({ command: Type.String({ minLength: 1 }), excluded: Type.Optional(Type.Boolean()) });
+const Texts = Type.Array(Type.String());
+
+/** The command the user is running in a conversation and its output so far; null while none runs. */
+export const RunningSchema = Type.Union([
+  Type.Null(),
+  Type.Object({ command: Type.String(), output: Type.String(), excluded: Type.Boolean() }),
+]);
+export type Running = Static<typeof RunningSchema>;
+
+/** What the service's agents load besides their tools: whether there are instructions, the skills, the MCP servers. */
+export const LoadedSchema = Type.Object({ instructions: Type.Boolean(), skills: Type.Array(Type.String()), mcpServers: Type.Array(Type.String()) });
+export type Loaded = Static<typeof LoadedSchema>;
+
+/** A line about one conversation, for picking one to resume: times in milliseconds since the epoch. */
+export const SummarySchema = Type.Object({
+  id: Type.Number(),
+  name: Type.String(),
+  first: Type.String(),
+  messages: Type.Number(),
+  created: Type.Number(),
+  modified: Type.Number(),
+});
+export type Summary = Static<typeof SummarySchema>;
+const Summaries = Type.Array(SummarySchema);
 
 /** An owner's conversations. */
 export const Conversations = remote("chopin.conversations", {
@@ -61,7 +91,9 @@ export const Conversations = remote("chopin.conversations", {
       state: { ids: Type.Array(Type.Number()) },
       methods: {
         create: method(undefined, Type.Number()) as Query<undefined, TNumber>,
+        loaded: method(undefined, LoadedSchema) as Query<undefined, typeof LoadedSchema>,
         fork: method(ForkArgs, Type.Number()) as Query<typeof ForkArgs, TNumber>,
+        summaries: method(undefined, Summaries) as Query<undefined, typeof Summaries>,
       },
     },
   },
@@ -77,12 +109,28 @@ export const Conversation = remote("chopin.conversation", {
   host: hostNamed(HOST),
   variants: {
     owner: {
-      state: { view: Type.Unknown(), mode: ModeSchema, submissions: Type.Record(Type.String(), SubmissionSchema) },
+      state: {
+        view: Type.Unknown(),
+        mode: ModeSchema,
+        name: Type.String(),
+        submissions: Type.Record(Type.String(), SubmissionSchema),
+        running: RunningSchema,
+      },
       methods: {
         submit: method(SubmitArgs, Type.Number()) as Query<typeof SubmitArgs, TNumber>,
+        /** Runs to the command's end, which may take long; `stopCommand` ends it sooner. */
+        shell: method(ShellArgs) as Call<typeof ShellArgs>,
+        stopCommand: method(NoArgs) as Call<TObject<{}>>,
+        /** The whole conversation as transcript lines, what compaction took from the view included. */
+        transcript: method(NoArgs, Type.Array(Type.Unknown())) as Query<TObject<{}>, TArray<TUnknown>>,
+        /** Takes back every message still queued, answering with their texts in the order they were sent. */
+        withdraw: method(NoArgs, Texts) as Query<TObject<{}>, typeof Texts>,
         abort: method(NoArgs) as Call<TObject<{}>>,
         setMode: method(ModeArgs) as Call<typeof ModeArgs>,
         setModel: method(ModelArgs) as Call<typeof ModelArgs>,
+        setName: method(NameArgs) as Call<typeof NameArgs>,
+        setThinking: method(ThinkingArgs) as Call<typeof ThinkingArgs>,
+        compact: method(CompactArgs) as Call<typeof CompactArgs>,
       },
     },
   },
@@ -148,7 +196,7 @@ export class CallTimeout extends Error {
 }
 
 export interface CallOptions {
-  /** `CALL_TIMEOUT_MS` by default. */
+  /** `CALL_TIMEOUT_MS` by default; `Infinity` waits for as long as the work takes. */
   timeoutMs?: number;
   /** Gives up the call. */
   signal?: AbortSignal;
@@ -222,16 +270,20 @@ function abandonable<T>(promise: Promise<T>, signal: AbortSignal): Promise<T> {
 }
 
 /** Starts a new conversation in the owner's list and opens it, waiting no longer than any one call. */
-export function startConversation(
+export async function startConversation(
   host: Host,
   list: (signal: AbortSignal) => Promise<Ref<typeof Conversations>>,
   options: CallOptions = {},
 ): Promise<{ id: number; conversation: ConversationRef }> {
-  return within(options, async (signal) => {
+  // Two calls, so a link lost after the conversation was made opens it rather than making another; together they
+  // wait no longer than one.
+  const started = Date.now();
+  const id = await within(options, async (signal) => {
     const conversations = await list(signal);
-    const id = await host.root((ctx) => conversations.create(ctx), { signal });
-    return { id, conversation: await host.get(Conversation, { conversation: id }, { signal }) };
+    return host.root((ctx) => conversations.create(ctx), { signal });
   });
+  const left = Math.max(0, (options.timeoutMs ?? CALL_TIMEOUT_MS) - (Date.now() - started));
+  return { id, conversation: await openConversation(host, id, { ...options, timeoutMs: left }) };
 }
 
 /** The owner's list of conversations, held until released, waited for as long as a call. */
@@ -294,10 +346,38 @@ export function resender(): (text: string, submit: (request: string) => Promise<
 
 /** Runs `work` with a signal that aborts once `options` say to stop waiting, failing then with `CallTimeout`. */
 export async function within<T>(options: CallOptions, work: (signal: AbortSignal) => Promise<T>): Promise<T> {
-  const timeout = AbortSignal.timeout(options.timeoutMs ?? CALL_TIMEOUT_MS);
+  const bound = options.timeoutMs ?? CALL_TIMEOUT_MS;
+  const timeout = Number.isFinite(bound) ? AbortSignal.timeout(bound) : undefined;
+  const signal = AbortSignal.any([timeout, options.signal].filter((each) => each !== undefined));
   try {
-    return await work(options.signal === undefined ? timeout : AbortSignal.any([timeout, options.signal]));
+    for (;;) {
+      try {
+        return await work(signal);
+      } catch (error) {
+        // Between dials there is no link, so nothing was sent: the work waits for the next one rather than failing.
+        if (!(isChordError(error) && error.code === "unavailable" && error.message.includes("no route to"))) throw error;
+        await pause(UNROUTED_RETRY_MS, signal);
+      }
+    }
   } catch (error) {
-    throw timeout.aborted ? new CallTimeout({ cause: error }) : error;
+    throw timeout?.aborted === true ? new CallTimeout({ cause: error }) : error;
   }
+}
+
+const UNROUTED_RETRY_MS = 100;
+
+/** Resolves after `ms`, or rejects once `signal` aborts. */
+function pause(ms: number, signal: AbortSignal): Promise<void> {
+  return new Promise((resolve, reject) => {
+    const done = () => {
+      clearTimeout(timer);
+      reject(signal.reason);
+    };
+    const timer = setTimeout(() => {
+      signal.removeEventListener("abort", done);
+      resolve();
+    }, ms);
+    if (signal.aborted) return done();
+    signal.addEventListener("abort", done, { once: true });
+  });
 }

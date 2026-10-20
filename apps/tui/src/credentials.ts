@@ -1,7 +1,7 @@
 import { mkdir, readFile } from "node:fs/promises";
 import { dirname, join } from "node:path";
-import type { AuthOperationOptions, Credential, CredentialInfo, CredentialStore, Models } from "@earendil-works/pi-ai";
-import { builtinModels } from "@earendil-works/pi-ai/providers/all";
+import type { AuthOperationOptions, Credential, CredentialInfo, CredentialStore } from "@earendil-works/pi-ai";
+import { ModelRuntime } from "@earendil-works/pi-coding-agent";
 import { chopinHome, writeWhole } from "./home.js";
 import { locked } from "./lock.js";
 
@@ -66,7 +66,11 @@ export function chopinCredentials(): FileCredentialStore {
   return new FileCredentialStore(join(chopinHome(), "auth.json"));
 }
 
-/** Every model chopin knows, reaching each provider with the credentials signed in here or the usual variables. */
-export function chopinModels(credentials: CredentialStore = chopinCredentials()): Models {
-  return builtinModels({ credentials });
+/**
+ * Every model chopin knows, reaching each provider with the credentials signed in here or the usual variables, and
+ * the providers `models.json` in the chopin home adds; catalogs are kept beside it, read as kept at the start and
+ * fetched anew on request.
+ */
+export function chopinModels(credentials: CredentialStore = chopinCredentials()): Promise<ModelRuntime> {
+  return ModelRuntime.create({ credentials, modelsPath: join(chopinHome(), "models.json") });
 }
