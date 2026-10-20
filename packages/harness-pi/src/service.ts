@@ -33,6 +33,7 @@ import { McpServers } from "./mcp.js";
 import { drain } from "./pages.js";
 import { modeExtension, NameDoc } from "./mode.js";
 import type { Loaded, Summary } from "./protocol.js";
+import { contextFiles, projectContext } from "./project-context.js";
 import { runShell, ShellEntry, type ShellRun } from "./shell.js";
 
 /** Built-in tools that change nothing, so a read-only conversation may still use them. */
@@ -168,10 +169,16 @@ export class AgentService {
     return lines.sort((a, b) => b.modified - a.modified);
   }
 
-  /** What every agent here loads besides its tools: whether it has instructions, its skills and its MCP servers. */
-  get loaded(): Loaded {
+  /** What the owner's agent loads besides its tools: the layer's instructions, skills and MCP servers, and the project's instructions. */
+  async loaded(owner: string, context: Context): Promise<Loaded> {
     const layer = this.#options.layer;
-    return { instructions: layer?.instructions !== undefined, skills: layer?.skills.map((skill) => skill.name) ?? [], mcpServers: Object.keys(layer?.mcpServers ?? {}) };
+    const project = await contextFiles((await this.#openedFor(owner)).env(), context);
+    return {
+      instructions: layer?.instructions !== undefined,
+      projectInstructions: project.map((file) => file.path),
+      skills: layer?.skills.map((skill) => skill.name) ?? [],
+      mcpServers: Object.keys(layer?.mcpServers ?? {}),
+    };
   }
 
   /** A conversation of the owner's whole, as transcript lines. */
@@ -474,7 +481,7 @@ export class AgentService {
 
   #extensions(registered: ReadonlySet<string>, ...more: Extension[]): Extension[] {
     const layer = this.#options.layer === undefined ? [] : [layerExtension(this.#options.layer, registered)];
-    return [CodingTools, ...layer, ...(this.#options.extensions ?? []), ...more];
+    return [CodingTools, ...layer, projectContext, ...(this.#options.extensions ?? []), ...more];
   }
 
   /**

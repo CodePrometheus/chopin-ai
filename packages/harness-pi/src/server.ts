@@ -51,7 +51,7 @@ export function createAgentHost(service: AgentService): Host<Principal> {
     return {
       variant: "owner",
       ids,
-      loaded: async () => service.loaded,
+      loaded: (ctx) => service.loaded(owner, durable(ctx)),
       create: async (ctx) => {
         const conversation = await service.newConversation(owner, durable(ctx));
         add(ctx, conversation.id);

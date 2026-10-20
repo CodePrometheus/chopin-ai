@@ -22,6 +22,8 @@ export type { Authenticate, IntegratorTokenOptions } from "./auth.js";
 export { ModeDoc } from "./mode.js";
 export type { Mode } from "./protocol.js";
 export { createAgentHost, listen } from "./server.js";
+export { contextFiles, projectContext } from "./project-context.js";
+export type { ContextFile } from "./project-context.js";
 export { ShellEntry, shellText } from "./shell.js";
 export type { ShellRun } from "./shell.js";
 export type { Listening, ListenOptions } from "./server.js";

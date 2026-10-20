@@ -65,8 +65,16 @@ export const RunningSchema = Type.Union([
 ]);
 export type Running = Static<typeof RunningSchema>;
 
-/** What the service's agents load besides their tools: whether there are instructions, the skills, the MCP servers. */
-export const LoadedSchema = Type.Object({ instructions: Type.Boolean(), skills: Type.Array(Type.String()), mcpServers: Type.Array(Type.String()) });
+/**
+ * What an owner's agent loads besides its tools: whether the layer has instructions, the paths of the project's
+ * instruction files in the workspace, the skills, the MCP servers.
+ */
+export const LoadedSchema = Type.Object({
+  instructions: Type.Boolean(),
+  projectInstructions: Type.Array(Type.String()),
+  skills: Type.Array(Type.String()),
+  mcpServers: Type.Array(Type.String()),
+});
 export type Loaded = Static<typeof LoadedSchema>;
 
 /** A line about one conversation, for picking one to resume: times in milliseconds since the epoch. */
@@ -91,6 +99,7 @@ export const Conversations = remote("chopin.conversations", {
       state: { ids: Type.Array(Type.Number()) },
       methods: {
         create: method(undefined, Type.Number()) as Query<undefined, TNumber>,
+        /** Asks the workspace, so it is not part of the list's state, which would start a workspace just to list. */
         loaded: method(undefined, LoadedSchema) as Query<undefined, typeof LoadedSchema>,
         fork: method(ForkArgs, Type.Number()) as Query<typeof ForkArgs, TNumber>,
         summaries: method(undefined, Summaries) as Query<undefined, typeof Summaries>,

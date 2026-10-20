@@ -50,6 +50,7 @@ is carried over.
 #### Durable harness adapter
 
 - An agent service with one store per owner, kept out of the workspace; tools reach it through an execution daemon.
+- The agent reads the project's `AGENTS.md` or `CLAUDE.md`, one per directory up to the root, anew each turn.
 - `read` and `full` modes per conversation.
 - A WebSocket client protocol; owners come from a launch token or integrator-signed tokens (`chopin serve --jwks`).
 - An ACP bridge for any agent of the service.

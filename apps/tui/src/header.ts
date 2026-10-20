@@ -14,7 +14,7 @@ export class Header implements Component {
   readonly #text = new Text("", 1, 1);
   readonly #version: string;
   readonly #keys: readonly (readonly [string, string])[];
-  /** Where the instructions the agent loads are kept. */
+  /** Where the layer's instructions are kept. */
   readonly #instructions: string;
   #loaded: Loaded | undefined;
   #expanded = false;
@@ -56,7 +56,7 @@ export class Header implements Component {
     const loaded = this.#loaded;
     const section = (name: string, lines: readonly string[]) => (lines.length === 0 ? [] : ["", style("cyan")(`[${name}]`), ...lines.map((line) => style("dim")(`  ${line}`))]);
     const resources = loaded === undefined ? [] : [
-      ...section("Context", loaded.instructions ? [homeShortened(this.#instructions)] : []),
+      ...section("Context", [...(loaded.instructions ? [this.#instructions] : []), ...loaded.projectInstructions].map(homeShortened)),
       ...section("Skills", loaded.skills.length === 0 ? [] : [[...loaded.skills].sort().join(", ")]),
       ...section("MCP servers", loaded.mcpServers.length === 0 ? [] : [[...loaded.mcpServers].sort().join(", ")]),
     ];
