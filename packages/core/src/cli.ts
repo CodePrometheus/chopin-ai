@@ -30,9 +30,10 @@ export const coreCommands: readonly Command[] = [{
 export async function runCli(argv: readonly string[], io: CliIo, commands: readonly Command[] = coreCommands): Promise<number> {
   const command = commands.find((c) => c.name.split(" ").every((word, i) => argv[i] === word));
   if (command !== undefined) return command.run(argv.slice(command.name.split(" ").length), io);
-  const width = Math.max(...commands.map((c) => `${c.name} ${c.args}`.length));
-  io.err(["usage: chopin <command>", "", "commands:", ...commands.map((c) => `  ${`${c.name} ${c.args}`.padEnd(width)}   ${c.summary}`)].join("\n"));
-  return argv.length === 0 || argv[0] === "help" ? 0 : 2;
+  const asked = argv.length === 0 || ["help", "--help", "-h"].includes(argv[0] ?? "");
+  const usage = ["usage: chopin <command>", "", "commands:", ...commands.flatMap((c) => [`  ${c.name} ${c.args}`.trimEnd(), `      ${c.summary}`])];
+  (asked ? io.out : io.err)(usage.join("\n"));
+  return asked ? 0 : 2;
 }
 
 function usageError(io: CliIo, usage: string): number {

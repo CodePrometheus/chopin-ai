@@ -29,7 +29,13 @@ describe("runCli", () => {
   });
 
   it("prints usage for help and rejects unknown commands", async () => {
-    expect(await runCli([], capture().io)).toBe(0);
-    expect(await runCli(["nope"], capture().io)).toBe(2);
+    for (const asked of [[], ["help"], ["--help"], ["-h"]]) {
+      const { io, out } = capture();
+      expect(await runCli(asked, io)).toBe(0);
+      expect(out.join("\n")).toContain("  layer check <dir>\n      validate a mutable layer directory");
+    }
+    const { io, err } = capture();
+    expect(await runCli(["nope"], io)).toBe(2);
+    expect(err.join("\n")).toContain("usage: chopin <command>");
   });
 });
