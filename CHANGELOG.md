@@ -7,7 +7,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-## [0.2.0] - 2026-10-19
+## [0.2.0] - 2026-10-21
 
 A ground-up rewrite under the new name `chopin-ai`. The RSI loop is not part of this release, and nothing from 0.1.0
 is carried over.
