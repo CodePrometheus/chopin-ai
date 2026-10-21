@@ -5,7 +5,7 @@
   "license": "Apache-2.0",
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/CodePrometheus/chopin-rsi.git",
+    "url": "git+https://github.com/CodePrometheus/chopin-ai.git",
     "directory": "packages/harness-dsh"
   },
   "type": "module",

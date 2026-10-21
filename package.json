@@ -3,7 +3,7 @@
   "description": "A self-improving coding agent with a harness-agnostic RSI core",
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/CodePrometheus/chopin-rsi.git"
+    "url": "git+https://github.com/CodePrometheus/chopin-ai.git"
   },
   "license": "Apache-2.0",
   "private": true,
