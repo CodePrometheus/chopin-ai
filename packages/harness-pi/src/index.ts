@@ -13,6 +13,7 @@ export {
 } from "./acp.js";
 export { serveAcp } from "./bridge.js";
 export type { BridgeOptions } from "./bridge.js";
+export { IdleCompactionEntry } from "./idle-compaction.js";
 export { layerExtension } from "./layer.js";
 export { McpServers } from "./mcp.js";
 export { AgentService, DAEMON_PATH } from "./service.js";

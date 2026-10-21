@@ -93,6 +93,15 @@ describe("Transcript", () => {
     expect(plain(transcript.render(60))).not.toContain("Steering:");
   });
 
+  it("tells where a conversation was compacted for being idle", () => {
+    const transcript = transcriptFor();
+    transcript.update(view([
+      entry(1, { role: "assistant", content: [{ type: "text", text: "Done." }], stopReason: "stop" }),
+      { id: 2, conversationId: 1, kind: "chopin.idle-compaction" },
+    ]));
+    expect(plain(transcript.render(60))).toMatch(/Done\.[\s\S]*Compacted while idle, before the prompt cache expired/);
+  });
+
   it("draws a command as it runs, its output growing, until it ends", () => {
     const transcript = transcriptFor();
     transcript.setRunning({ command: "make", output: "step 1\n", excluded: false });

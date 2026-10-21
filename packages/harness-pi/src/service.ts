@@ -28,6 +28,7 @@ import { Connection, RemoteExecutionEnv } from "@earendil-works/pi-env";
 import { checkGates, isMcpToolOf, withChopinMeta, type Layer, type TaskRun, type TranscriptEntry } from "@chopin-ai/core";
 import { diff, reclaimIdle, snapshot, type Workspace, type WorkspaceProvider } from "@chopin-ai/workspace";
 import { entryTranscript, stopReason, totalUsage, unansweredText, userText } from "./acp.js";
+import { IdleCompaction } from "./idle-compaction.js";
 import { layerExtension } from "./layer.js";
 import { McpServers } from "./mcp.js";
 import { drain } from "./pages.js";
@@ -71,6 +72,7 @@ export interface AgentServiceOptions {
 interface Opened {
   harness: Harness;
   storage: Storage;
+  idle: IdleCompaction;
   /** The owner's workspace as the agent's tools reach it. */
   env(): RemoteExecutionEnv;
   close(context: Context): Promise<void>;
@@ -245,6 +247,8 @@ export class AgentService {
     const base = await snapshot(workspace);
     const conversation = await this.newConversation(owner, context);
     const settled = await (await conversation.submit({ type: "input", content: prompt }, context)).wait(context);
+    // Nobody comes back to a task's conversation, so it is not kept short for them.
+    (await this.#openedFor(owner)).idle.cancel(conversation.id);
     const entries = await allEntries(conversation, context);
     const sessionId = String(conversation.id);
     const now = new Date().toISOString();
@@ -401,12 +405,21 @@ export class AgentService {
     const connection = new Connection({ command: () => this.#daemon(workspace) });
     let storage: Storage | undefined;
     let harness: Harness | undefined;
+    const idle = new IdleCompaction({
+      models: this.#options.models(owner),
+      eligible: async (id) => {
+        const record = await storage?.conversation(id, BACKGROUND_CONTEXT);
+        return record !== undefined && topLevel(record);
+      },
+      report,
+    });
     try {
       const registered = new Set<string>();
       const extensions = this.#extensions(
         registered,
         ...(await mcp.connect(report)),
         modeExtension((tool) => READ_ONLY.has(tool) || mcp.readOnly.has(tool)),
+        idle.extension,
       );
       for (const tool of toolNames(extensions)) registered.add(tool);
       const told = new Set<string>();
@@ -436,6 +449,7 @@ export class AgentService {
         env: ({ cwd }) => env(cwd),
         onReport: report,
       }, context);
+      idle.attach(harness);
       const agent = await this.#agent(owner);
       if (agent !== undefined) await harness.root(context, { agent });
       harness.resume();
@@ -459,9 +473,11 @@ export class AgentService {
       return {
         harness: opened,
         storage,
+        idle,
         env,
         close: async (closing) => {
           clearInterval(retrying);
+          idle.close();
           try {
             await opened.close(closing);
           } finally {
@@ -471,6 +487,7 @@ export class AgentService {
         },
       };
     } catch (error) {
+      idle.close();
       // An open harness owns its store; before that, the store is still this call's to close.
       await (harness === undefined ? storage?.close(context) : harness.close(context))?.catch(() => {});
       await mcp.close();

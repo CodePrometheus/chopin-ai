@@ -7,6 +7,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- A conversation left idle is compacted just before its prompt cache expires, with a summary request that reads that
+  cache, so coming back costs a short context instead of a full rewrite.
+
 ## [0.2.0] - 2026-10-21
 
 A ground-up rewrite under the new name `chopin-ai`. The RSI loop is not part of this release, and nothing from 0.1.0

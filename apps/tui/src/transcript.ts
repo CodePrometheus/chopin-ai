@@ -18,7 +18,7 @@ import {
 } from "@earendil-works/pi-coding-agent";
 import { CompactionEntry, type ConversationView, type EntryRecord, type InboxState, type UserInput } from "@earendil-works/pi-durable";
 import { Container, Spacer, TruncatedText, type TUI } from "@earendil-works/pi-tui";
-import { inWrittenOrder, ShellEntry, userText, type ShellRun } from "@chopin-ai/harness-pi";
+import { IdleCompactionEntry, inWrittenOrder, ShellEntry, userText, type ShellRun } from "@chopin-ai/harness-pi";
 import type { Running } from "@chopin-ai/harness-pi/protocol";
 import { style } from "./theme.js";
 
@@ -81,6 +81,10 @@ export class Transcript extends Container {
           const command = this.#ran(entry.data);
           this.#commands.push(command);
           this.#committed.addChild(command);
+        }
+        else if (IdleCompactionEntry.is(entry)) {
+          if (this.#committed.children.length > 0) this.#committed.addChild(new Spacer(1));
+          this.#committed.addChild(new TruncatedText(style("dim")("Compacted while idle, before the prompt cache expired"), 1, 0));
         }
         else for (const message of entry.model ?? []) this.#commit(message);
       }
