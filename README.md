@@ -9,6 +9,7 @@
 
 **A coding agent built to improve itself.**
 
+[![npm](https://img.shields.io/npm/v/chopin-ai)](https://www.npmjs.com/package/chopin-ai)
 [![License](https://img.shields.io/github/license/CodePrometheus/chopin-ai)](LICENSE)
 
 </div>
