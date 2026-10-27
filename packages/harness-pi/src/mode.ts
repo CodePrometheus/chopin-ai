@@ -9,6 +9,7 @@ export const ModeDoc = defineDoc<{ mode: Mode }>({
   history: "latest",
   fork: "current",
   initial: () => ({ mode: "full" }),
+  checkpointWhen: () => false,
 });
 
 /** A conversation's name, as its owner gave it; empty until then. */
@@ -19,6 +20,7 @@ export const NameDoc = defineDoc<{ name: string }>({
   history: "latest",
   fork: "current",
   initial: () => ({ name: "" }),
+  checkpointWhen: () => false,
 });
 
 export function modeExtension(readOnly: (tool: string) => boolean): Extension {

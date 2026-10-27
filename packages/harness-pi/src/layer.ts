@@ -22,6 +22,7 @@ const Succeeded = defineDoc<{ tools: string[] }>({
   history: "rewindable",
   fork: "asOf",
   initial: () => ({ tools: [] }),
+  checkpointWhen: () => false,
 });
 
 /**
