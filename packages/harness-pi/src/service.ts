@@ -29,7 +29,7 @@ import { checkGates, isMcpToolOf, withChopinMeta, type Layer, type TaskRun, type
 import { diff, reclaimIdle, snapshot, type Workspace, type WorkspaceProvider } from "@chopin-ai/workspace";
 import { entryTranscript, stopReason, totalUsage, unansweredText, userText } from "./acp.js";
 import { IdleCompaction } from "./idle-compaction.js";
-import { layerExtension } from "./layer.js";
+import { layerExtension, pinLayerVersions, type LayerSource } from "./layer.js";
 import { McpServers } from "./mcp.js";
 import { drain } from "./pages.js";
 import { modeExtension, NameDoc } from "./mode.js";
@@ -39,6 +39,8 @@ import { runShell, ShellEntry, type ShellRun } from "./shell.js";
 
 /** Built-in tools that change nothing, so a read-only conversation may still use them. */
 const READ_ONLY = new Set(["read", "skill"]);
+
+const EMPTY_LAYER: Layer = { instructions: undefined, skills: [], mcpServers: {}, gates: [] };
 
 /** How long an open under way counts as an agent at work. */
 const OPEN_PATIENCE_MS = 10 * 60_000;
@@ -59,6 +61,8 @@ export interface AgentServiceOptions {
   agent?: AgentChange | ((owner: string) => Promise<AgentChange | undefined>);
   /** The portable layer every agent loads. */
   layer?: Layer;
+  /** The loop's versions laid over `layer`; each conversation keeps the ones in use when it was made. */
+  layerVersions?: LayerSource;
   /** Installed after the coding tools and the layer. */
   extensions?: readonly Extension[];
   /** Failures that do not fail the call at hand, such as an unreachable MCP server. */
@@ -67,6 +71,13 @@ export interface AgentServiceOptions {
   daemon?: string;
   /** Stops workspaces whose owner has been idle this long, keeping their volumes; never when absent. */
   reclaimAfterMs?: number;
+}
+
+/** A conversation that changed, as `changedSince` gives it. */
+export interface Changed {
+  id: number;
+  modified: number;
+  transcript: TranscriptEntry[];
 }
 
 interface Opened {
@@ -187,6 +198,32 @@ export class AgentService {
   async transcript(owner: string, conversation: Conversation, context: Context): Promise<TranscriptEntry[]> {
     this.touch(owner);
     return entryTranscript(String(conversation.id), await allEntries(conversation, context));
+  }
+
+  /**
+   * For readers outside the service, such as the loop that learns from them: the owner's top-level conversations
+   * changed since the times in `since`, by id, with when each last changed and its transcript. It reads only an agent
+   * already open, so it neither opens a store nor counts as the owner at work; none while the agent is closed.
+   */
+  async changedSince(owner: string, since: Readonly<Record<string, number>>, context: Context): Promise<Changed[]> {
+    const agent = this.#agents.get(owner);
+    const opened = agent === undefined ? undefined : await agent.opened.catch(() => undefined);
+    if (opened === undefined) return [];
+    const records = await drain(
+      (cursor: Cursor | undefined) => opened.storage.scanConversations({ order: "ascending" }, 256, cursor, context),
+      topLevel,
+    );
+    const changed: Changed[] = [];
+    for (const record of records) {
+      const conversation = await opened.harness.conversation(record.id, context);
+      if (conversation === undefined) continue;
+      const entries = await allEntries(conversation, context);
+      const times = entries.flatMap((entry) => (entry.model ?? []).map((message) => message.timestamp)).filter(Number.isFinite);
+      const modified = times.length === 0 ? 0 : Math.max(...times);
+      if (modified <= (since[String(record.id)] ?? 0)) continue;
+      changed.push({ id: Number(record.id), modified, transcript: entryTranscript(String(record.id), entries) });
+    }
+    return changed;
   }
 
   /** Runs a command of the owner's in their workspace, as the agent's shell tool runs its own. */
@@ -448,6 +485,7 @@ export class AgentService {
         registry,
         env: ({ cwd }) => env(cwd),
         onReport: report,
+        ...(this.#options.layerVersions && { conversationCreated: pinLayerVersions(this.#options.layerVersions) }),
       }, context);
       idle.attach(harness);
       const agent = await this.#agent(owner);
@@ -497,7 +535,8 @@ export class AgentService {
   }
 
   #extensions(registered: ReadonlySet<string>, ...more: Extension[]): Extension[] {
-    const layer = this.#options.layer === undefined ? [] : [layerExtension(this.#options.layer, registered)];
+    const base = this.#options.layer ?? (this.#options.layerVersions === undefined ? undefined : EMPTY_LAYER);
+    const layer = base === undefined ? [] : [layerExtension(base, registered, this.#options.layerVersions)];
     return [CodingTools, ...layer, projectContext, ...(this.#options.extensions ?? []), ...more];
   }
 

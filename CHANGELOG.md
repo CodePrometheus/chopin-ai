@@ -11,6 +11,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - A conversation left idle is compacted just before its prompt cache expires, with a summary request that reads that
   cache, so coming back costs a short context instead of a full rewrite.
+- The RSI loop: `chopin evolve` turns failures that recur across local sessions into one instruction or skill at a
+  time, kept only when resumed conversations show a net gain, within a weekly budget.
+- On macOS, commands the agent runs can neither read nor write `~/.chopin`.
+
+### Removed
+
+- The web app and `chopin web`; the terminal and editors are the clients.
 
 ## [0.2.0] - 2026-10-21
 

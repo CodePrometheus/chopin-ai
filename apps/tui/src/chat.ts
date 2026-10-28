@@ -47,6 +47,7 @@ import { editElsewhere } from "./external-editor.js";
 import { Footer, usageText, whereText } from "./footer.js";
 import { chopinModels } from "./credentials.js";
 import { Header } from "./header.js";
+import { loopSummary } from "./rsi/summary.js";
 import { changeSettings, layerDirectory, readSettings, type Settings } from "./home.js";
 import { defaultModel, pickInTerminal, type ModelRef } from "./model.js";
 import { clipboardPaste, insertApart, shellWord } from "./paste.js";
@@ -661,6 +662,11 @@ export async function chat(host: Host, terminal: Terminal, options: ChatOptions 
   // What the agent loaded is the service's to say.
   void ask(async (ctx) => (await list.get()).loaded(ctx)).then((loaded) => {
     header.setLoaded(loaded);
+    tui.requestRender();
+  }, () => {});
+  void loopSummary().then((line) => {
+    if (line === undefined) return;
+    header.setLoop(line);
     tui.requestRender();
   }, () => {});
   // Catalogs that change, such as a gateway's, are fetched again in the background, as pi does at its start.

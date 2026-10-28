@@ -7,12 +7,15 @@ import { fileURLToPath } from "node:url";
 import { BACKGROUND_CONTEXT } from "@earendil-works/chord/context";
 import { localDaemon } from "@earendil-works/pi-env";
 import { AgentService, launchToken, listen, type Listening } from "@chopin-ai/harness-pi";
+import { LayerVersions } from "@chopin-ai/core";
 import { DirectoryWorkspaceProvider } from "@chopin-ai/workspace";
-import { agentSetup, webApp } from "./agent.js";
-import { chopinHome, writeWhole } from "./home.js";
+import { agentSetup } from "./agent.js";
+import { chopinHome, rsiDirectory, writeWhole } from "./home.js";
 import { exclusive } from "./lock.js";
 import { chopinModels } from "./credentials.js";
 import { resolveModel, type ChooseModel } from "./model.js";
+import { exportTranscripts } from "./rsi/export.js";
+import { evolveIfDue } from "./rsi/schedule.js";
 import { errorChain } from "@chopin-ai/harness-pi/protocol";
 
 export interface Project {
@@ -20,8 +23,6 @@ export interface Project {
   readonly url: URL;
   /** Its credential, which a client sends as a header. */
   readonly token: string;
-  /** The page a browser opens; it carries the credential once, to trade it for a cookie. */
-  readonly page: URL;
 }
 
 export interface DaemonOptions {
@@ -43,6 +44,10 @@ interface ServiceRecord {
   build?: string;
 }
 
+/** How often a running service writes out the conversations the loop learns from, and checks whether the loop is due. */
+const EXPORT_MS = 60_000;
+const EVOLVE_CHECK_MS = 10 * 60_000;
+
 /** The signal that asks a project's service to hand over once its agent has nothing left to do. */
 export const HAND_OVER = "SIGUSR2";
 
@@ -54,6 +59,8 @@ interface Paths {
   lock: string;
   log: string;
   data: string;
+  /** What the loop learned for this project alone. */
+  rsi: string;
 }
 
 /** The built entry, which runs the daemon; the same file whether this module runs from the sources or the build. */
@@ -128,7 +135,15 @@ export async function runDaemon(directory: string, options: DaemonOptions = {}):
     const service = await agentService(paths);
     try {
       const token = randomBytes(32).toString("base64url");
-      const server = await listen(service, { authenticate: launchToken(token), web: webApp() });
+      const server = await listen(service, { authenticate: launchToken(token) });
+      // What the loop learns from is written out as it goes, so it never opens this store itself.
+      const exportNow = () => exportTranscripts(service, join(paths.rsi, "transcripts")).catch((error) => console.error(`chopin: ${errorChain(error)}`));
+      const exporting = setInterval(exportNow, EXPORT_MS);
+      exporting.unref();
+      // The loop runs now and then while the agent has nothing in hand; its own lock keeps it to one at a time.
+      const evolving = setInterval(() => void evolveIfDue(BIN, paths.home, async () => (await service.working()).length === 0)
+        .catch((error) => console.error(`chopin: ${errorChain(error)}`)), EVOLVE_CHECK_MS);
+      evolving.unref();
       try {
         await writeRecord(paths.record, { pid: process.pid, url: `ws://127.0.0.1:${server.port}/`, token, build: options.build ?? await buildId() });
         for (;;) {
@@ -141,6 +156,9 @@ export async function runDaemon(directory: string, options: DaemonOptions = {}):
           if ((server.clients === 0 && server.reachedAt < leaving) || options.signal?.aborted === true) break;
         }
       } finally {
+        clearInterval(exporting);
+        clearInterval(evolving);
+        await exportNow();
         await rm(paths.record, { force: true });
         await server.close();
       }
@@ -155,8 +173,14 @@ export async function runDaemon(directory: string, options: DaemonOptions = {}):
 async function agentService(paths: Paths): Promise<AgentService> {
   return new AgentService({
     ...await agentSetup(),
+    layerVersions: {
+      global: new LayerVersions(join(rsiDirectory(), "layer")),
+      project: new LayerVersions(join(paths.rsi, "layer")),
+      anyModel: true,
+    },
     dataDir: paths.data,
-    workspaces: new DirectoryWorkspaceProvider(paths.root),
+    // Credentials, conversations and the RSI evaluator's records stay out of the agent's reach.
+    workspaces: new DirectoryWorkspaceProvider(paths.root, { hidden: [await realpath(chopinHome())] }),
     daemon: localDaemon(),
     report: (error) => console.error(`chopin: ${errorChain(error)}`),
   });
@@ -263,7 +287,7 @@ async function projectPaths(directory: string): Promise<Paths> {
   await mkdir(home, { recursive: true });
   await chmod(home, 0o700);
   const at = (name: string) => join(home, name);
-  return { home: chopin, root, record: at("service.json"), lock: at("service.lock"), log: at("service.log"), data: at("data") };
+  return { home: chopin, root, record: at("service.json"), lock: at("service.lock"), log: at("service.log"), data: at("data"), rsi: at("rsi") };
 }
 
 /**
@@ -288,9 +312,7 @@ async function writeRecord(file: string, record: ServiceRecord): Promise<void> {
 }
 
 function joined(record: ServiceRecord): Project {
-  const page = new URL(record.url.replace(/^ws/, "http"));
-  page.searchParams.set("token", record.token);
-  return { url: new URL(record.url), token: record.token, page };
+  return { url: new URL(record.url), token: record.token };
 }
 
 function alive(pid: number): boolean {

@@ -40,6 +40,21 @@ describe("DirectoryWorkspaceProvider", () => {
     expect(refused.stdout).not.toContain("HELD=");
   });
 
+  it.runIf(process.platform === "darwin")("keeps every command away from hidden directories, and nothing else", async () => {
+    const top = await realpath(await mkdtemp(join(tmpdir(), "chopin-hidden-")));
+    await mkdir(join(top, "hidden"));
+    await writeFile(join(top, "hidden", "secret"), "s3cret\n");
+    await writeFile(join(top, "open"), "fine\n");
+    const workspace = new DirectoryWorkspaceProvider(top, { hidden: [join(top, "hidden")] }).open("local");
+    const reading = await run(workspace, ["sh", "-c", "cat hidden/secret; ls hidden"]);
+    expect(reading.stdout).toBe("");
+    expect(reading.stderr).toContain("Operation not permitted");
+    expect((await run(workspace, ["sh", "-c", "echo x > hidden/new"])).exitCode).not.toBe(0);
+    // A child the command starts is held as well.
+    expect((await run(workspace, ["sh", "-c", "sh -c 'cat hidden/secret' 2>&1"])).stdout).toContain("Operation not permitted");
+    expect((await run(workspace, ["cat", "open"])).stdout).toBe("fine\n");
+  });
+
   it("reports how a program ended as its exit code, signals and unread input included", async () => {
     const workspace = new DirectoryWorkspaceProvider(process.cwd()).open("local");
     expect((await run(workspace, ["sh", "-c", "exit 4"], { input: "x".repeat(1 << 20) })).exitCode).toBe(4);

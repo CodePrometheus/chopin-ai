@@ -20,25 +20,29 @@ pnpm monorepo, split by boundary rather than by feature:
   workspace and runs tools inside it through the execution daemon, the client protocol with its client library,
   and the ACP bridge.
 - `packages/harness-dsh` — the plugin harness: one plugin that loads the mutable layer, and headless task runs.
-- `apps/web` — the browser UI, a client of the protocol.
 - `apps/tui` — the `chopin` command, published as `chopin-ai`. Local use takes no options: the current directory is
-  the workspace, each project's service runs in the background, owned by no terminal, which every `chopin`, browser
-  and editor joins, and providers and models are picked in the terminal. `chopin serve` runs container workspaces for
-  shared use.
+  the workspace, each project's service runs in the background, owned by no terminal, which every `chopin` and editor
+  joins, and providers and models are picked in the terminal. `chopin serve` runs container workspaces for
+  shared use. The loop runs from here too: services export their transcripts, and `chopin evolve` reads only those.
 
 Every adapter does exactly three things: load the mutable layer, run one task headless and return its transcript
-and workspace diff, and convert transcripts to ACP events. Anything else a harness offers stays in its adapter.
+and workspace diff, and convert transcripts to ACP events. The durable harness also continues a transcript at one step
+without running tools, which the daily loop's gate needs. Anything else a harness offers stays in its adapter.
 
 ## Hard constraints
 
 - The mutable layer has two tiers. Portable: skills (`<name>/SKILL.md`), AGENTS.md instructions, MCP servers and
-  gate rules, shared by both harnesses; a change is accepted only if neither harness regresses and at least one
-  improves. Native: a harness's own code, delivered as a pull request and evaluated on that harness alone.
-- Evaluation runs the same tasks and verifiers on both harnesses, each against its own baseline and noise band,
-  in sandboxes obtained only through the workspace interface.
+  gate rules, shared by both harnesses. Native: a harness's own code, delivered as a pull request and evaluated on
+  that harness alone.
+- The loop has two modes. Daily mode, the default, needs no container: it changes one instruction or skill at a
+  time, and a sealed gate accepts it only on a net gain over continued decision points, at the level the
+  false-acceptance ledger allows. Experiment mode, for benchmarks and native changes, runs the same tasks and
+  verifiers on both harnesses, each against its own baseline and noise band, in sandboxes obtained only through the
+  workspace interface; a portable change is accepted there only if neither harness regresses and one improves.
 - What the agent must not change stays out of its reach: credentials, conversation storage, the evaluator and its
-  tasks, memory. The plugin harness still shares a container with its agent, and local single-user mode runs the
-  agent as the user; those are known exceptions, not precedents, and evaluation runs in container workspaces.
+  tasks, memory. Local mode hides the chopin home from the agent's commands on macOS; other systems, a container
+  engine those commands can reach, and the plugin harness, which shares a container with its agent, are known
+  exceptions, not precedents.
 - A store belongs to one process at a time; scale out by assigning users to processes.
 - Identity comes from short-lived tokens signed by the integrator and verified with its public key. Local
   single-user mode moves a launch token from the address into an `HttpOnly` cookie, and a WebSocket from another

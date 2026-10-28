@@ -6,8 +6,8 @@ import { chatCommand } from "./chat.js";
 import { daemonCommand } from "./daemon.js";
 import { loginCommand } from "./login.js";
 import { useConfiguredProxy } from "./network.js";
+import { evolveCommand, evolveCorrectionsCommand, evolveLogCommand, evolveReviewCommand, evolveStatusCommand, evolveUndoCommand } from "./rsi/evolve.js";
 import { serveCommand } from "./serve.js";
-import { webCommand } from "./web.js";
 
 const argv = process.argv.slice(2);
 // The terminal and the service it starts both reach providers through the configured proxy. A bare `chopin` opens
@@ -15,7 +15,12 @@ const argv = process.argv.slice(2);
 process.exitCode = await useConfiguredProxy().then(() => runCli(argv.length === 0 ? ["chat"] : argv, {
   out: (text) => process.stdout.write(`${text}\n`),
   err: (text) => process.stderr.write(`${text}\n`),
-}, [chatCommand, webCommand, acpCommand, loginCommand, serveCommand, daemonCommand, ...coreCommands])).catch((error: unknown) => {
+}, [
+  chatCommand, acpCommand, loginCommand, serveCommand, daemonCommand,
+  // The longer names first, since a command is the first whose words the arguments start with.
+  evolveStatusCommand, evolveLogCommand, evolveUndoCommand, evolveCorrectionsCommand, evolveReviewCommand, evolveCommand,
+  ...coreCommands,
+])).catch((error: unknown) => {
   process.stderr.write(`chopin: ${errorChain(error)}\n`);
   return 1;
 });

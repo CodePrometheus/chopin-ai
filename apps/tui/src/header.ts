@@ -17,6 +17,8 @@ export class Header implements Component {
   /** Where the layer's instructions are kept. */
   readonly #instructions: string;
   #loaded: Loaded | undefined;
+  /** What the loop that improves the agent did since it was last shown. */
+  #loop: string | undefined;
   #expanded = false;
 
   constructor(version: string, keys: readonly (readonly [string, string])[], instructions: string) {
@@ -28,6 +30,11 @@ export class Header implements Component {
 
   setLoaded(loaded: Loaded): void {
     this.#loaded = loaded;
+    this.#draw();
+  }
+
+  setLoop(line: string): void {
+    this.#loop = line;
     this.#draw();
   }
 
@@ -45,7 +52,7 @@ export class Header implements Component {
   }
 
   #draw(): void {
-    const title = `${style("bold")("chopin")} ${style("dim")(`v${this.#version}`)}`;
+    const title = `${style("bold")("chopin")} ${style("dim")(`v${this.#version}`)}${this.#loop === undefined ? "" : `\n${style("cyan")(this.#loop)}`}`;
     if (!this.#expanded) {
       const hints = MAIN_KEYS.map(([key, what]) => `${key} ${style("dim")(what)}`).join(style("dim")(" · "));
       this.#text.setText(`${title}\n${hints}\n${style("dim")("Press ctrl+o to show every key and what the agent loaded.")}`);

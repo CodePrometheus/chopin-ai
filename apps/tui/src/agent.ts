@@ -1,6 +1,5 @@
 import { stat } from "node:fs/promises";
-import { dirname, join } from "node:path";
-import { fileURLToPath } from "node:url";
+import { join } from "node:path";
 import { loadLayer } from "@chopin-ai/core";
 import type { AgentServiceOptions } from "@chopin-ai/harness-pi";
 import { chopinModels } from "./credentials.js";
@@ -23,9 +22,4 @@ export async function agentSetup(): Promise<Pick<AgentServiceOptions, "models" |
     agent: async () => ({ model: await resolveModel(models, notInteractive) }),
     ...(layer?.ok === true && { layer: layer.layer }),
   };
-}
-
-/** The built web app every chopin service serves. */
-export function webApp(): string {
-  return join(dirname(fileURLToPath(import.meta.resolve("@chopin-ai/web/package.json"))), "dist");
 }

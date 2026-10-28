@@ -12,12 +12,15 @@ export {
   userText,
 } from "./acp.js";
 export { serveAcp } from "./bridge.js";
+export { continueAt, conversationProblems, stepText, transcriptMessages } from "./continuation.js";
+export type { ContinuationInput } from "./continuation.js";
 export type { BridgeOptions } from "./bridge.js";
 export { IdleCompactionEntry } from "./idle-compaction.js";
-export { layerExtension } from "./layer.js";
+export { layerExtension, pinLayerVersions } from "./layer.js";
+export type { LayerSource } from "./layer.js";
 export { McpServers } from "./mcp.js";
 export { AgentService, DAEMON_PATH } from "./service.js";
-export type { AgentServiceOptions } from "./service.js";
+export type { AgentServiceOptions, Changed } from "./service.js";
 export { integratorTokens, launchToken } from "./auth.js";
 export type { Authenticate, IntegratorTokenOptions } from "./auth.js";
 export { ModeDoc } from "./mode.js";

@@ -5,9 +5,9 @@ import { BACKGROUND_CONTEXT as context } from "@earendil-works/chord/context";
 import { createModels, Type } from "@earendil-works/pi-ai";
 import { fauxAssistantMessage, fauxProvider, fauxToolCall } from "@earendil-works/pi-ai/providers/faux";
 import { createRegistry, defineExtension, defineTool, Harness, MemoryStorage } from "@earendil-works/pi-durable";
-import type { Layer } from "@chopin-ai/core";
+import { LayerVersions, type Layer, type LayerItem } from "@chopin-ai/core";
 import { describe, expect, it } from "vitest";
-import { AgentService, layerExtension } from "../src/index.js";
+import { AgentService, layerExtension, pinLayerVersions } from "../src/index.js";
 
 const tool = (name: string, isError = false) =>
   defineTool({ name, description: name, parameters: Type.Object({}), execute: async () => ({ output: [{ type: "text", text: `${name} ran` }], isError }) });
@@ -88,5 +88,45 @@ describe("AgentService", () => {
       .toThrow("requires run_tests, which no tool provides");
     expect(() => new AgentService({ ...options, layer: { ...empty, gates: [{ ...gate, tool: "bash", requires: ["read"] }] } }))
       .not.toThrow();
+  });
+});
+
+describe("layer versions", () => {
+  const item = (id: string, text: string, models: string[]): LayerItem => ({
+    id, kind: "instruction", text, validated: { models, harnesses: ["pi"] }, source: {}, pinned: false, archived: false,
+    added: "2026-10-27T00:00:00.000Z",
+  });
+
+  it("keeps each conversation on the versions in use when it was made, filtered to its model", async () => {
+    const versions = new LayerVersions(join(await mkdtemp(join(tmpdir(), "chopin-pinned-")), "layer"));
+    const faux = fauxProvider();
+    const models = createModels();
+    models.setProvider(faux.provider);
+    faux.setResponses([fauxAssistantMessage("One."), fauxAssistantMessage("Two."), fauxAssistantMessage("Three.")]);
+    const model = faux.getModel();
+    const mine = `${model.provider}/${model.id}`;
+    await versions.commit(() => [item("a", "Rule from version one.", [mine]), item("b", "Rule for another model.", ["other/model"])]);
+    const source = { global: versions };
+    const registry = createRegistry();
+    registry.install(layerExtension(empty, new Set(["skill"]), source));
+    const harness = await Harness.open(new MemoryStorage(), { models, registry, conversationCreated: pinLayerVersions(source) }, context);
+    const agent = { model: { provider: model.provider, modelId: model.id } };
+    const prompt = async (conversation: Awaited<ReturnType<typeof harness.createConversation>>) => {
+      await (await conversation.submit({ type: "input", content: "Go." }, context)).wait(context);
+      const { messages } = await conversation.context(context);
+      return messages.filter((message) => message.role === "system").map((message) => JSON.stringify(message)).join("");
+    };
+
+    const early = await harness.createConversation({ ownership: { kind: "ownerless" }, agent }, context);
+    const first = await prompt(early);
+    expect(first).toContain("Rule from version one.");
+    expect(first).not.toContain("Rule for another model.");
+
+    await versions.commit(() => [item("a", "Rule from version two.", [mine])]);
+    const later = await harness.createConversation({ ownership: { kind: "ownerless" }, agent }, context);
+    expect(await prompt(later)).toContain("Rule from version two.");
+    const again = await prompt(early);
+    expect(again).toContain("Rule from version one.");
+    expect(again).not.toContain("Rule from version two.");
   });
 });

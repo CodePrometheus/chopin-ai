@@ -8,6 +8,10 @@ export interface ChopinMeta {
   cost?: { amount: number; currency: string };
   /** Why the turn ended without an answer. */
   error?: string;
+  /** The harness's diagnostic codes on a tool result: `blocked` for a call a hook refused, `rejected` for one the user did. */
+  diagnostics?: string[];
+  /** A user-role message the harness added, such as a reminder or a command's output, rather than one the user wrote. */
+  injected?: boolean;
 }
 
 type Meta = Record<string, unknown> | null | undefined;

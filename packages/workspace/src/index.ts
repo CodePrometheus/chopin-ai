@@ -5,3 +5,4 @@ export type { ContainerCli, ContainerWorkspaceOptions } from "./container.js";
 export { diff, run, snapshot } from "./run.js";
 export type { RunOptions, RunResult } from "./run.js";
 export { DirectoryWorkspaceProvider } from "./directory.js";
+export type { DirectoryWorkspaceOptions } from "./directory.js";

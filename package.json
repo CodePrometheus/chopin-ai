@@ -13,8 +13,8 @@
     "node": ">=24.8.0"
   },
   "scripts": {
-    "build": "tsc -b && pnpm --filter @chopin-ai/web build",
-    "typecheck": "tsc -b && tsc -p tsconfig.test.json && tsc -p apps/web",
+    "build": "tsc -b",
+    "typecheck": "tsc -b && tsc -p tsconfig.test.json",
     "test": "vitest run"
   },
   "devDependencies": {

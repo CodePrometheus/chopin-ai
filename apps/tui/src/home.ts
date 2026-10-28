@@ -22,6 +22,23 @@ export interface Settings {
   deviceId?: string;
   /** A proxy for every request, used when HTTP_PROXY and HTTPS_PROXY name none. */
   httpProxy?: string;
+  /** How the loop that improves the agent runs. */
+  rsi?: RsiSettings;
+}
+
+export interface RsiSettings {
+  /** Directories of other agents' session logs to learn from, one JSON object per line. */
+  transcriptSources?: string[];
+  /** What the loop may spend a week, in US dollars at list prices. */
+  weeklyBudgetUsd?: number;
+  /** The model for the loop's frequent, cheap calls, as `provider/model`: sorting failures. */
+  regularModel?: string;
+  /** The model for the loop's judges and auditor, as `provider/model`; the agent's own model proposes changes. */
+  strongModel?: string;
+  /** A file of practices the user has ruled out, which the auditor holds every change to. */
+  rulesFile?: string;
+  /** Whether a change the auditor cannot settle waits for the user's review, rather than being refused. */
+  holdForReview?: boolean;
 }
 
 const settingsFile = () => join(chopinHome(), "config.json");
@@ -29,6 +46,11 @@ const settingsFile = () => join(chopinHome(), "config.json");
 /** Where the portable layer every agent of this machine loads is kept. */
 export function layerDirectory(): string {
   return join(chopinHome(), "layer");
+}
+
+/** Where the loop keeps what it learned for every project, and its records: the ledger, calibration, refusals. */
+export function rsiDirectory(): string {
+  return join(chopinHome(), "rsi");
 }
 
 export async function readSettings(): Promise<Settings> {

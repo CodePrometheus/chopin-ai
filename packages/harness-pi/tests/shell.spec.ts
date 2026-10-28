@@ -1,10 +1,12 @@
-import { mkdtemp } from "node:fs/promises";
+import { mkdir, mkdtemp, realpath, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { BACKGROUND_CONTEXT as context } from "@earendil-works/chord/context";
 import { createModels, type UserMessage } from "@earendil-works/pi-ai";
 import { fauxAssistantMessage, fauxProvider } from "@earendil-works/pi-ai/providers/faux";
 import type { ConversationView, EntryRecord } from "@earendil-works/pi-durable";
+import { localDaemon } from "@earendil-works/pi-env";
+import { DirectoryWorkspaceProvider, type WorkspaceProvider } from "@chopin-ai/workspace";
 import { describe, expect, it } from "vitest";
 import { AgentService, launchToken, listen, ShellEntry, shellText } from "../src/index.js";
 import { connect, Conversation, Conversations } from "../src/protocol.js";
@@ -22,15 +24,17 @@ describe("shellText", () => {
   });
 });
 
-async function started(responses: Parameters<ReturnType<typeof fauxProvider>["setResponses"]>[0] = []) {
+type Setup = (root: string) => { workspaces: WorkspaceProvider; daemon?: string };
+
+async function started(responses: Parameters<ReturnType<typeof fauxProvider>["setResponses"]>[0] = [], setup: Setup = (root) => ({ workspaces: localWorkspace(root) })) {
   const faux = fauxProvider();
   const models = createModels();
   models.setProvider(faux.provider);
   faux.setResponses(responses);
   const model = faux.getModel();
-  const root = await mkdtemp(join(tmpdir(), "chopin-shell-"));
+  const root = await realpath(await mkdtemp(join(tmpdir(), "chopin-shell-")));
   const service = new AgentService({
-    dataDir: await mkdtemp(join(tmpdir(), "chopin-shell-data-")), workspaces: localWorkspace(root), models: () => models,
+    dataDir: await mkdtemp(join(tmpdir(), "chopin-shell-data-")), ...setup(root), models: () => models,
     agent: { model: { provider: model.provider, modelId: model.id } },
   });
   const server = await listen(service, { authenticate: launchToken("secret") });
@@ -72,6 +76,26 @@ describe("a user's command", () => {
       expect(unseen?.data).toMatchObject({ output: "secret", exitCode: 0, excluded: true });
       expect(unseen?.model).toBeUndefined();
       expect(conversation.running.value).toBeNull();
+    } finally {
+      await close();
+    }
+  });
+
+  it.runIf(process.platform === "darwin")("cannot see a directory the workspace hides, and works as ever around it", async () => {
+    const { root, client, conversation, entries, until, close } = await started([], (root) => ({
+      workspaces: new DirectoryWorkspaceProvider(root, { hidden: [join(root, "hidden")] }), daemon: localDaemon(),
+    }));
+    try {
+      await mkdir(join(root, "hidden"));
+      await writeFile(join(root, "hidden", "auth.json"), "s3cret\n");
+      await writeFile(join(root, "notes.txt"), "mine\n");
+      await client.root((ctx) => conversation.shell({ command: "cat hidden/auth.json; ls hidden; cat notes.txt" }, ctx));
+      await until(() => shellRuns(entries()).length === 1);
+      const output = (shellRuns(entries())[0]?.data as { output: string }).output;
+      expect(output).not.toContain("s3cret");
+      expect(output).not.toContain("auth.json\n");
+      expect(output).toContain("Operation not permitted");
+      expect(output).toContain("mine");
     } finally {
       await close();
     }

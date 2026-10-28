@@ -8,7 +8,7 @@ import { AgentService, integratorTokens, launchToken, listen } from "@chopin-ai/
 import { errorChain, errorText } from "@chopin-ai/harness-pi/protocol";
 import { createRemoteJWKSet } from "jose";
 import { ContainerWorkspaceProvider } from "@chopin-ai/workspace";
-import { agentSetup, webApp } from "./agent.js";
+import { agentSetup } from "./agent.js";
 import { chopinHome } from "./home.js";
 
 /**
@@ -76,7 +76,7 @@ export const serveCommand: Command = {
     try {
       // Caught before the address is announced, so a signal sent right after it still shuts down cleanly.
       const stopped = Promise.race([once(process, "SIGINT"), once(process, "SIGTERM")]);
-      const server = await listen(service, { authenticate, port, web: webApp() });
+      const server = await listen(service, { authenticate, port });
       try {
         if (values.jwks === undefined) {
           io.err(`chopin: serving ws://127.0.0.1:${server.port}/ for one owner with credential ${token}; pass --jwks to serve each owner the integrator names`);

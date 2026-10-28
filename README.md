@@ -15,7 +15,7 @@
 </div>
 
 > **Status:** `v0.2.0` is the agent. The loop that improves it is the next release; see
-> [How it will improve itself](#how-it-will-improve-itself).
+> [How it improves itself](#how-it-improves-itself).
 
 ## Install
 
@@ -38,8 +38,8 @@ The first run connects a provider, by its sign-in or an API key, and picks a mod
 
 - **Durable conversations.** Every step is saved before it is shown, so a run cut off by a restart picks up where
   it stopped.
-- **One agent, every client.** Each project has a background service; the terminal, the browser (`chopin web`)
-  and editors (`chopin acp`) join the same conversation, and closing the terminal leaves the agent working.
+- **One agent, every client.** Each project has a background service; the terminal and editors (`chopin acp`)
+  join the same conversation, and closing the terminal leaves the agent working.
 - **Any provider.** `/login` connects one by its sign-in or an API key; `/model` and `ctrl+p` switch models
   mid-conversation.
 - **Your shell in the conversation.** `!command` runs a command the agent then sees; `!!command` keeps it to you.
@@ -51,22 +51,36 @@ The first run connects a provider, by its sign-in or an API key, and picks a mod
 - **Workspaces per user.** `chopin serve` runs one container workspace per user, who is named by the integrator's
   signed tokens.
 
-## How it will improve itself
+## How it improves itself
 
 The agent's behavior lives in a mutable layer: `AGENTS.md` instructions, Agent Skills, MCP servers and gate rules,
-shared by both harnesses, plus each harness's own code. The coming RSI (recursive self-improvement) loop changes
-that layer and accepts a change only when a sealed evaluator, out of the agent's reach, shows that it helps at
-least one harness and regresses neither. The layer uses open formats, so what it learns carries over to other
-agents.
+shared by both harnesses, plus each harness's own code. The layer uses open formats, so what it learns carries over
+to other agents. Write your own in `~/.chopin/layer`, and check one with `chopin layer check <dir>`.
 
-The layer is already loaded today: put it in `~/.chopin/layer`, and check one with `chopin layer check <dir>`.
+The RSI (recursive self-improvement) loop runs in the background on your local sessions, chopin's and other agents'.
+When one kind of failure recurs in two sessions and still happens often when those sessions are resumed, it reads every
+time it happened, with your corrections, and proposes a single instruction or skill. It keeps the change only when,
+resumed at the steps that failed and at steps that went right in other conversations, it mends at least two of the
+failures and fixes more than it breaks, so that false gains stay a bounded share of the changes kept. Each change can
+be undone, one unused for 30 days is archived, and spending stops at a weekly budget.
+
+- `chopin evolve` runs a round now; `evolve status`, `evolve log` and `evolve undo <id>` show and revert changes.
+- `chopin evolve corrections` asks, kind by kind, whether the agent should learn from how your messages corrected it.
+- `chopin evolve review` approves or refuses the changes the audit could not settle, held for you when
+  `holdForReview` is on; an approved one is still tested before it is kept.
+- `rsi` in `~/.chopin/config.json` turns it on: `regularModel`, `strongModel`, `weeklyBudgetUsd`,
+  `transcriptSources` for other agents' session logs, `rulesFile` for rules no change may break, and `holdForReview`.
+
+On macOS, commands the agent runs can neither read nor write `~/.chopin`, which holds credentials, conversations
+and the loop's records. Other systems do not enforce this, and neither does a container engine the agent's commands
+can reach, since a container can mount any directory.
 
 ## Configuration
 
 | Where | What |
 |---|---|
 | `~/.chopin/auth.json` | Credentials saved by `/login`; a provider's usual environment variable works too |
-| `~/.chopin/config.json` | Default model, `enabledModels` for `ctrl+p`, theme, `httpProxy` |
+| `~/.chopin/config.json` | Default model, `enabledModels` for `ctrl+p`, theme, `httpProxy`, `rsi` |
 | `~/.chopin/models.json` | Extra providers and models |
 | `~/.chopin/layer/` | `AGENTS.md`, `skills/<name>/SKILL.md`, `mcp.json`, `gates.yaml` |
 | `CHOPIN_MODEL` | Overrides the default model |
@@ -80,8 +94,8 @@ checkout with `pnpm --filter @chopin-ai/harness-pi image`. Clients reach it thro
 
 | Package | Purpose |
 |---|---|
-| `chopin-ai` | The `chopin` command: terminal client, web app, ACP and the project service |
-| `@chopin-ai/core` | Mutable-layer formats, ACP transcripts and `chopin layer check` |
+| `chopin-ai` | The `chopin` command: terminal client, ACP and the project service |
+| `@chopin-ai/core` | Mutable-layer formats, ACP transcripts, the RSI loop's core and `chopin layer check` |
 | `@chopin-ai/workspace` | Workspace lifecycle interface with directory and container implementations |
 | `@chopin-ai/harness-pi` | Durable harness adapter: agent service, client protocol, ACP bridge |
 | `@chopin-ai/harness-dsh` | Plugin harness adapter: mutable-layer loading, headless runs |

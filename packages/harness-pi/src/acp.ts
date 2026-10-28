@@ -1,7 +1,7 @@
 import type { ContentBlock, StopReason, ToolCallContent, ToolKind, SessionUpdate, Usage as AcpUsage } from "@agentclientprotocol/sdk";
 import type { AssistantMessage, ImageContent, Message, TextContent, Usage, UserMessage } from "@earendil-works/pi-ai";
 import type { ConversationView, EntryRecord } from "@earendil-works/pi-durable";
-import type { TranscriptEntry } from "@chopin-ai/core";
+import { withChopinMeta, type TranscriptEntry } from "@chopin-ai/core";
 
 /** A tool call's input as clients show it: its JSON, or nothing when it has none or no JSON says it. */
 export function inputText(rawInput: unknown): string {
@@ -30,7 +30,14 @@ export function entryTranscript(sessionId: string, entries: readonly EntryRecord
 
 /** What a committed entry says, in ACP. Entries without a model-facing message say nothing. */
 export function entryUpdates(entry: EntryRecord): SessionUpdate[] {
-  return (entry.model ?? []).flatMap(messageUpdates);
+  const codes = diagnosticCodes(entry);
+  return (entry.model ?? []).flatMap(messageUpdates).map((update) =>
+    codes.length > 0 && update.sessionUpdate === "tool_call_update" ? withChopinMeta(update, { diagnostics: codes }) : update);
+}
+
+function diagnosticCodes(entry: EntryRecord): string[] {
+  const diagnostics = (entry.data as { diagnostics?: { code?: unknown }[] } | undefined)?.diagnostics;
+  return Array.isArray(diagnostics) ? diagnostics.flatMap((d) => (typeof d.code === "string" ? [d.code] : [])) : [];
 }
 
 /** What the agent is generating right now, in ACP; nothing between generations. */

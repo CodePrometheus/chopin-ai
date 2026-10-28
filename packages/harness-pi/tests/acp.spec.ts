@@ -28,6 +28,17 @@ describe("entryUpdates", () => {
       }]);
   });
 
+  it("carries a tool result's diagnostic codes, so a refused call reads as refused", () => {
+    const blocked = {
+      ...entry([{ role: "toolResult", toolCallId: "c1", toolName: "bash", isError: true, content: [] }]),
+      data: { diagnostics: [{ severity: "error", code: "blocked", message: "Tool call blocked: run the tests first" }] },
+    } as unknown as EntryRecord;
+    expect(entryUpdates(blocked)).toEqual([{
+      sessionUpdate: "tool_call_update", toolCallId: "c1", status: "failed", content: [],
+      _meta: { "chopin-ai": { diagnostics: ["blocked"] } },
+    }]);
+  });
+
   it("says nothing for entries the model never sees", () => {
     expect(entryUpdates(entry([{ role: "system", content: "" }]))).toEqual([]);
     expect(entryUpdates({ id: 1, conversationId: 1, kind: "app.note" } as unknown as EntryRecord)).toEqual([]);

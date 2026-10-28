@@ -11,7 +11,7 @@ import { describe, expect, it } from "vitest";
 const bin = fileURLToPath(new URL("../dist/bin.js", import.meta.url));
 
 describe("chopin serve", () => {
-  it("serves with the chosen model until interrupted, web app included", async () => {
+  it("serves with the chosen model until interrupted, and no web page", async () => {
     const [model] = builtinModels().getModels();
     const child = spawn(process.execPath, [bin, "serve"], {
       env: { ...process.env, CHOPIN_HOME: await mkdtemp(join(tmpdir(), "chopin-home-")), CHOPIN_MODEL: `${model?.provider}/${model?.id}` },
@@ -29,8 +29,7 @@ describe("chopin serve", () => {
     const conversations = await host.get(Conversations, {});
     expect(await host.root((ctx) => conversations.create(ctx))).toBeTypeOf("number");
     await host.close();
-    const index = await (await fetch(`http://127.0.0.1:${address.port}/`)).text();
-    expect(index).toContain('<div id="root">');
+    expect((await fetch(`http://127.0.0.1:${address.port}/`)).status).toBe(404);
 
     child.kill("SIGTERM");
     const [code] = await once(child, "exit");
