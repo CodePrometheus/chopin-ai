@@ -97,6 +97,7 @@ can reach, since a container can mount any directory.
 | `~/.chopin/layer/` | `AGENTS.md`, `skills/<name>/SKILL.md`, `mcp.json`, `gates.yaml` |
 | `CHOPIN_MODEL` | Overrides the default model |
 | `CHOPIN_HOME` | Moves `~/.chopin` |
+| `CHOPIN_TOKEN` | The one credential `chopin serve --workspace-port` admits |
 | `HTTP_PROXY`, `HTTPS_PROXY` | Route requests through a proxy |
 
 ## For integrators
@@ -104,11 +105,17 @@ can reach, since a container can mount any directory.
 `chopin serve --jwks <url>` runs agents for many users, each in a container workspace; build the image from a
 checkout with `pnpm --filter @chopin-ai/harness-pi image`. Clients reach it through the client protocol or ACP.
 
+`chopin serve --workspace-port <port> --root <dir>` serves one user whose workspace runs beside it on the same
+network, such as another container of the same pod, running the workspace package's
+`loopback-listener.sh <port> <daemon>`. It admits the credential in `CHOPIN_TOKEN`, starts conversations with the
+model `CHOPIN_MODEL` names, and `GET /status` with that credential says whether it is busy. The user's client hands
+it their model API key through the client protocol, and it keeps the key in memory alone.
+
 | Package | Purpose |
 |---|---|
 | `chopin-ai` | The `chopin` command: terminal client, ACP and the project service |
 | `@chopin-ai/core` | Mutable-layer formats, ACP transcripts, the RSI loop's core and `chopin layer check` |
-| `@chopin-ai/workspace` | Workspace lifecycle interface with directory and container implementations |
+| `@chopin-ai/workspace` | Workspace lifecycle interface with directory, container and socket implementations |
 | `@chopin-ai/harness-pi` | Durable harness adapter: agent service, client protocol, ACP bridge |
 | `@chopin-ai/harness-dsh` | Plugin harness adapter: mutable-layer loading, headless runs |
 

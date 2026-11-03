@@ -4,16 +4,22 @@ import { createServer, type AddressInfo } from "node:net";
 import { mkdtemp } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { fileURLToPath } from "node:url";
 import { BACKGROUND_CONTEXT as context } from "@earendil-works/chord/context";
 import { ROOT_CONVERSATION_ID } from "@earendil-works/pi-durable";
-import { createModels } from "@earendil-works/pi-ai";
+import { createModels, InMemoryCredentialStore } from "@earendil-works/pi-ai";
+import { anthropicProvider } from "@earendil-works/pi-ai/providers/anthropic";
 import { fauxAssistantMessage, fauxProvider } from "@earendil-works/pi-ai/providers/faux";
 import type { Workspace, WorkspaceProvider } from "@chopin-ai/workspace";
+import { build } from "esbuild";
 import { generateKeyPair, SignJWT } from "jose";
 import { describe, expect, it } from "vitest";
 import { credentialOf } from "../src/auth.js";
 import { AgentService, integratorTokens, launchToken, listen } from "../src/index.js";
-import { CallTimeout, connect, Conversation, Conversations, endText, errorChain, errorText, heldList, lastFailure, openConversations } from "../src/protocol.js";
+import {
+  CallTimeout, connect, Conversation, Conversations, Credentials, endText, errorChain, errorText, heldList, IMAGES_MAX, lastFailure, Loop, openConversations,
+  type LoopControl, type LoopStanding,
+} from "../src/protocol.js";
 
 const nowhere: WorkspaceProvider = {
   open: (owner): Workspace => ({
@@ -288,12 +294,221 @@ describe("client protocol", () => {
     const client = connect(`ws://127.0.0.1:${server.port}/?token=secret`);
     try {
       const conversations = await client.get(Conversations, {});
+      const choices = await client.root((ctx) => conversations.models(ctx));
+      expect(choices.models.map(({ modelId }) => modelId)).toEqual(["alpha", "beta"]);
+      expect(choices.current).toEqual({ provider: faux.provider.id, modelId: "alpha" });
       const conversation = await client.get(Conversation, { conversation: await client.root((ctx) => conversations.create(ctx)) });
       const modelOf = (view: unknown) => (view as { docs: Record<string, { model?: { modelId?: string } } | undefined> }).docs["pi.agent"]?.model?.modelId;
       expect(modelOf(conversation.view.value)).toBe("alpha");
       await client.root((ctx) => conversation.setModel({ provider: faux.provider.id, modelId: "beta" }, ctx));
       await until(conversation.view.subscribe.bind(conversation.view), (view) => modelOf(view) === "beta");
       await expect(client.root((ctx) => conversation.setModel({ provider: faux.provider.id, modelId: "gamma" }, ctx))).rejects.toThrow("unusable_model");
+    } finally {
+      await client.close();
+      await server.close();
+      await service.close(context);
+    }
+  });
+
+  it("tells the model what the client shows its user, as it stands at each request", async () => {
+    const faux = fauxProvider();
+    const models = createModels();
+    models.setProvider(faux.provider);
+    // The client's context as the latest system entry of each request has it: changes are appended, never rewritten.
+    const seen: unknown[] = [];
+    const answer = (context: { messages: { role: string; sections?: Record<string, unknown> }[] }) => {
+      seen.push(context.messages.filter((message) => message.role === "system" && message.sections !== undefined && "client_context" in message.sections)
+        .at(-1)?.sections?.client_context);
+      return fauxAssistantMessage("Noted.");
+    };
+    faux.setResponses([answer, answer]);
+    const model = faux.getModel();
+    const service = new AgentService({
+      dataDir: await mkdtemp(join(tmpdir(), "chopin-protocol-")), workspaces: nowhere, models: () => models,
+      agent: { model: { provider: model.provider, modelId: model.id } },
+    });
+    const server = await listen(service, { authenticate: launchToken("secret") });
+    const client = connect(`ws://127.0.0.1:${server.port}/?token=secret`);
+    const answered = (count: number) => until(conversation.view.subscribe.bind(conversation.view), (view) => JSON.stringify(view).split("Noted.").length > count);
+    let conversation: Awaited<ReturnType<typeof client.get<typeof Conversation>>>;
+    try {
+      const conversations = await client.get(Conversations, {});
+      conversation = await client.get(Conversation, { conversation: await client.root((ctx) => conversations.create(ctx)) });
+      await client.root((ctx) => conversation.setContext({ text: "The user is looking at the runs page." }, ctx));
+      await client.root((ctx) => conversation.submit({ text: "Hi." }, ctx));
+      await answered(1);
+      expect(seen[0]).toContain("The user is looking at the runs page.");
+      await client.root((ctx) => conversation.setContext({ text: "" }, ctx));
+      await client.root((ctx) => conversation.submit({ text: "And now?" }, ctx));
+      await answered(2);
+      expect(seen[1]).toBeNull();
+    } finally {
+      await client.close();
+      await server.close();
+      await service.close(context);
+    }
+  });
+
+  it("asks the latest message again, as it was or replaced, and starts the model afresh on a reset", async () => {
+    const faux = fauxProvider();
+    const models = createModels();
+    models.setProvider(faux.provider);
+    // What each request showed the model of the conversation: its users' and its own words, in order.
+    const seen: string[][] = [];
+    const answer = (n: number) => (context: { messages: { role: string; content: unknown }[] }) => {
+      seen.push(context.messages.filter(({ role }) => role === "user" || role === "assistant")
+        .map(({ content }) => (typeof content === "string" ? content : (content as { text?: string }[]).map((block) => block.text ?? "").join(""))));
+      return fauxAssistantMessage(`Answer ${n}.`);
+    };
+    faux.setResponses([answer(1), answer(2), answer(3), answer(4)]);
+    const model = faux.getModel();
+    const service = new AgentService({
+      dataDir: await mkdtemp(join(tmpdir(), "chopin-protocol-")), workspaces: nowhere, models: () => models,
+      agent: { model: { provider: model.provider, modelId: model.id } },
+    });
+    const server = await listen(service, { authenticate: launchToken("secret") });
+    const client = connect(`ws://127.0.0.1:${server.port}/?token=secret`);
+    try {
+      const conversations = await client.get(Conversations, {});
+      const conversation = await client.get(Conversation, { conversation: await client.root((ctx) => conversations.create(ctx)) });
+      const answered = (n: number) => until(conversation.view.subscribe.bind(conversation.view), (view) => JSON.stringify(view).includes(`Answer ${n}.`));
+      await expect(client.root((ctx) => conversation.retry({}, ctx))).rejects.toThrow("nothing_to_retry");
+      await client.root((ctx) => conversation.submit({ text: "Question." }, ctx));
+      await answered(1);
+
+      await client.root((ctx) => conversation.retry({}, ctx));
+      await answered(2);
+      expect(seen[1]).toEqual(["Question."]);
+      await client.root((ctx) => conversation.retry({ text: "Better question." }, ctx));
+      await answered(3);
+      expect(seen[2]).toEqual(["Better question."]);
+      await expect(client.root((ctx) => conversation.retry({ text: "" }, ctx))).rejects.toThrow("empty_message");
+
+      await client.root((ctx) => conversation.reset({}, ctx));
+      await client.root((ctx) => conversation.submit({ text: "Fresh." }, ctx));
+      await answered(4);
+      expect(seen[3]).toEqual(["Fresh."]);
+    } finally {
+      await client.close();
+      await server.close();
+      await service.close(context);
+    }
+  });
+
+  it("carries the images a message shows, and refuses one that says and shows nothing", async () => {
+    const faux = fauxProvider();
+    const models = createModels();
+    models.setProvider(faux.provider);
+    faux.setResponses([fauxAssistantMessage("A single pixel.")]);
+    const model = faux.getModel();
+    const service = new AgentService({
+      dataDir: await mkdtemp(join(tmpdir(), "chopin-protocol-")), workspaces: nowhere, models: () => models,
+      agent: { model: { provider: model.provider, modelId: model.id } },
+    });
+    const server = await listen(service, { authenticate: launchToken("secret") });
+    const client = connect(`ws://127.0.0.1:${server.port}/?token=secret`);
+    const pixel = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR4nGNgYGD4DwABBAEAwS2OUAAAAABJRU5ErkJggg==";
+    try {
+      const conversations = await client.get(Conversations, {});
+      const conversation = await client.get(Conversation, { conversation: await client.root((ctx) => conversations.create(ctx)) });
+      await client.root((ctx) => conversation.submit({ text: "What is this?", images: [{ data: pixel, mimeType: "image/png" }] }, ctx));
+      const view = await until(conversation.view.subscribe.bind(conversation.view), (value) => JSON.stringify(value).includes("A single pixel."));
+      expect(JSON.stringify(view)).toContain(pixel);
+      // An image alone is a message too; nothing at all is not.
+      await client.root((ctx) => conversation.submit({ text: "", images: [{ data: pixel, mimeType: "image/png" }] }, ctx));
+      await expect(client.root((ctx) => conversation.submit({ text: "" }, ctx))).rejects.toThrow("empty_message");
+      await expect(client.root((ctx) => conversation.submit({ text: "x", images: [{ data: pixel, mimeType: "image/tiff" as "image/png" }] }, ctx))).rejects.toThrow();
+      const many = Array.from({ length: IMAGES_MAX + 1 }, () => ({ data: pixel, mimeType: "image/png" as const }));
+      await expect(client.root((ctx) => conversation.submit({ text: "x", images: many }, ctx))).rejects.toThrow();
+    } finally {
+      await client.close();
+      await server.close();
+      await service.close(context);
+    }
+  });
+
+  it("keeps a key a client sets where the owner's models read credentials, and shows only which providers have one", async () => {
+    const credentials = new InMemoryCredentialStore();
+    // Nothing from this machine's environment counts, so only the key set here can reach the provider.
+    const models = createModels({ credentials, authContext: { env: async () => undefined, fileExists: async () => false } });
+    models.setProvider(anthropicProvider());
+    const service = new AgentService({
+      dataDir: await mkdtemp(join(tmpdir(), "chopin-protocol-")), workspaces: nowhere, models: () => models, credentials: () => credentials,
+    });
+    const server = await listen(service, { authenticate: launchToken("secret") });
+    const client = connect(`ws://127.0.0.1:${server.port}/?token=secret`);
+    try {
+      const keys = await client.get(Credentials, {});
+      const conversations = await client.get(Conversations, {});
+      const choices = () => client.root((ctx) => conversations.models(ctx));
+      expect(keys.providers.value).toEqual([]);
+      expect((await choices()).models).toEqual([]);
+      await client.root((ctx) => keys.setKey({ provider: "anthropic", key: "sk-test-key" }, ctx));
+      await until(keys.providers.subscribe.bind(keys.providers), (providers) => providers.length === 1);
+      expect(keys.providers.value).toEqual([{ provider: "anthropic", type: "api_key" }]);
+      expect((await models.getAuth("anthropic"))?.auth).toMatchObject({ apiKey: "sk-test-key" });
+      // The provider's models are the owner's to pick from once its key is set.
+      const usable = (await choices()).models;
+      expect(usable.length).toBeGreaterThan(0);
+      expect(usable.every((model) => model.provider === "anthropic" && model.thinkingLevels.length > 0)).toBe(true);
+      await expect(client.root((ctx) => keys.setKey({ provider: "nowhere", key: "k" }, ctx))).rejects.toThrow("credential_refused");
+
+      await client.root((ctx) => keys.remove({ provider: "anthropic" }, ctx));
+      await until(keys.providers.subscribe.bind(keys.providers), (providers) => providers.length === 0);
+      expect(await models.getAuth("anthropic")).toBeUndefined();
+    } finally {
+      await client.close();
+      await server.close();
+      await service.close(context);
+    }
+  });
+
+  it("answers the owner from the service's RSI loop, refusing an action the loop refuses, and says when there is none", async () => {
+    const standing: LoopStanding = { version: 3, inUse: 2, archived: 1, kinds: 4, recurring: 1, shelved: 0, corrections: 1, held: 0, spentUsd: 0.5, weeklyBudgetUsd: 5 };
+    const decided: string[] = [];
+    const loop: LoopControl = {
+      standing: async () => standing,
+      changes: async () => [],
+      undo: async (id) => (id === "known" ? undefined : `no change in use starts with ${id}`),
+      corrections: async () => [],
+      answer: async (key, learn) => void decided.push(`${key}:${learn}`),
+      held: async () => [],
+      decide: async () => undefined,
+      settings: async () => ({ weeklyBudgetUsd: 5, regularModel: null, strongModel: null, holdForReview: false }),
+      setSettings: async (change) => ({ weeklyBudgetUsd: 5, regularModel: null, strongModel: null, holdForReview: false, ...change }),
+    };
+    const service = new AgentService({ dataDir: await mkdtemp(join(tmpdir(), "chopin-protocol-")), workspaces: nowhere, models: () => createModels() });
+    const withLoop = await listen(service, { authenticate: launchToken("secret"), loop });
+    const without = await listen(service, { authenticate: launchToken("secret") });
+    const client = connect(`ws://127.0.0.1:${withLoop.port}/?token=secret`);
+    const other = connect(`ws://127.0.0.1:${without.port}/?token=secret`);
+    try {
+      const theLoop = await client.get(Loop, {});
+      expect(await client.root((ctx) => theLoop.standing(ctx))).toEqual(standing);
+      await client.root((ctx) => theLoop.undo({ id: "known" }, ctx));
+      await expect(client.root((ctx) => theLoop.undo({ id: "other" }, ctx))).rejects.toThrow("loop_refused");
+      await client.root((ctx) => theLoop.answer({ key: "terse", learn: true }, ctx));
+      expect(decided).toEqual(["terse:true"]);
+      expect((await client.root((ctx) => theLoop.setSettings({ holdForReview: true }, ctx))).holdForReview).toBe(true);
+      const none = await other.get(Loop, {});
+      await expect(other.root((ctx) => none.standing(ctx))).rejects.toThrow("no_loop");
+    } finally {
+      await client.close();
+      await other.close();
+      await withLoop.close();
+      await without.close();
+      await service.close(context);
+    }
+  });
+
+  it("refuses credentials from clients where the service takes its own from where it runs", async () => {
+    const service = new AgentService({ dataDir: await mkdtemp(join(tmpdir(), "chopin-protocol-")), workspaces: nowhere, models: () => createModels() });
+    const server = await listen(service, { authenticate: launchToken("secret") });
+    const client = connect(`ws://127.0.0.1:${server.port}/?token=secret`);
+    try {
+      const keys = await client.get(Credentials, {});
+      expect(keys.providers.value).toEqual([]);
+      await expect(client.root((ctx) => keys.setKey({ provider: "anthropic", key: "k" }, ctx))).rejects.toThrow("not from its clients");
     } finally {
       await client.close();
       await server.close();
@@ -334,6 +549,13 @@ describe("client protocol", () => {
     expect(endText({ status: "gone", error: new Error("no conversation 7") })).toBe("no conversation 7");
   });
 
+  it("bundles for browsers, reaching no Node built-in", async () => {
+    // Bundling for browsers refuses to resolve a Node built-in, so one anywhere in the module's imports fails here.
+    const failures = await build({ entryPoints: [fileURLToPath(new URL("../src/protocol.ts", import.meta.url))], bundle: true, platform: "browser", format: "esm", write: false, logLevel: "silent" })
+      .then(() => [], (error: { errors: { text: string }[] }) => error.errors.map((each) => each.text));
+    expect(failures).toEqual([]);
+  });
+
   it("accepts only the launch token in single-user mode", () => {
     const authenticate = launchToken("secret");
     expect(authenticate("secret")).toEqual({ kind: "owner", owner: "local" });
@@ -341,12 +563,10 @@ describe("client protocol", () => {
     expect(authenticate("")).toBeUndefined();
   });
 
-  it("takes the credential from a bearer header, the address or the cookie, and none from a malformed one", () => {
+  it("takes the credential from a bearer header or the address, never a cookie, and none from a malformed address", () => {
     expect(credentialOf(request({ authorization: "Bearer a" }, "/?token=b"))).toBe("a");
     expect(credentialOf(request({}, "/?token=b"))).toBe("b");
-    expect(credentialOf(request({ host: "127.0.0.1:4000", cookie: "other=1; chopin-4000=c" }))).toBe("c");
-    expect(credentialOf(request({ host: "127.0.0.1:4000", cookie: "chopin-4001=c" }))).toBeUndefined();
-    expect(credentialOf(request({ host: "127.0.0.1:4000", cookie: "chopin-4000=%" }))).toBeUndefined();
+    expect(credentialOf(request({ host: "127.0.0.1:4000", cookie: "chopin-4000=c" }))).toBeUndefined();
     expect(credentialOf(request({}, "//["))).toBeUndefined();
   });
 

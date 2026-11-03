@@ -1,5 +1,9 @@
+import { once } from "node:events";
 import { chmod, mkdtemp, writeFile } from "node:fs/promises";
+import { createServer } from "node:http";
+import type { AddressInfo } from "node:net";
 import { tmpdir } from "node:os";
+import { setTimeout as sleep } from "node:timers/promises";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { BACKGROUND_CONTEXT as context } from "@earendil-works/chord/context";
@@ -157,6 +161,107 @@ describe("MCP servers from the layer", () => {
       expect(reports.map(String)).toContainEqual(expect.stringContaining("gates name mcp__echo__nope, which no MCP server offers yet"));
     } finally {
       await service.close(context);
+    }
+  });
+});
+
+/**
+ * An MCP server over HTTP with one tool that answers with the authorization header it was called with, listing its
+ * tools after `slowMs`.
+ */
+async function whoServer(slowMs = 0): Promise<{ url: string; close: () => Promise<void> }> {
+  const http = createServer(async (request, response) => {
+    if (request.method !== "POST") return void response.writeHead(405).end();
+    let body = "";
+    for await (const chunk of request) body += chunk;
+    const { id, method } = JSON.parse(body) as { id?: number; method: string };
+    if (id === undefined) return void response.writeHead(202).end();
+    const results: Record<string, unknown> = {
+      initialize: { protocolVersion: "2025-06-18", capabilities: { tools: {} }, serverInfo: { name: "who", version: "1.0.0" } },
+      "tools/list": { tools: [{ name: "whoami", description: "Who calls", inputSchema: { type: "object", properties: {} } }] },
+      "tools/call": { content: [{ type: "text", text: request.headers.authorization ?? "nobody" }] },
+    };
+    if (method === "tools/list") await sleep(slowMs);
+    const reply = method in results ? { result: results[method] } : { error: { code: -32601, message: `unknown method ${method}` } };
+    response.writeHead(200, { "content-type": "application/json" }).end(JSON.stringify({ jsonrpc: "2.0", id, ...reply }));
+  });
+  http.listen(0, "127.0.0.1");
+  await once(http, "listening");
+  return { url: `http://127.0.0.1:${(http.address() as AddressInfo).port}/mcp`, close: () => new Promise((resolve) => http.close(() => resolve())) };
+}
+
+describe("MCP servers a client sets", () => {
+  it("offers their tools at once with the headers set, and takes new headers or the server away as told", async () => {
+    const who = await whoServer();
+    const faux = fauxProvider();
+    const models = createModels();
+    models.setProvider(faux.provider);
+    const model = faux.getModel();
+    const ask = () => [fauxAssistantMessage(fauxToolCall("mcp__who__whoami", {}), { stopReason: "toolUse" }), fauxAssistantMessage("Done.")];
+    faux.setResponses([...ask(), ...ask()]);
+    const layer: Layer = { instructions: undefined, skills: [], gates: [], mcpServers: { layered: { type: "http", url: "http://127.0.0.1:9/" } } };
+    const service = new AgentService({
+      dataDir: await mkdtemp(join(tmpdir(), "chopin-mcp-")), workspaces: local, models: () => models, layer,
+      agent: { model: { provider: model.provider, modelId: model.id } }, report: () => {},
+    });
+    const answers = async () => {
+      const root = await (await service.harness("alice")).root(context);
+      await (await root.submit({ type: "input", content: "Who am I?" }, context)).wait(context);
+      return (await root.context(context)).entries.filter((entry) => entry.kind === "pi.tool-result")
+        .flatMap((entry) => (entry.model ?? []) as readonly { content: { text?: string }[] }[])
+        .map((result) => result.content.map((c) => c.text).join(""));
+    };
+    try {
+      expect(await service.setMcpServer("alice", "who", who.url, { authorization: "Bearer one" })).toBeUndefined();
+      expect(service.mcpServers("alice")).toEqual([{ name: "who", url: who.url, tools: 1 }]);
+      expect(await answers()).toEqual(["Bearer one"]);
+      // Set again by its name, a server takes its new headers, as a renewed credential does.
+      await service.setMcpServer("alice", "who", who.url, { authorization: "Bearer two" });
+      expect(await answers()).toEqual(["Bearer one", "Bearer two"]);
+      expect((await service.loaded("alice", context)).mcpServers).toEqual(["layered", "who"]);
+
+      await service.removeMcpServer("alice", "who");
+      expect(service.mcpServers("alice")).toEqual([]);
+      expect(await service.setMcpServer("alice", "layered", who.url, {})).toContain("the layer already serves");
+      expect(await service.setMcpServer("alice", "files", "file:///etc", {})).toContain("no http or https address");
+    } finally {
+      await service.close(context);
+      await who.close();
+    }
+  });
+});
+
+describe("reaching MCP servers", () => {
+  it("offers nothing of a server taken away while it was being reached", async () => {
+    const slow = await whoServer(300);
+    const mcp = new McpServers({}, local.open("alice"));
+    try {
+      const offering = mcp.set("slow", { type: "http", url: slow.url }, () => {});
+      mcp.remove("slow");
+      expect(await offering).toEqual([]);
+      expect(mcp.status("slow")).toEqual({ tools: 0 });
+    } finally {
+      await mcp.close();
+      await slow.close();
+    }
+  });
+
+  it("says once that a workspace will not run a command server, and does not try it again", async () => {
+    const refusing: Workspace = {
+      ...local.open("alice"),
+      command: () => {
+        throw new Error("this workspace runs only its execution daemon");
+      },
+    };
+    const reports: string[] = [];
+    const mcp = new McpServers({ echo: { command: process.execPath, args: [server] } }, refusing);
+    try {
+      expect(await mcp.connect((error) => reports.push(error.message))).toEqual([]);
+      expect(reports).toEqual(["MCP server echo cannot run here: this workspace runs only its execution daemon"]);
+      expect(mcp.unavailable.size).toBe(0);
+      expect(mcp.status("echo")).toEqual({ tools: 0, error: "this workspace runs only its execution daemon" });
+    } finally {
+      await mcp.close();
     }
   });
 });

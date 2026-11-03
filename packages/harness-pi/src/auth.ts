@@ -6,32 +6,12 @@ import type { Principal } from "./protocol.js";
 /** Names the owner a credential stands for, or refuses it with `undefined`. */
 export type Authenticate = (credential: string) => Principal | undefined | Promise<Principal | undefined>;
 
-/**
- * The cookie a browser keeps its credential in, set when it first presents one as `?token=`. Browsers share cookies
- * across the ports of a host, so each service names its own by port.
- */
-export function credentialCookie(request: IncomingMessage): string {
-  try {
-    const port = new URL(`http://${request.headers.host ?? "localhost"}`).port;
-    return port === "" ? "chopin" : `chopin-${port}`;
-  } catch {
-    return "chopin";
-  }
-}
-
-/**
- * The credential a request presents. Browsers cannot set headers on a WebSocket, so besides a bearer header it may
- * travel as `?token=` or, once a page has presented it, as a cookie.
- */
+/** The credential a request presents: a bearer header, or `?token=` from a client that cannot set headers. */
 export function credentialOf(request: IncomingMessage): string | undefined {
-  // Any page of the host can plant a malformed cookie; it must refuse the request, not end the service.
+  // An address that cannot be read presents nothing; it must refuse the request, not end the service.
   try {
     const bearer = /^Bearer (.+)$/.exec(request.headers.authorization ?? "")?.[1];
-    const query = new URL(request.url ?? "/", "http://localhost").searchParams.get("token");
-    const name = credentialCookie(request);
-    const cookie = (request.headers.cookie ?? "").split(";").map((part) => part.trim().split("="))
-      .find(([key]) => key === name)?.[1];
-    return bearer ?? query ?? (cookie === undefined ? undefined : decodeURIComponent(cookie));
+    return bearer ?? new URL(request.url ?? "/", "http://localhost").searchParams.get("token") ?? undefined;
   } catch {
     return undefined;
   }

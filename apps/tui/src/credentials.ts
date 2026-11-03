@@ -1,6 +1,6 @@
 import { mkdir, readFile } from "node:fs/promises";
 import { dirname, join } from "node:path";
-import type { AuthOperationOptions, Credential, CredentialInfo, CredentialStore } from "@earendil-works/pi-ai";
+import { InMemoryCredentialStore, type AuthOperationOptions, type Credential, type CredentialInfo, type CredentialStore } from "@earendil-works/pi-ai";
 import { ModelRuntime } from "@earendil-works/pi-coding-agent";
 import { chopinHome, writeWhole } from "./home.js";
 import { locked } from "./lock.js";
@@ -64,6 +64,23 @@ export class FileCredentialStore implements CredentialStore {
 /** The credentials signed in on this machine, kept in its chopin home. */
 export function chopinCredentials(): FileCredentialStore {
   return new FileCredentialStore(join(chopinHome(), "auth.json"));
+}
+
+/** Every credential `store` holds, as one text a process this one starts takes over with `credentialsFrom`. */
+export async function credentialsText(store: CredentialStore): Promise<string> {
+  const all: Record<string, Credential> = {};
+  for (const { providerId } of await store.list()) {
+    const credential = await store.read(providerId);
+    if (credential !== undefined) all[providerId] = credential;
+  }
+  return JSON.stringify(all);
+}
+
+/** The credentials `credentialsText` wrote, held in memory alone. */
+export async function credentialsFrom(text: string): Promise<CredentialStore> {
+  const store = new InMemoryCredentialStore();
+  for (const [providerId, credential] of Object.entries(JSON.parse(text) as Record<string, Credential>)) await store.modify(providerId, async () => credential);
+  return store;
 }
 
 /**

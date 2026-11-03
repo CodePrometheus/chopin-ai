@@ -1,7 +1,7 @@
 import type { ConversationView } from "@earendil-works/pi-durable";
 import type { Static } from "typebox";
-import { detailText, runInputs } from "./acp.js";
-import type { SubmissionSchema } from "./protocol.js";
+import { runInputs } from "./acp.js";
+import { detailText, type SubmissionSchema } from "./protocol.js";
 
 /** How a submission stands, as clients see it. */
 export type Outcome = Static<typeof SubmissionSchema>;

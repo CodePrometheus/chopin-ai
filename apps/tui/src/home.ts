@@ -70,13 +70,17 @@ export async function writeSettings(settings: Settings): Promise<void> {
 let changing: Promise<unknown> = Promise.resolve();
 
 /**
- * Keeps `change` in the settings, leaving the rest as they are. Changes apply in the order they are made, and one
- * at a time across every chopin of the machine, so none undoes another.
+ * Keeps `change` in the settings, leaving the rest as they are; a function makes it from the settings as they stand.
+ * Changes apply in the order they are made, and one at a time across every chopin of the machine, so none undoes
+ * another.
  */
-export function changeSettings(change: Partial<Settings>): Promise<void> {
+export function changeSettings(change: Partial<Settings> | ((current: Settings) => Partial<Settings>)): Promise<void> {
   const next = changing.then(async () => {
     await mkdir(chopinHome(), { recursive: true });
-    await locked(`${settingsFile()}.lock`, async () => writeSettings({ ...(await readSettings()), ...change }));
+    await locked(`${settingsFile()}.lock`, async () => {
+      const current = await readSettings();
+      await writeSettings({ ...current, ...(typeof change === "function" ? change(current) : change) });
+    });
   });
   changing = next.catch(() => {});
   return next;

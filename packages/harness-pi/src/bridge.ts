@@ -3,7 +3,7 @@ import { setTimeout as sleep } from "node:timers/promises";
 import type { Ctx, Host } from "@earendil-works/chord";
 import type { AssistantMessage } from "@earendil-works/pi-ai";
 import type { ConversationView } from "@earendil-works/pi-durable";
-import { entryUpdates, runInputs, stopReason, unansweredText } from "./acp.js";
+import { entryUpdates, runInputs, stopReason } from "./acp.js";
 import {
   call,
   CALL_TIMEOUT_MS,
@@ -11,6 +11,7 @@ import {
   heldList,
   randomId,
   startConversation,
+  unansweredText,
   within,
   type CallOptions,
   type ConversationRef,

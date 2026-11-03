@@ -27,16 +27,18 @@ async function kept(socket: WebSocket): Promise<boolean> {
 }
 
 describe("WebSocket origins", () => {
-  it("refuses a page of another origin even with the credential cookie, and admits its own", async () => {
+  it("refuses a page of another origin even with the credential, and admits one at the service's own address", async () => {
     const service = new AgentService({ dataDir: await mkdtemp(join(tmpdir(), "chopin-origin-")), workspaces: nowhere, models: () => createModels() });
     const server = await listen(service, { authenticate: launchToken("secret") });
-    const url = `ws://127.0.0.1:${server.port}/`;
+    const url = `ws://127.0.0.1:${server.port}/?token=secret`;
     try {
-      expect(await kept(new WebSocket(url, { headers: { cookie: `chopin-${server.port}=secret`, origin: "http://127.0.0.1:1" } }))).toBe(false);
-      expect(await kept(new WebSocket(url, { headers: { cookie: `chopin-${server.port}=secret`, origin: `http://127.0.0.1:${server.port}` } }))).toBe(true);
+      expect(await kept(new WebSocket(url, { headers: { origin: "http://127.0.0.1:1" } }))).toBe(false);
+      expect(await kept(new WebSocket(url, { headers: { origin: `http://127.0.0.1:${server.port}` } }))).toBe(true);
       // Behind a proxy, the page's address is the one the proxy names.
-      const proxied = { cookie: `chopin-${server.port}=secret`, origin: "https://chopin.example.test", "x-forwarded-host": "Chopin.Example.Test:443" };
+      const proxied = { origin: "https://chopin.example.test", "x-forwarded-host": "Chopin.Example.Test:443" };
       expect(await kept(new WebSocket(url, { headers: proxied }))).toBe(true);
+      // A client that is not a browser, such as a proxy in front, sends no origin.
+      expect(await kept(new WebSocket(url))).toBe(true);
     } finally {
       await server.close();
       await service.close(context);

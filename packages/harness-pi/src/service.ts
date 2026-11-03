@@ -3,10 +3,11 @@ import { chmod, mkdir } from "node:fs/promises";
 import { join } from "node:path";
 import type { Context } from "@earendil-works/chord";
 import { BACKGROUND_CONTEXT } from "@earendil-works/chord/context";
-import { getSupportedThinkingLevels, type AssistantMessage, type Models } from "@earendil-works/pi-ai";
+import { getSupportedThinkingLevels, type AssistantMessage, type CredentialInfo, type CredentialStore, type Models } from "@earendil-works/pi-ai";
 import {
   CompactionEntry,
   createRegistry,
+  defineExtension,
   Harness,
   ROOT_CONVERSATION_ID,
   type AgentChange,
@@ -25,15 +26,16 @@ import {
 import { openNodeSqliteStorage } from "@earendil-works/pi-durable/storage/sqlite/node";
 import { CodingTools } from "@earendil-works/pi-durable/tools";
 import { Connection, RemoteExecutionEnv } from "@earendil-works/pi-env";
-import { checkGates, isMcpToolOf, withChopinMeta, type Layer, type TaskRun, type TranscriptEntry } from "@chopin-ai/core";
+import { checkGates, isMcpToolOf, withChopinMeta, type Layer, type McpServer, type TaskRun, type TranscriptEntry } from "@chopin-ai/core";
 import { diff, reclaimIdle, snapshot, type Workspace, type WorkspaceProvider } from "@chopin-ai/workspace";
-import { entryTranscript, stopReason, totalUsage, unansweredText, userText } from "./acp.js";
+import { entryTranscript, stopReason, totalUsage, userText } from "./acp.js";
 import { IdleCompaction } from "./idle-compaction.js";
 import { layerExtension, pinLayerVersions, type LayerSource } from "./layer.js";
-import { McpServers } from "./mcp.js";
+import { mcpExtensionName, McpServers } from "./mcp.js";
 import { drain } from "./pages.js";
 import { modeExtension, NameDoc } from "./mode.js";
-import type { Loaded, Summary } from "./protocol.js";
+import { unansweredText, type Loaded, type McpServerState, type ModelChoices, type Summary } from "./protocol.js";
+import { clientContext } from "./client-context.js";
 import { contextFiles, projectContext } from "./project-context.js";
 import { runShell, ShellEntry, type ShellRun } from "./shell.js";
 
@@ -48,6 +50,8 @@ const OPEN_PATIENCE_MS = 10 * 60_000;
 /** How often an owner's unreachable MCP servers are tried again. */
 const MCP_RETRY_MS = 30_000;
 
+const FIXED_CREDENTIALS = "this service takes its credentials from where it runs, not from its clients";
+
 /** Where the workspace image keeps the execution daemon. */
 export const DAEMON_PATH = "/usr/local/bin/pi-env";
 
@@ -57,6 +61,8 @@ export interface AgentServiceOptions {
   workspaces: WorkspaceProvider;
   /** The models an owner's agent may use, carrying that owner's credentials. */
   models: (owner: string) => Models;
+  /** Where an owner's models read their credentials, which clients may then set; absent, they cannot. */
+  credentials?: (owner: string) => CredentialStore;
   /** What a new conversation of an owner runs with, such as its model; asked again for each, so a default may change. */
   agent?: AgentChange | ((owner: string) => Promise<AgentChange | undefined>);
   /** The portable layer every agent loads. */
@@ -86,6 +92,9 @@ interface Opened {
   idle: IdleCompaction;
   /** The owner's workspace as the agent's tools reach it. */
   env(): RemoteExecutionEnv;
+  mcp: McpServers;
+  /** Serves an MCP server under `name` from now on, in place of any by that name, or none when `server` is absent. */
+  serve(name: string, server: McpServer | undefined): Promise<void>;
   close(context: Context): Promise<void>;
 }
 
@@ -114,6 +123,8 @@ export class AgentService {
   readonly #holds = new Map<string, number>();
   /** How many of each owner's own commands are running. */
   readonly #commands = new Map<string, number>();
+  /** The MCP servers each owner's clients set, kept in memory alone, headers and all. */
+  readonly #clientMcp = new Map<string, Record<string, McpServer>>();
   /** When this service started, which is as recent as anything it knows of an owner it has not seen. */
   readonly #started = Date.now();
   readonly #lastActive = new Map<string, number>();
@@ -190,7 +201,7 @@ export class AgentService {
       instructions: layer?.instructions !== undefined,
       projectInstructions: project.map((file) => file.path),
       skills: layer?.skills.map((skill) => skill.name) ?? [],
-      mcpServers: Object.keys(layer?.mcpServers ?? {}),
+      mcpServers: [...Object.keys(layer?.mcpServers ?? {}), ...Object.keys(this.#clientMcp.get(owner) ?? {})],
     };
   }
 
@@ -259,6 +270,79 @@ export class AgentService {
     if (models.getModel(model.provider, model.modelId) === undefined) await models.refresh({ allowNetwork: false });
     if (models.getModel(model.provider, model.modelId) === undefined) return `there is no model ${model.provider}/${model.modelId}`;
     if ((await models.checkAuth(model.provider)) === undefined) return `there are no credentials for ${model.provider}`;
+    return undefined;
+  }
+
+  /** The models the owner's agent can use now, those whose providers have credentials, and its model for a new conversation. */
+  async modelChoices(owner: string): Promise<ModelChoices> {
+    const available = await this.#options.models(owner).getAvailable();
+    const model = (await this.#agent(owner))?.model;
+    return {
+      models: available.map((each) => ({
+        provider: each.provider,
+        modelId: each.id,
+        name: each.name,
+        contextWindow: each.contextWindow,
+        images: each.input.includes("image"),
+        thinkingLevels: [...getSupportedThinkingLevels(each)],
+      })),
+      current: model == null ? null : { provider: model.provider, modelId: model.modelId },
+    };
+  }
+
+  /**
+   * The MCP servers the owner's clients set, each with how many tools it offers, or why it offers none yet. Asking
+   * opens nothing: an agent not open now offers none of their tools.
+   */
+  mcpServers(owner: string): McpServerState[] {
+    const opened = this.#agents.get(owner)?.ready;
+    return Object.entries(this.#clientMcp.get(owner) ?? {})
+      .map(([name, server]) => ({ name, url: "url" in server ? server.url : "", ...opened?.mcp.status(name) ?? { tools: 0 } }));
+  }
+
+  /**
+   * Serves an MCP server a client sets for the owner, in place of any it set by that name, kept in memory alone;
+   * else why it cannot: the layer has one by that name, or the address is no web address.
+   */
+  async setMcpServer(owner: string, name: string, url: string, headers: Readonly<Record<string, string>>): Promise<string | undefined> {
+    if (name in (this.#options.layer?.mcpServers ?? {})) return `the layer already serves an MCP server named ${name}`;
+    if (!/^https?:$/.test(URL.parse(url)?.protocol ?? "")) return `${url} is no http or https address`;
+    const server: McpServer = { type: "http", url, ...(Object.keys(headers).length > 0 && { headers: { ...headers } }) };
+    this.#clientMcp.set(owner, { ...this.#clientMcp.get(owner), [name]: server });
+    await (await this.#openedFor(owner)).serve(name, server);
+    return undefined;
+  }
+
+  /** Stops serving an MCP server a client set for the owner. */
+  async removeMcpServer(owner: string, name: string): Promise<void> {
+    const { [name]: gone, ...rest } = this.#clientMcp.get(owner) ?? {};
+    if (gone === undefined) return;
+    this.#clientMcp.set(owner, rest);
+    await this.#agents.get(owner)?.ready?.serve(name, undefined);
+  }
+
+  /** The providers the owner holds a credential for, never the secrets; none where clients cannot set them. */
+  async credentials(owner: string): Promise<CredentialInfo[]> {
+    return [...((await this.#options.credentials?.(owner).list()) ?? [])];
+  }
+
+  /**
+   * Keeps `key` as the owner's credential for `provider`, so the next request reaches it with the key; else why it
+   * cannot: credentials here are not the clients' to set, or no such provider takes an API key.
+   */
+  async setKey(owner: string, provider: string, key: string): Promise<string | undefined> {
+    const store = this.#options.credentials?.(owner);
+    if (store === undefined) return FIXED_CREDENTIALS;
+    if (this.#options.models(owner).getProvider(provider)?.auth.apiKey === undefined) return `there is no provider ${provider} that takes an API key`;
+    await store.modify(provider, async () => ({ type: "api_key", key }));
+    return undefined;
+  }
+
+  /** Forgets the owner's credential for `provider`; else why it cannot, as for `setKey`. */
+  async removeKey(owner: string, provider: string): Promise<string | undefined> {
+    const store = this.#options.credentials?.(owner);
+    if (store === undefined) return FIXED_CREDENTIALS;
+    await store.delete(provider);
     return undefined;
   }
 
@@ -438,7 +522,7 @@ export class AgentService {
   async #open(owner: string, context: Context): Promise<Opened> {
     const report = this.#options.report ?? (() => {});
     const workspace = this.#options.workspaces.open(owner);
-    const mcp = new McpServers(this.#options.layer?.mcpServers ?? {}, workspace);
+    const mcp = new McpServers({ ...this.#options.layer?.mcpServers, ...this.#clientMcp.get(owner) }, workspace);
     const connection = new Connection({ command: () => this.#daemon(workspace) });
     let storage: Storage | undefined;
     let harness: Harness | undefined;
@@ -470,6 +554,14 @@ export class AgentService {
       tellMissing();
       const registry = createRegistry();
       for (const extension of extensions) registry.install(extension);
+      // Tools of servers that answered at last, or that a client set since: gates on them are checked as they come.
+      const install = (offered: readonly Extension[]) => {
+        for (const extension of offered) {
+          registry.install(extension);
+          for (const tool of extension.tools ?? []) registered.add(tool.name);
+        }
+        if (offered.length > 0) tellMissing();
+      };
 
       const id = `workspace:${fingerprint(owner)}`;
       const env = (cwd = workspace.root) => {
@@ -492,27 +584,39 @@ export class AgentService {
       if (agent !== undefined) await harness.root(context, { agent });
       harness.resume();
       let trying = false;
-      const retrying = mcp.unavailable.size === 0 ? undefined : setInterval(() => {
-        // A server slow to answer is still being tried when the next try is due; that try is skipped.
-        if (trying) return;
-        trying = true;
-        mcp.retry(report).then((back) => {
-          for (const extension of back) {
-            registry.install(extension);
-            for (const tool of extension.tools ?? []) registered.add(tool.name);
-          }
-          // Gates on the tools of a server that answered at last are checked now, as they could not be at open.
-          if (back.length > 0) tellMissing();
-          if (mcp.unavailable.size === 0) clearInterval(retrying);
-        }).catch(report).finally(() => void (trying = false));
-      }, MCP_RETRY_MS);
-      retrying?.unref();
+      let retrying: NodeJS.Timeout | undefined;
+      // Unreachable servers are tried again until every one answers, for as long as the agent is open.
+      const keepTrying = () => {
+        if (retrying !== undefined || mcp.unavailable.size === 0) return;
+        retrying = setInterval(() => {
+          // A server slow to answer is still being tried when the next try is due; that try is skipped.
+          if (trying) return;
+          trying = true;
+          mcp.retry(report).then((back) => {
+            install(back);
+            if (mcp.unavailable.size === 0) {
+              clearInterval(retrying);
+              retrying = undefined;
+            }
+          }).catch(report).finally(() => void (trying = false));
+        }, MCP_RETRY_MS);
+        retrying.unref();
+      };
+      keepTrying();
       const opened = harness;
       return {
         harness: opened,
         storage,
         idle,
         env,
+        mcp,
+        serve: async (name, server) => {
+          for (const tool of mcp.remove(name)) registered.delete(tool);
+          registry.uninstall(defineExtension({ name: mcpExtensionName(name) }));
+          if (server === undefined) return;
+          install(await mcp.set(name, server, report));
+          keepTrying();
+        },
         close: async (closing) => {
           clearInterval(retrying);
           idle.close();
@@ -537,7 +641,7 @@ export class AgentService {
   #extensions(registered: ReadonlySet<string>, ...more: Extension[]): Extension[] {
     const base = this.#options.layer ?? (this.#options.layerVersions === undefined ? undefined : EMPTY_LAYER);
     const layer = base === undefined ? [] : [layerExtension(base, registered, this.#options.layerVersions)];
-    return [CodingTools, ...layer, projectContext, ...(this.#options.extensions ?? []), ...more];
+    return [CodingTools, ...layer, projectContext, clientContext, ...(this.#options.extensions ?? []), ...more];
   }
 
   /**

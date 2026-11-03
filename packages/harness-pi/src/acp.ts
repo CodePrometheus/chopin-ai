@@ -130,14 +130,3 @@ export function totalUsage(messages: readonly AssistantMessage[]): { usage: AcpU
     cost: sum((u) => u.cost.total),
   };
 }
-
-/** Why a submission got no answer, with the harness's detail, such as the provider's own message, when it gave one. */
-export function unansweredText(settled: { reason: string; detail?: unknown }): string {
-  const detail = detailText(settled.detail);
-  return detail === undefined ? settled.reason : `${settled.reason}: ${detail}`;
-}
-
-/** The detail the harness gave with an unanswered submission, as text. */
-export function detailText(detail: unknown): string | undefined {
-  return detail === undefined ? undefined : typeof detail === "string" ? detail : JSON.stringify(detail);
-}

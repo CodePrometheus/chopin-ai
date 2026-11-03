@@ -5,17 +5,19 @@ import { homedir } from "node:os";
 import { join, relative, sep } from "node:path";
 import { CodingTools } from "@earendil-works/pi-durable/tools";
 import {
-  AdmissionLedger, audit, auditSamples, calibrate, Calibration, CALIBRATION, continuationSamples, judgeEquivalent, judgeRepeat,
-  LayerVersions, loadLayer, mcpSecrets, Rejections, secretValues, SHELVE_AFTER, TRIGGER_SESSIONS, triggered, type Command, type Layer, type LayerItem,
+  audit, auditSamples, calibrate, Calibration, CALIBRATION, continuationSamples, judgeEquivalent, judgeRepeat,
+  LayerVersions, loadLayer, mcpSecrets, secretValues, SHELVE_AFTER, type Command, type Layer,
 } from "@chopin-ai/core";
 import { continueAt, layerExtension, stepText, transcriptMessages } from "@chopin-ai/harness-pi";
-import { chopinModels } from "../credentials.js";
+import type { CredentialStore } from "@earendil-works/pi-ai";
+import { chopinModels, credentialsFrom } from "../credentials.js";
 import { exclusive } from "../lock.js";
 import { chopinHome, layerDirectory, readSettings, rsiDirectory } from "../home.js";
 import { Budget, completer, namedModel, paidCall } from "./models.js";
-import { Evidence, harvest, sessionSources, type Source } from "./harvest.js";
-import { HeldProposals } from "./held.js";
+import { harvest, sessionSources, type Source } from "./harvest.js";
+import { answerCorrections, correctionsAsked, decideHeld, heldChanges, loopChanges, loopStanding, undoChange } from "./control.js";
 import { archiveUnused } from "./lifecycle.js";
+import { records } from "./records.js";
 import { runRounds, type RoundSetup } from "./round.js";
 
 const DAY_MS = 24 * 60 * 60_000;
@@ -29,23 +31,11 @@ function expand(path: string): string {
 }
 const EMPTY: Layer = { instructions: undefined, skills: [], mcpServers: {}, gates: [] };
 
-/** The loop's records, by where they are kept. */
-function records() {
-  const root = rsiDirectory();
-  return {
-    evidence: new Evidence(join(root, "evidence")),
-    versions: new LayerVersions(join(root, "layer")),
-    ledger: new AdmissionLedger(join(root, "ledger.jsonl")),
-    rejections: new Rejections(join(root, "rejections.jsonl")),
-    calibration: new Calibration(join(root, "calibration.jsonl")),
-    certificates: join(root, "certificates"),
-    spend: join(root, "spend.jsonl"),
-    held: new HeldProposals(join(root, "held.jsonl")),
-  };
-}
-
-/** What a round needs that costs money; refused until the models and the week's budget are set. */
-async function paid() {
+/**
+ * What a round needs that costs money, reaching models with `credentials`, else those signed in here; refused until
+ * the models and the week's budget are set.
+ */
+async function paid(credentials?: CredentialStore) {
   const settings = await readSettings();
   const rsi = settings.rsi ?? {};
   const missing = [
@@ -55,7 +45,7 @@ async function paid() {
     ...(settings.model === undefined ? ["model"] : []),
   ];
   if (missing.length > 0) throw new Error(`set ${missing.join(", ")} in ${join(chopinHome(), "config.json")} before the loop may spend anything`);
-  const models = await chopinModels();
+  const models = await chopinModels(credentials);
   const budget = new Budget(records().spend, rsi.weeklyBudgetUsd!);
   const sessionModel = namedModel(models, settings.model!);
   return {
@@ -76,26 +66,51 @@ async function handLayer(): Promise<Layer> {
 /** Runs the loop once now: calibrates the judges if they were not today, gathers evidence, and runs due rounds. */
 export const evolveCommand: Command = {
   name: "evolve",
-  args: "",
+  args: "[--credentials-on-stdin]",
   summary: "improve the agent from its sessions once now: gather failures, propose changes, keep those that test better",
-  run: async (_args, io) => {
+  run: async (args, io) => {
+    // A service whose credentials live in it alone hands them over through a pipe.
+    if (args.some((arg) => arg !== "--credentials-on-stdin")) {
+      io.err("usage: chopin evolve [--credentials-on-stdin]");
+      return 2;
+    }
+    const credentials = args.length === 0 ? undefined : await credentialsFrom(await text(process.stdin));
     await mkdir(rsiDirectory(), { recursive: true, mode: 0o700 });
-    const lock = exclusive(join(rsiDirectory(), "evolve.lock"));
+    const lock = exclusive(evolveLock());
     if (lock === undefined) {
       io.out("the loop is already running");
       return 0;
     }
     try {
-      return await evolveOnce(io);
+      return await evolveOnce(io, credentials);
     } finally {
       lock.close();
     }
   },
 };
 
-async function evolveOnce(io: { out(text: string): void; err(text: string): void }): Promise<number> {
+/** Everything `stream` has, as text. */
+async function text(stream: AsyncIterable<Buffer | string>): Promise<string> {
+  let all = "";
+  for await (const chunk of stream) all += chunk.toString();
+  return all;
+}
+
+/** The lock a running loop holds. */
+const evolveLock = () => join(rsiDirectory(), "evolve.lock");
+
+/** Whether the loop is running now, in this process or another. */
+export async function evolving(): Promise<boolean> {
+  // A loop that never ran here left no lock to hold.
+  if ((await stat(evolveLock()).catch(() => undefined)) === undefined) return false;
+  const lock = exclusive(evolveLock(), 0);
+  lock?.close();
+  return lock === undefined;
+}
+
+async function evolveOnce(io: { out(text: string): void; err(text: string): void }, credentials?: CredentialStore): Promise<number> {
   const kept = records();
-  const money = await paid();
+  const money = await paid(credentials);
   for (const recovered of [await kept.versions.recover(), await kept.ledger.recover()]) {
     if (recovered) io.err(`chopin: the loop's records were changed outside it and were put back: ${JSON.stringify(recovered)}`);
   }
@@ -174,21 +189,13 @@ export const evolveStatusCommand: Command = {
   args: "",
   summary: "show what the loop has learned, what it is waiting on, and what it has spent",
   run: async (_args, io) => {
-    const kept = records();
-    const version = await kept.versions.current();
-    const items = await kept.versions.items(version);
-    const kinds = await kept.evidence.kinds();
-    const settings = await readSettings();
-    let shelved = 0;
-    for (const found of kinds) if (await kept.rejections.shelved(found.key, settings.model ?? "", found.failures.length, await kept.evidence.criteria(found))) shelved += 1;
-    const pending = (await kept.evidence.correctionKinds()).filter((kind) => kind.sessions.length >= TRIGGER_SESSIONS).length;
-    const budget = new Budget(kept.spend, settings.rsi?.weeklyBudgetUsd ?? 0);
+    const standing = await loopStanding();
     io.out([
-      `layer version ${version}: ${items.filter((i) => !i.archived).length} items in use, ${items.filter((i) => i.archived).length} archived`,
-      `failures: ${kinds.length} kinds, ${triggered(kinds).length} recurring, ${shelved} set aside: refused ${SHELVE_AFTER} times, or not recurring on this model`,
-      `kinds of correction waiting for you: ${pending} (chopin evolve corrections)`,
-      `changes held for your review: ${(await kept.held.waiting()).length} (chopin evolve review)`,
-      `spent this week: $${(await budget.spent()).toFixed(2)}${settings.rsi?.weeklyBudgetUsd === undefined ? " (no budget set)" : ` of $${budget.weeklyUsd.toFixed(2)}`}`,
+      `layer version ${standing.version}: ${standing.inUse} items in use, ${standing.archived} archived`,
+      `failures: ${standing.kinds} kinds, ${standing.recurring} recurring, ${standing.shelved} set aside: refused ${SHELVE_AFTER} times, or not recurring on this model`,
+      `kinds of correction waiting for you: ${standing.corrections} (chopin evolve corrections)`,
+      `changes held for your review: ${standing.held} (chopin evolve review)`,
+      `spent this week: $${standing.spentUsd.toFixed(2)}${standing.weeklyBudgetUsd === null ? " (no budget set)" : ` of $${standing.weeklyBudgetUsd.toFixed(2)}`}`,
     ].join("\n"));
     return 0;
   },
@@ -200,33 +207,24 @@ export const evolveReviewCommand: Command = {
   args: "",
   summary: "approve or refuse the changes the audit held for you; approved ones are still tested before they are kept",
   run: async (_args, io) => {
-    const kept = records();
-    const waiting = await kept.held.waiting();
+    const waiting = await heldChanges();
     if (waiting.length === 0) {
       io.out("no change is held for your review");
       return 0;
     }
-    const ask = createInterface({ input: process.stdin, output: process.stdout });
-    try {
+    await asking(async (ask) => {
       for (const held of waiting) {
-        const { candidate, prediction } = held.proposal;
         const question = [
-          `For ${held.failure}, a ${candidate.kind}${held.proposal.skill === undefined ? "" : ` (${held.proposal.skill})`}:`,
-          candidate.text.split("\n").map((line) => `  ${line}`).join("\n"),
-          `It predicts: ${prediction}`,
+          `For ${held.failure}, a ${held.kind}${held.skill === undefined ? "" : ` (${held.skill})`}:`,
+          held.text.split("\n").map((line) => `  ${line}`).join("\n"),
+          `It predicts: ${held.prediction}`,
           `The audit asks for you because: ${held.reasons.join("; ")}`,
           "Test it for keeping? [y/n/skip] ",
         ].join("\n");
-        const answer = (await ask.question(question)).trim().toLowerCase();
-        if (answer === "y") await kept.held.decide(held, "approved");
-        if (answer === "n") {
-          await kept.held.decide(held, "refused");
-          await kept.rejections.record({ failure: held.failure, candidate: held.id, text: candidate.text, reason: "you refused it on review", prediction });
-        }
+        const answer = await ask(question);
+        if (answer === "y" || answer === "n") await decideHeld(held.id, answer === "y");
       }
-    } finally {
-      ask.close();
-    }
+    });
     return 0;
   },
 };
@@ -237,12 +235,10 @@ export const evolveLogCommand: Command = {
   args: "",
   summary: "list the changes the loop kept, newest first",
   run: async (_args, io) => {
-    const kept = records();
-    const items = await kept.versions.items(await kept.versions.current());
-    if (items.length === 0) io.out("the loop has kept no change yet");
-    for (const item of [...items].reverse()) {
-      const what = (item.text ?? `skill ${item.skill}`).split("\n")[0];
-      io.out(`${item.id.slice(0, 8)}  ${item.added.slice(0, 10)}  ${item.kind}${item.archived ? " (archived)" : ""}  ${what}`);
+    const changes = await loopChanges();
+    if (changes.length === 0) io.out("the loop has kept no change yet");
+    for (const change of changes) {
+      io.out(`${change.id.slice(0, 8)}  ${change.added.slice(0, 10)}  ${change.kind}${change.archived ? " (archived)" : ""}  ${change.text.split("\n")[0]}`);
     }
     return 0;
   },
@@ -259,23 +255,12 @@ export const evolveUndoCommand: Command = {
       io.err("usage: chopin evolve undo <id>");
       return 2;
     }
-    const kept = records();
-    const items = await kept.versions.items(await kept.versions.current());
-    const matches = items.filter((item) => item.id.startsWith(id) && !item.archived);
-    if (matches.length !== 1) {
-      io.err(matches.length === 0 ? `no change in use starts with ${id}` : `${id} names more than one change; give more of it`);
+    const undone = await undoChange(id);
+    if (typeof undone === "string") {
+      io.err(undone);
       return 1;
     }
-    const [undone] = matches as [LayerItem];
-    const version = await kept.versions.commit((all) => all.map((item) => (item.id === undone.id ? { ...item, archived: true } : item)));
-    // The failure it answered is still there: the kind is taken up again, and its proposer is told this change was undone.
-    if (undone.source.failure !== undefined) {
-      await kept.rejections.record({
-        failure: undone.source.failure, candidate: undone.id, text: undone.text ?? `the skill ${undone.skill}`, reason: "the user undid it after it was kept",
-      });
-      await kept.evidence.reopen(undone.source.failure);
-    }
-    io.out(`archived ${undone.id.slice(0, 8)}; new conversations use version ${version}`);
+    io.out(`archived ${undone.undone.id.slice(0, 8)}; new conversations use version ${undone.version}`);
     return 0;
   },
 };
@@ -286,29 +271,32 @@ export const evolveCorrectionsCommand: Command = {
   args: "",
   summary: "confirm or dismiss, kind by kind, the corrections the loop found in your sessions",
   run: async (_args, io) => {
-    const kept = records();
-    const kinds = await kept.evidence.correctionKinds();
-    const asking = kinds.filter((kind) => kind.sessions.length >= TRIGGER_SESSIONS);
-    const later = kinds.filter((kind) => !asking.includes(kind)).reduce((sum, kind) => sum + kind.corrections.length, 0);
+    const { asking: kinds, later } = await correctionsAsked();
     if (later > 0) io.out(`${later} correction${later === 1 ? "" : "s"} wait until their kind comes up in another session`);
-    if (asking.length === 0) {
+    if (kinds.length === 0) {
       if (later === 0) io.out("no correction is waiting");
       return 0;
     }
-    const ask = createInterface({ input: process.stdin, output: process.stdout });
-    try {
-      for (const kind of asking) {
-        const examples = kind.corrections.slice(0, CORRECTION_EXAMPLES).map((correction) => `  - ${correction.summary}`).join("\n");
-        const question = `In ${kind.sessions.length} sessions you corrected the agent for ${kind.key}:\n${examples}\nLearn from these? [y/n/skip] `;
-        const answer = (await ask.question(question)).trim().toLowerCase();
-        if (answer === "y" || answer === "n") await kept.evidence.answerKind(kind, answer === "y");
+    await asking(async (ask) => {
+      for (const kind of kinds) {
+        const examples = kind.examples.map((example) => `  - ${example}`).join("\n");
+        const answer = await ask(`In ${kind.sessions} sessions you corrected the agent for ${kind.key}:\n${examples}\nLearn from these? [y/n/skip] `);
+        if (answer === "y" || answer === "n") await answerCorrections(kind.key, answer === "y");
       }
-    } finally {
-      ask.close();
-    }
+    });
     return 0;
   },
 };
+
+/** Asks the user in this terminal for as long as `questions` runs; answers come back trimmed and in lower case. */
+async function asking(questions: (ask: (question: string) => Promise<string>) => Promise<void>): Promise<void> {
+  const terminal = createInterface({ input: process.stdin, output: process.stdout });
+  try {
+    await questions(async (question) => (await terminal.question(question)).trim().toLowerCase());
+  } finally {
+    terminal.close();
+  }
+}
 
 /**
  * The project of each session, named as chopin names a project's directory: from where a chopin service wrote it, or

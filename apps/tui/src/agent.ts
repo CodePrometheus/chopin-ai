@@ -1,17 +1,19 @@
 import { stat } from "node:fs/promises";
 import { join } from "node:path";
+import type { CredentialStore } from "@earendil-works/pi-ai";
 import { loadLayer } from "@chopin-ai/core";
 import type { AgentServiceOptions } from "@chopin-ai/harness-pi";
-import { chopinModels } from "./credentials.js";
+import { chopinCredentials, chopinModels } from "./credentials.js";
 import { layerDirectory } from "./home.js";
 import { notInteractive, resolveModel } from "./model.js";
 
 /**
- * What every chopin service runs its agents with: the models signed in here, the default model as it is when each
- * conversation starts, and the layer in its home when there is one.
+ * What every chopin service runs its agents with: the models reaching providers with `credentials`, those signed in
+ * here unless another store is given; the default model as it is when each conversation starts; and the layer in its
+ * home when there is one.
  */
-export async function agentSetup(): Promise<Pick<AgentServiceOptions, "models" | "agent" | "layer">> {
-  const models = await chopinModels();
+export async function agentSetup(credentials: CredentialStore = chopinCredentials()): Promise<Pick<AgentServiceOptions, "models" | "agent" | "layer">> {
+  const models = await chopinModels(credentials);
   // A service with no model to start conversations with says so now rather than at its first conversation.
   await resolveModel(models, notInteractive);
   const directory = layerDirectory();

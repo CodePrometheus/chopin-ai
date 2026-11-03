@@ -16,14 +16,26 @@ function packageVersion(): Promise<string> {
   return version;
 }
 
+/** A command server the workspace will not run, as one that runs only its execution daemon will not. */
+class Refused extends Error {}
+
+/** The extension a server's tools come in. */
+export function mcpExtensionName(server: string): string {
+  return `chopin-mcp-${server}`;
+}
+
 /**
  * One owner's MCP servers. A command server runs inside the owner's workspace, never on the service host: the
  * layer may change, and what it starts must stay as confined as the agent itself.
  */
 export class McpServers {
-  readonly #servers: Readonly<Record<string, McpServer>>;
+  #servers: Readonly<Record<string, McpServer>>;
   readonly #workspace: Workspace;
   readonly #clients = new Map<string, Promise<McpClient>>();
+  /** The tools each server offered when last reached. */
+  readonly #tools = new Map<string, string[]>();
+  /** Why each server that could not be reached last was not. */
+  readonly #failures = new Map<string, string>();
   #closed = false;
   /** Names of the offered tools that declare they change nothing. */
   readonly readOnly = new Set<string>();
@@ -41,11 +53,50 @@ export class McpServers {
   }
 
   /**
+   * Serves `server` under `name` from now on, in place of any by that name, and offers its tools; none while it
+   * cannot be reached, which a retry tries again. Its tools name the server, so a replaced one's names are reused.
+   */
+  set(name: string, server: McpServer, report: (error: Error) => void): Promise<Extension[]> {
+    this.#forget(name);
+    this.#servers = { ...this.#servers, [name]: server };
+    return this.#offer([name], report);
+  }
+
+  /** Stops serving `name`, answering with the names of the tools it offered. */
+  remove(name: string): string[] {
+    const tools = this.#forget(name);
+    const { [name]: _gone, ...rest } = this.#servers;
+    this.#servers = rest;
+    return tools;
+  }
+
+  /** How many tools `name` offers, or why it offers none while it cannot be reached. */
+  status(name: string): { tools: number; error?: string } {
+    const error = this.#failures.get(name);
+    return { tools: this.#tools.get(name)?.length ?? 0, ...(error !== undefined && { error }) };
+  }
+
+  /** Lets go of everything known of `name`: its client, its tools and why it failed; answers with those tools. */
+  #forget(name: string): string[] {
+    const client = this.#clients.get(name);
+    if (client !== undefined) this.#drop(name, client);
+    const tools = this.#tools.get(name) ?? [];
+    for (const tool of tools) this.readOnly.delete(tool);
+    this.#tools.delete(name);
+    this.#failures.delete(name);
+    this.unavailable.delete(name);
+    return tools;
+  }
+
+  /**
    * Tries the unavailable servers again and offers the tools of those that answer now; a server in the workspace is
    * tried only while the workspace runs, so trying never wakes one stopped for being idle.
    */
   async retry(report: (error: Error) => void): Promise<Extension[]> {
-    const inWorkspace = (server: string) => "command" in (this.#servers[server] as McpServer);
+    const inWorkspace = (server: string) => {
+      const known = this.#servers[server];
+      return known !== undefined && "command" in known;
+    };
     const unavailable = [...this.unavailable];
     const running = unavailable.some(inWorkspace) && (await this.#workspace.state().catch(() => undefined)) === "running";
     return this.#offer(unavailable.filter((server) => running || !inWorkspace(server)), report, false);
@@ -61,17 +112,34 @@ export class McpServers {
 
   async #offer(servers: readonly string[], report: (error: Error) => void, wake = true): Promise<Extension[]> {
     const offered = await Promise.all(servers.map(async (server) => {
+      // A server replaced or taken away while it was being reached is not offered: its successor is, by whoever set it.
+      const serving = this.#servers[server];
+      if (serving === undefined) return [];
       const client = this.#client(server, wake);
+      const current = () => this.#servers[server] === serving;
       try {
         const listed = await (await client).listTools();
+        if (!current()) {
+          this.#drop(server, client);
+          return [];
+        }
         const unique = [...new Map(listed.map((tool) => [tool.name, tool])).values()];
         if (unique.length < listed.length) report(new Error(`MCP server ${server} lists a tool name twice; one of each is offered`));
         this.unavailable.delete(server);
-        return [defineExtension({ name: `chopin-mcp-${server}`, tools: unique.map((tool) => this.#tool(server, tool)) })];
+        this.#failures.delete(server);
+        const tools = unique.map((tool) => this.#tool(server, tool));
+        this.#tools.set(server, tools.map((tool) => tool.name));
+        return [defineExtension({ name: mcpExtensionName(server), tools })];
       } catch (error) {
         // A client that connected but cannot list its tools is let go, so the next try starts afresh.
         this.#drop(server, client);
-        if (this.#closed) return [];
+        if (this.#closed || !current()) return [];
+        this.#failures.set(server, (error as Error).message);
+        // A workspace that cannot run the server never will, so it is told once and not tried again.
+        if (error instanceof Refused) {
+          report(new Error(`MCP server ${server} cannot run here: ${error.message}`));
+          return [];
+        }
         if (!this.unavailable.has(server)) report(new Error(`MCP server ${server} is unavailable: ${(error as Error).message}`));
         this.unavailable.add(server);
         return [];
@@ -108,8 +176,14 @@ export class McpServers {
 
   async #transport(server: McpServer, wake: boolean): Promise<McpTransport> {
     if (!("command" in server)) return new StreamableHttpTransport({ url: server.url, ...(server.headers && { headers: server.headers }) });
+    let launch: ReturnType<Workspace["command"]>;
+    try {
+      launch = this.#workspace.command([server.command, ...(server.args ?? [])], server.env);
+    } catch (error) {
+      throw new Refused((error as Error).message, { cause: error });
+    }
     if (wake) await this.#workspace.start();
-    const { argv: [command, ...args], env } = this.#workspace.command([server.command, ...(server.args ?? [])], server.env);
+    const { argv: [command, ...args], env } = launch;
     return new StdioTransport({ command: command as string, args, env });
   }
 

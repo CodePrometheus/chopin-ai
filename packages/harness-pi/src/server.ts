@@ -8,18 +8,22 @@ import { configure, InboxDoc, type ConversationId, type ConversationView, type M
 import { Type } from "typebox";
 import { WebSocketServer } from "ws";
 import { credentialOf, type Authenticate } from "./auth.js";
-import { httpHandler } from "./http.js";
+import { statusHandler } from "./http.js";
+import { ClientContextDoc } from "./client-context.js";
 import { ModeDoc, NameDoc } from "./mode.js";
-import { userText } from "./acp.js";
-import { Conversation, Conversations, HOST, ModeSchema, RunningSchema, SubmissionSchema, type Principal } from "./protocol.js";
+import { isRunning, userText } from "./acp.js";
+import {
+  Conversation, Conversations, CredentialSchema, Credentials, HOST, Loop, Mcp, McpServerSchema, ModeSchema, REWIND_KIND, RunningSchema, SubmissionSchema,
+  type Image, type LoopControl, type Principal,
+} from "./protocol.js";
 import { backoff } from "./backoff.js";
 import type { AgentService } from "./service.js";
 import { shellEntry } from "./shell.js";
 import { lost, merge, outcomeOf, progressOf, RECENT_SUBMISSIONS, type Outcome } from "./submissions.js";
 
 
-/** Serves the client protocol for `service`; every object belongs to the owner that asked for it. */
-export function createAgentHost(service: AgentService): Host<Principal> {
+/** Serves the client protocol for `service`, and `loop` if it has one; every object belongs to the owner that asked for it. */
+export function createAgentHost(service: AgentService, loop?: LoopControl): Host<Principal> {
   const host = createHost<Principal>({
     name: HOST,
     self: { kind: "host" },
@@ -58,6 +62,7 @@ export function createAgentHost(service: AgentService): Host<Principal> {
         return conversation.id;
       },
       summaries: (ctx) => service.summaries(owner, durable(ctx)),
+      models: () => service.modelChoices(owner),
       fork: async ({ conversation, at }, ctx) => {
         const fork = await service.fork(owner, conversation, at, durable(ctx));
         if (fork === undefined) throw invalid("unknown_conversation", `no conversation ${conversation}`);
@@ -173,6 +178,19 @@ export function createAgentHost(service: AgentService): Host<Principal> {
         .finally(() => awaited.delete(Number(id)))
         .then(reread, reread);
     }
+    // A message taken in, as `submit` and `requeue` both put one, followed to its end like every submission.
+    const admit = async (content: UserInput, steer: boolean, request: string | undefined, ctx: Ctx<Principal>) => {
+      const submission = await opened.value.conversation.submit({
+        type: "input",
+        content,
+        ...(steer && { whenBusy: "steer" as const }),
+        ...(request !== undefined && { requestId: request }),
+      }, durable(ctx));
+      submissions.change(ctx, (draft) => void (draft[String(submission.id)] ??= { status: "pending" }));
+      awaitEnd(submission.id, submission);
+      reread();
+      return submission.id;
+    };
     return {
       variant: "owner",
       view,
@@ -180,18 +198,52 @@ export function createAgentHost(service: AgentService): Host<Principal> {
       name,
       submissions,
       running,
-      submit: async ({ text, steer, request }, ctx) => {
+      submit: async ({ text, images = [], steer, request }, ctx) => {
         service.touch(owner);
-        const submission = await opened.value.conversation.submit({
-          type: "input",
-          content: text,
-          ...(steer === true && { whenBusy: "steer" as const }),
-          ...(request !== undefined && { requestId: request }),
+        return admit(messageContent(text, images), steer === true, request, ctx);
+      },
+      retry: async ({ text, images = [] }, ctx) => {
+        service.touch(owner);
+        const { conversation } = opened.value;
+        if (isRunning(opened.value.view.value as ConversationView)) throw invalid("busy", "the agent is still at work; stop it first");
+        const { entries } = await conversation.context(durable(ctx));
+        const at = entries.findLastIndex((entry) => entry.kind === "pi.user");
+        const asked = entries[at]?.model?.find((message) => message.role === "user");
+        if (asked?.role !== "user") throw invalid("nothing_to_retry", "no message has been sent yet");
+        const content = text === undefined && images.length === 0 ? asked.content : messageContent(text ?? "", images);
+        await conversation.submit({
+          type: "write",
+          entry: { kind: REWIND_KIND, edits: entries.slice(at).map((entry) => ({ target: entry.id, action: "omit" as const })) },
         }, durable(ctx));
-        submissions.change(ctx, (draft) => void (draft[String(submission.id)] ??= { status: "pending" }));
-        awaitEnd(submission.id, submission);
-        reread();
-        return submission.id;
+        return admit(content, false, undefined, ctx);
+      },
+      reset: async ({ handoff }, ctx) => {
+        service.touch(owner);
+        await opened.value.conversation.reset(handoff, durable(ctx));
+      },
+      requeue: async ({ queue }, ctx) => {
+        service.touch(owner);
+        const { harness, conversation } = opened.value;
+        const queued = ((await harness.snapshot(InboxDoc, conversation.id, durable(ctx)))?.items ?? []).filter((item) => item.mode !== "write");
+        const byId = new Map(queued.map((item) => [Number(item.id), item]));
+        if (new Set(queue.map(({ id }) => id)).size !== queue.length) throw invalid("listed_twice", "the new queue lists each message once");
+        // One no longer queued, as the agent took it up since the client looked, stays sent and is passed over.
+        const wanted = queue.flatMap(({ id, text, steer }) => {
+          const item = byId.get(id);
+          if (item === undefined) return [];
+          const content = item.content as UserInput;
+          return [{ item, content: text === undefined ? content : retext(content, text), steer: steer ?? item.mode === "steer" }];
+        });
+        // What comes before the first change stays queued as it is; from there on, what can still be taken back is, and
+        // is put again as wanted. One the agent took up meanwhile stays sent.
+        let from = 0;
+        while (from < queued.length && wanted[from]?.item === queued[from] && wanted[from]?.content === queued[from]?.content
+          && wanted[from]?.steer === (queued[from]?.mode === "steer")) from++;
+        const taken = new Set<unknown>();
+        for (const item of queued.slice(from)) {
+          if ((await harness.abortSubmission(item.id, durable(ctx), conversation.id).catch(() => undefined)) === "aborted") taken.add(item);
+        }
+        for (const { item, content, steer } of wanted.slice(from)) if (taken.has(item)) await admit(content, steer, undefined, ctx);
       },
       abort: async (_args, ctx) => {
         service.touch(owner);
@@ -245,6 +297,11 @@ export function createAgentHost(service: AgentService): Host<Principal> {
         }, durable(ctx));
         name.replace(ctx, next);
       },
+      setContext: async ({ text }, ctx) => {
+        await opened.value.conversation.commit(async (tx) => {
+          (await tx.doc(ClientContextDoc, opened.value.conversation.id)).text = text;
+        }, durable(ctx));
+      },
       setThinking: async ({ level }, ctx) => {
         service.touch(owner);
         const model = (view.value as ConversationView).docs["pi.agent"]?.model as ModelRef | undefined;
@@ -266,6 +323,63 @@ export function createAgentHost(service: AgentService): Host<Principal> {
     };
   });
 
+  host.serve(Credentials, (_input, principal, self) => {
+    const owner = ownerOf(principal);
+    const listed = async () => (await service.credentials(owner)).map(({ providerId, type }) => ({ provider: providerId, type }));
+    const providers = self.state("providers", Type.Array(CredentialSchema), { init: listed });
+    const settled = async (problem: string | undefined, ctx: Ctx<Principal>) => {
+      if (problem !== undefined) throw invalid("credential_refused", problem);
+      providers.replace(ctx, await listed());
+    };
+    return {
+      variant: "owner",
+      providers,
+      setKey: async ({ provider, key }, ctx) => settled(await service.setKey(owner, provider, key), ctx),
+      remove: async ({ provider }, ctx) => settled(await service.removeKey(owner, provider), ctx),
+    };
+  });
+
+  host.serve(Loop, (_input, principal) => {
+    ownerOf(principal);
+    const control = () => {
+      if (loop === undefined) throw invalid("no_loop", "this service runs no RSI loop");
+      return loop;
+    };
+    const done = (problem: string | undefined) => {
+      if (problem !== undefined) throw invalid("loop_refused", problem);
+    };
+    return {
+      variant: "owner",
+      standing: () => control().standing(),
+      changes: () => control().changes(),
+      undo: async ({ id }) => done(await control().undo(id)),
+      corrections: () => control().corrections(),
+      answer: async ({ key, learn }) => done(await control().answer(key, learn)),
+      held: () => control().held(),
+      decide: async ({ id, approve }) => done(await control().decide(id, approve)),
+      settings: () => control().settings(),
+      setSettings: (change) => control().setSettings(change),
+    };
+  });
+
+  host.serve(Mcp, (_input, principal, self) => {
+    const owner = ownerOf(principal);
+    const servers = self.state("servers", Type.Array(McpServerSchema), { init: () => service.mcpServers(owner) });
+    return {
+      variant: "owner",
+      servers,
+      set: async ({ name, url, headers = {} }, ctx) => {
+        const problem = await service.setMcpServer(owner, name, url, headers);
+        if (problem !== undefined) throw invalid("mcp_refused", problem);
+        servers.replace(ctx, service.mcpServers(owner));
+      },
+      remove: async ({ name }, ctx) => {
+        await service.removeMcpServer(owner, name);
+        servers.replace(ctx, service.mcpServers(owner));
+      },
+    };
+  });
+
   return host;
 }
 
@@ -273,10 +387,12 @@ export interface ListenOptions {
   authenticate: Authenticate;
   /** 0, the default, picks a free port. */
   port?: number;
-  /** Loopback by default; anything wider needs TLS in front. */
+  /** Loopback by default; anything wider needs TLS in front, or a private network. */
   hostname?: string;
-  /** A built web app to serve on the same port. */
-  web?: string;
+  /** Whether the service has work in hand, as `GET /status` tells it; whether its agents are working by default. */
+  busy?: () => Promise<boolean>;
+  /** The owner's RSI loop, which clients may then read and decide for. */
+  loop?: LoopControl;
 }
 
 export interface Listening {
@@ -288,9 +404,9 @@ export interface Listening {
   close(): Promise<void>;
 }
 
-/** Serves the client protocol over WebSocket, and the web app over HTTP, on one port. */
+/** Serves the client protocol over WebSocket, and over HTTP only whether it is busy, on one port. */
 export async function listen(service: AgentService, options: ListenOptions): Promise<Listening> {
-  const host = createAgentHost(service);
+  const host = createAgentHost(service, options.loop);
   let reachedAt = Date.now();
   // Only someone who may use the service keeps it from being idle.
   const authenticated = async (credential: string | undefined): Promise<Principal | undefined> => {
@@ -298,9 +414,10 @@ export async function listen(service: AgentService, options: ListenOptions): Pro
     if (principal !== undefined) reachedAt = Date.now();
     return principal;
   };
-  const handle = httpHandler(authenticated, options.web);
+  const status = statusHandler(options.authenticate, options.busy ?? (async () => (await service.working()).length > 0));
   const http = createServer((request, response) => {
-    handle(request, response).catch(() => {
+    if (URL.parse(request.url ?? "/", "http://localhost")?.pathname !== "/status") return void response.writeHead(404).end("not found");
+    status(request, response).catch(() => {
       if (!response.headersSent) response.writeHead(500);
       response.end();
     });
@@ -329,9 +446,10 @@ export async function listen(service: AgentService, options: ListenOptions): Pro
 }
 
 /**
- * Browsers attach the cookie to a WebSocket any page opens, and they always say which page that was. Only a page
- * this service served may connect, at the address it was reached by or the one a proxy in front names; a page
- * cannot set either header itself. Clients that are not browsers send no origin.
+ * A browser always says which page opened a WebSocket, and a page cannot set that itself. The service serves no
+ * page, so a page of another site is refused even when it holds a credential; only a page at the address the
+ * service was reached by, or the one a proxy in front names, may connect. Clients that are not browsers, a proxy
+ * among them, send no origin.
  */
 function sameOrigin(request: IncomingMessage): boolean {
   const origin = request.headers.origin;
@@ -353,5 +471,16 @@ function durable(ctx: Ctx<Principal>): Context {
 function ownerOf(principal: Principal): string {
   if (principal.kind !== "owner") throw forbidden();
   return principal.owner;
+}
+
+/** What a message says and shows, as the model takes it; refused when it does neither. */
+function messageContent(text: string, images: readonly Image[]): UserInput {
+  if (text === "" && images.length === 0) throw invalid("empty_message", "a message says something, shows something, or both");
+  return images.length === 0 ? text : [...(text === "" ? [] : [{ type: "text" as const, text }]), ...images.map((image) => ({ type: "image" as const, ...image }))];
+}
+
+/** `content` saying `text` instead, still showing what it shows. */
+function retext(content: UserInput, text: string): UserInput {
+  return typeof content === "string" ? text : [{ type: "text", text }, ...content.filter((block) => block.type !== "text")];
 }
 

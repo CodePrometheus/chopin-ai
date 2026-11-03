@@ -14,8 +14,8 @@ pnpm monorepo, split by boundary rather than by feature:
 - `packages/core` — harness-agnostic: mutable-layer formats, ACP events with `_meta` extensions, evaluation and
   acceptance, the `chopin` commands. It imports no harness.
 - `packages/workspace` — the per-user workspace lifecycle (provision, pause and resume, idle reclaim, persistent
-  volume, isolation, connection) and its local container implementation. Cloud implementations belong to
-  integrators.
+  volume, isolation, connection), its local container implementation, and a loopback port to a workspace someone
+  else runs beside the service. Cloud implementations belong to integrators.
 - `packages/harness-pi` — the durable harness: an agent service that keeps one store per user outside the
   workspace and runs tools inside it through the execution daemon, the client protocol with its client library,
   and the ACP bridge.
@@ -44,9 +44,9 @@ without running tools, which the daily loop's gate needs. Anything else a harnes
   engine those commands can reach, and the plugin harness, which shares a container with its agent, are known
   exceptions, not precedents.
 - A store belongs to one process at a time; scale out by assigning users to processes.
-- Identity comes from short-lived tokens signed by the integrator and verified with its public key. Local
-  single-user mode moves a launch token from the address into an `HttpOnly` cookie, and a WebSocket from another
-  origin is refused. There are no accounts.
+- Identity comes from short-lived tokens signed by the integrator and verified with its public key. Single-user
+  mode admits one launch token, the service serves no page and sets no cookie, and a WebSocket from a page of
+  another origin is refused. There are no accounts.
 - Both harnesses reach models through the same model library. Credentials are per person, injected by the
   integrator, and never stored in the repository.
 - Prefer open standards to formats of our own: ACP for events and integration, Agent Skills, AGENTS.md, MCP.

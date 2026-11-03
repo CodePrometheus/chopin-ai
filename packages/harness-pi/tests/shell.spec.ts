@@ -150,6 +150,45 @@ describe("withdraw", () => {
   });
 });
 
+describe("requeue", () => {
+  it("arranges the messages still queued as listed: reordered, rewritten, or taken back", async () => {
+    const answer = Promise.withResolvers<void>();
+    const { client, conversation, until, close } = await started([
+      async () => {
+        await answer.promise;
+        return fauxAssistantMessage("First answered.");
+      },
+      fauxAssistantMessage("Then the rest."),
+    ]);
+    type Queued = { id: number; content: string | { type: string; text?: string }[]; mode: string };
+    const queued = () => (((conversation.view.value as ConversationView).docs["pi.inbox"] as { items?: Queued[] } | undefined)?.items ?? [])
+      .filter((item) => item.mode !== "write");
+    const texts = () => queued().map((item) => (typeof item.content === "string" ? item.content : item.content.map((block) => block.text ?? "").join("")));
+    try {
+      await client.root((ctx) => conversation.submit({ text: "First." }, ctx));
+      await until(() => JSON.stringify(conversation.view.value).includes("\"run\""));
+      for (const text of ["Second.", "Third.", "Fourth."]) await client.root((ctx) => conversation.submit({ text }, ctx));
+      await until(() => texts().length === 3);
+      const [second, , fourth] = queued();
+
+      await client.root((ctx) => conversation.requeue({ queue: [{ id: Number(fourth?.id), text: "Fourth, rewritten." }, { id: Number(second?.id) }] }, ctx));
+      await until(() => texts().join("|") === "Fourth, rewritten.|Second.");
+      // An id no longer queued, here the one put again under a new id, is passed over; the rest are arranged.
+      const [rewritten, again] = queued();
+      await client.root((ctx) => conversation.requeue({ queue: [{ id: Number(fourth?.id) }, { id: Number(again?.id) }, { id: Number(rewritten?.id) }] }, ctx));
+      await until(() => texts().join("|") === "Second.|Fourth, rewritten.");
+      const [first] = queued();
+      await expect(client.root((ctx) => conversation.requeue({ queue: [{ id: Number(first?.id) }, { id: Number(first?.id) }] }, ctx))).rejects.toThrow("listed_twice");
+
+      answer.resolve();
+      await until(() => JSON.stringify(conversation.view.value).includes("Then the rest."));
+      expect(JSON.stringify(conversation.view.value)).not.toContain("Third.");
+    } finally {
+      await close();
+    }
+  });
+});
+
 describe("loaded", () => {
   it("says what the agents load besides their tools", async () => {
     const { client, conversations, close } = await started();

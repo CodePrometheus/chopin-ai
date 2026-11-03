@@ -9,6 +9,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [0.3.0] - 2026-11-04
 
+The RSI loop, and what an integrator needs to give each user an agent of their own in the cloud: a service beside
+the user's workspace, and a client protocol a web client can use.
+
 ### Added
 
 - A conversation left idle is compacted just before its prompt cache expires, with a summary request that reads that
@@ -16,10 +19,33 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - The RSI loop: `chopin evolve` turns failures that recur across local sessions into one instruction or skill at a
   time, kept only when resumed conversations show a net gain, within a weekly budget.
 - On macOS, commands the agent runs can neither read nor write `~/.chopin`.
+- `chopin serve --workspace-port <port> --root <dir>` serves one owner whose workspace runs beside the service and
+  answers on a loopback port, with the RSI loop as in local use; `GET /status` tells the integrator whether it is busy.
+- Clients can hand a single-owner service an API key through the client protocol, which
+  `chopin serve --workspace-port` keeps in memory alone; a service for many owners refuses.
+- The client protocol lists the models an owner can use now, with their thinking levels, and the one a new
+  conversation takes.
+- A message sent through the client protocol can carry images, up to 5 MB each, with or without text.
+- A client can tell a conversation what it shows its user, such as the page they are on; the model reads it before
+  each request.
+- A client can rearrange the messages still queued: reorder them, rewrite one, turn one into a steer, or take one
+  back.
+- A client can ask the latest message again, as it was or rewritten, and start the model on a fresh context.
+- A client can set MCP servers over HTTP for its owner, headers included, kept in memory alone; setting one again
+  replaces its headers, as a renewed credential does.
+- `chopin serve --workspace-port` hands the RSI loop its owner's credentials through a pipe, so the loop runs on them
+  without writing them anywhere.
+- A client of a single-owner service can see where the RSI loop stands, undo its changes, answer its questions on
+  corrections and held changes, and set its budget and models, as the `chopin evolve` commands do.
 
 ### Removed
 
-- The web app and `chopin web`; the terminal and editors are the clients.
+- The web app and `chopin web`; the terminal and editors are the clients. The service serves no page and moves no
+  credential into a cookie.
+
+### Fixed
+
+- The client protocol no longer pulls in Node-only code, so a browser can load it.
 
 ## [0.2.0] - 2026-10-21
 

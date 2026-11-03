@@ -1,19 +1,23 @@
 import { spawn, type ChildProcess } from "node:child_process";
 import { createHash, randomBytes } from "node:crypto";
+import { once } from "node:events";
 import { chmod, mkdir, open, readdir, readFile, realpath, rm, stat } from "node:fs/promises";
 import { basename, dirname, extname, join } from "node:path";
 import { setTimeout as sleep } from "node:timers/promises";
 import { fileURLToPath } from "node:url";
 import { BACKGROUND_CONTEXT } from "@earendil-works/chord/context";
+import { InMemoryCredentialStore, type CredentialStore } from "@earendil-works/pi-ai";
 import { localDaemon } from "@earendil-works/pi-env";
-import { AgentService, launchToken, listen, type Listening } from "@chopin-ai/harness-pi";
+import { AgentService, DAEMON_PATH, launchToken, listen, type AgentServiceOptions, type Listening, type ListenOptions } from "@chopin-ai/harness-pi";
 import { LayerVersions } from "@chopin-ai/core";
-import { DirectoryWorkspaceProvider } from "@chopin-ai/workspace";
+import { DirectoryWorkspaceProvider, LoopbackWorkspaceProvider } from "@chopin-ai/workspace";
 import { agentSetup } from "./agent.js";
 import { chopinHome, rsiDirectory, writeWhole } from "./home.js";
 import { exclusive } from "./lock.js";
-import { chopinModels } from "./credentials.js";
+import { chopinCredentials, chopinModels } from "./credentials.js";
 import { resolveModel, type ChooseModel } from "./model.js";
+import { loopControl } from "./rsi/control.js";
+import { evolving } from "./rsi/evolve.js";
 import { exportTranscripts } from "./rsi/export.js";
 import { evolveIfDue } from "./rsi/schedule.js";
 import { errorChain } from "@chopin-ai/harness-pi/protocol";
@@ -140,18 +144,14 @@ export async function runDaemon(directory: string, options: DaemonOptions = {}):
     await rm(paths.record, { force: true });
     const home = dirname(paths.record);
     for (const name of await readdir(home)) if (name.startsWith(`${basename(paths.record)}.`)) await rm(join(home, name), { force: true });
-    const service = await agentService(paths);
-    try {
-      const token = randomBytes(32).toString("base64url");
-      const server = await listen(service, { authenticate: launchToken(token) });
-      // What the loop learns from is written out as it goes, so it never opens this store itself.
-      const exportNow = () => exportTranscripts(service, join(paths.rsi, "transcripts")).catch((error) => console.error(`chopin: ${errorChain(error)}`));
-      const exporting = setInterval(exportNow, EXPORT_MS);
-      exporting.unref();
-      // The loop runs now and then while the agent has nothing in hand; its own lock keeps it to one at a time.
-      const evolving = setInterval(() => void evolveIfDue(CHOPIN, paths.home, async () => (await service.working()).length === 0)
-        .catch((error) => console.error(`chopin: ${errorChain(error)}`)), EVOLVE_CHECK_MS);
-      evolving.unref();
+    const token = randomBytes(32).toString("base64url");
+    // Credentials, conversations and the RSI evaluator's records stay out of the agent's reach.
+    const workspace = {
+      workspaces: new DirectoryWorkspaceProvider(paths.root, { hidden: [await realpath(chopinHome())] }),
+      daemon: localDaemon(),
+      credentials: chopinCredentials(),
+    };
+    await serveProject(paths, workspace, { authenticate: launchToken(token) }, async (server, service) => {
       try {
         await writeRecord(paths.record, { pid: process.pid, url: `ws://127.0.0.1:${server.port}/`, token, build: options.build ?? await buildId() });
         for (;;) {
@@ -164,32 +164,106 @@ export async function runDaemon(directory: string, options: DaemonOptions = {}):
           if ((server.clients === 0 && server.reachedAt < leaving) || options.signal?.aborted === true) break;
         }
       } finally {
-        clearInterval(exporting);
-        clearInterval(evolving);
-        await exportNow();
         await rm(paths.record, { force: true });
-        await server.close();
       }
-    } finally {
-      await service.close(BACKGROUND_CONTEXT);
-    }
+    });
   } finally {
     lock.close();
   }
 }
 
-async function agentService(paths: Paths): Promise<AgentService> {
+export interface WorkspaceServiceOptions {
+  /** The loopback port the workspace's listener serves. */
+  workspacePort: number;
+  /** The workspace's own directory, as the workspace sees it. */
+  root: string;
+  /** The one credential the service admits. */
+  token: string;
+  hostname?: string;
+  port?: number;
+  /** Told the port once the service listens. */
+  listening?: (port: number) => void;
+  /** Ends the service. */
+  signal: AbortSignal;
+}
+
+/**
+ * Serves one owner whose workspace someone else runs beside it, reached on a loopback port, until `signal` aborts:
+ * the project service of local use, with the workspace started and stopped by whoever runs it.
+ */
+export async function serveWorkspace(options: WorkspaceServiceOptions): Promise<void> {
+  const paths = await pathsOf(options.root);
+  const lock = exclusive(paths.lock);
+  if (lock === undefined) throw new Error(`another service holds the store of ${options.root}`);
+  try {
+    const workspace = {
+      workspaces: new LoopbackWorkspaceProvider({ port: options.workspacePort, root: options.root, daemon: DAEMON_PATH }),
+      // Credentials its clients hand over live in memory alone, never on any volume.
+      credentials: new InMemoryCredentialStore(),
+      inMemory: true,
+    };
+    const listening = { authenticate: launchToken(options.token), ...(options.hostname !== undefined && { hostname: options.hostname }), ...(options.port !== undefined && { port: options.port }) };
+    await serveProject(paths, workspace, listening, async (server) => {
+      options.listening?.(server.port);
+      if (!options.signal.aborted) await once(options.signal, "abort");
+    });
+  } finally {
+    lock.close();
+  }
+}
+
+/**
+ * Runs the project's service while `during` runs, and writes out what the loop learns from as it goes, so the loop
+ * never opens the store itself; the loop runs now and then while the agent has nothing in hand, and its own lock
+ * keeps it to one at a time.
+ */
+async function serveProject(
+  paths: Paths,
+  workspace: Placement,
+  listening: ListenOptions,
+  during: (server: Listening, service: AgentService) => Promise<void>,
+): Promise<void> {
+  const service = await agentService(paths, workspace);
+  try {
+    const server = await listen(service, { ...listening, busy: async () => (await service.working()).length > 0 || (await evolving()), loop: loopControl });
+    const exportNow = () => exportTranscripts(service, join(paths.rsi, "transcripts")).catch((error) => console.error(`chopin: ${errorChain(error)}`));
+    const exporting = setInterval(exportNow, EXPORT_MS);
+    exporting.unref();
+    // Credentials held in this process alone are handed to the loop; a home's own the loop reads, and keeps refreshed.
+    const loop = workspace.inMemory === true ? { credentials: workspace.credentials } : {};
+    const scheduling = setInterval(() => void evolveIfDue(CHOPIN, paths.home, async () => (await service.working()).length === 0, loop)
+      .catch((error) => console.error(`chopin: ${errorChain(error)}`)), EVOLVE_CHECK_MS);
+    scheduling.unref();
+    try {
+      await during(server, service);
+    } finally {
+      clearInterval(exporting);
+      clearInterval(scheduling);
+      await exportNow();
+      await server.close();
+    }
+  } finally {
+    await service.close(BACKGROUND_CONTEXT);
+  }
+}
+
+/**
+ * Where a project service's agent works, and the credentials it reaches models with, which its clients may set;
+ * `inMemory` when they live in the service alone.
+ */
+type Placement = Pick<AgentServiceOptions, "workspaces" | "daemon"> & { credentials: CredentialStore; inMemory?: boolean };
+
+async function agentService(paths: Paths, { credentials, ...workspace }: Placement): Promise<AgentService> {
   return new AgentService({
-    ...await agentSetup(),
+    ...await agentSetup(credentials),
+    credentials: () => credentials,
     layerVersions: {
       global: new LayerVersions(join(rsiDirectory(), "layer")),
       project: new LayerVersions(join(paths.rsi, "layer")),
       anyModel: true,
     },
     dataDir: paths.data,
-    // Credentials, conversations and the RSI evaluator's records stay out of the agent's reach.
-    workspaces: new DirectoryWorkspaceProvider(paths.root, { hidden: [await realpath(chopinHome())] }),
-    daemon: localDaemon(),
+    ...workspace,
     report: (error) => console.error(`chopin: ${errorChain(error)}`),
   });
 }
@@ -290,7 +364,11 @@ async function spawnDaemon(paths: Paths): Promise<Daemon> {
 }
 
 async function projectPaths(directory: string): Promise<Paths> {
-  const root = await realpath(directory);
+  return pathsOf(await realpath(directory));
+}
+
+/** Where the service of the project at `root`, a path as the project's workspace sees it, keeps its records. */
+async function pathsOf(root: string): Promise<Paths> {
   const chopin = chopinHome();
   const home = join(chopin, "projects", createHash("sha256").update(root).digest("hex").slice(0, 16));
   // The project's store and log hold its conversations; nobody else on the machine reads them.
