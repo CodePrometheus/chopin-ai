@@ -14,7 +14,7 @@
 
 </div>
 
-> **Status:** `v0.2.0` is the agent. The loop that improves it is the next release; see
+> **Status:** `v0.3.0` adds the loop that improves the agent from your sessions; see
 > [How it improves itself](#how-it-improves-itself).
 
 ## Install
@@ -27,12 +27,24 @@ Requires Node.js 24.8 or later.
 
 ## Quick start
 
+Start chopin in the project you want it to work on:
+
 ```bash
 cd my-project
 chopin
 ```
 
-The first run connects a provider, by its sign-in or an API key, and picks a model. `/hotkeys` lists the keys.
+1. **Connect a provider.** The first run asks for one, by its sign-in or an API key, then for a model, which becomes
+   the default. A key already set in the provider's usual environment variable skips the first step. `/login`
+   connects another provider later, and `/model` switches models.
+2. **Give it a task.** Type what you want and press `enter`. While it works, `enter` steers the running turn and
+   `alt+enter` queues a follow-up.
+3. **Come back any time.** The agent runs in the project's background service, so closing the terminal does not stop
+   it. Run `chopin` in the same directory again, and `/resume` picks up the conversation, finished or still running.
+4. **Work from your editor.** Have an ACP client run `chopin acp` in the project; it joins the same service as the
+   terminal.
+
+`/hotkeys` lists every key.
 
 ## Features
 

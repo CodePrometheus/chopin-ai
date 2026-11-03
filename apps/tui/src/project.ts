@@ -1,7 +1,7 @@
 import { spawn, type ChildProcess } from "node:child_process";
 import { createHash, randomBytes } from "node:crypto";
 import { chmod, mkdir, open, readdir, readFile, realpath, rm, stat } from "node:fs/promises";
-import { basename, dirname, join } from "node:path";
+import { basename, dirname, extname, join } from "node:path";
 import { setTimeout as sleep } from "node:timers/promises";
 import { fileURLToPath } from "node:url";
 import { BACKGROUND_CONTEXT } from "@earendil-works/chord/context";
@@ -63,8 +63,16 @@ interface Paths {
   rsi: string;
 }
 
-/** The built entry, which runs the daemon; the same file whether this module runs from the sources or the build. */
-const BIN = fileURLToPath(new URL("../dist/bin.js", import.meta.url));
+/**
+ * The source hooks' URL, which they record in a process they run from the sources. Tests load the sources their own
+ * way, so their daemons run the build.
+ */
+const SOURCE_HOOKS: unknown = Reflect.get(globalThis, Symbol.for("chopin-ai.source-hooks"));
+const FROM_SOURCES = typeof SOURCE_HOOKS === "string";
+/** The entry that runs the daemon and the loop, from the sources or the build as this process runs. */
+const BIN = fileURLToPath(new URL(FROM_SOURCES ? "bin.ts" : "../dist/bin.js", import.meta.url));
+/** The node arguments that start that entry: the source hooks alone, never this process's other options. */
+const CHOPIN = [...(FROM_SOURCES ? ["--import", SOURCE_HOOKS] : []), BIN];
 const IDLE_MS = 5 * 60_000;
 const LEAVE_GRACE_MS = 10_000;
 
@@ -141,7 +149,7 @@ export async function runDaemon(directory: string, options: DaemonOptions = {}):
       const exporting = setInterval(exportNow, EXPORT_MS);
       exporting.unref();
       // The loop runs now and then while the agent has nothing in hand; its own lock keeps it to one at a time.
-      const evolving = setInterval(() => void evolveIfDue(BIN, paths.home, async () => (await service.working()).length === 0)
+      const evolving = setInterval(() => void evolveIfDue(CHOPIN, paths.home, async () => (await service.working()).length === 0)
         .catch((error) => console.error(`chopin: ${errorChain(error)}`)), EVOLVE_CHECK_MS);
       evolving.unref();
       try {
@@ -234,9 +242,11 @@ function buildId(): Promise<string> {
     for (const root of roots) {
       versions.push((JSON.parse(await readFile(join(root, "..", "package.json"), "utf8")) as { version: string }).version);
       for (const entry of await readdir(root, { recursive: true, withFileTypes: true })) {
-        if (entry.isFile() && entry.name.endsWith(".js")) newest = Math.max(newest, (await stat(join(entry.parentPath, entry.name))).mtimeMs);
+        if (entry.isFile() && extname(entry.name) === extname(BIN)) newest = Math.max(newest, (await stat(join(entry.parentPath, entry.name))).mtimeMs);
       }
     }
+    // From the sources, the hooks that load them are part of the build too.
+    if (FROM_SOURCES) newest = Math.max(newest, (await stat(fileURLToPath(SOURCE_HOOKS))).mtimeMs);
     return `${versions.join(",")}:${Math.round(newest)}`;
   })();
   return build;
@@ -263,7 +273,7 @@ interface Daemon {
 async function spawnDaemon(paths: Paths): Promise<Daemon> {
   const log = await open(paths.log, "a");
   try {
-    const child = spawn(process.execPath, [BIN, "daemon", paths.root], {
+    const child = spawn(process.execPath, [...CHOPIN, "daemon", paths.root], {
       cwd: paths.root,
       detached: true,
       stdio: ["ignore", log.fd, log.fd],

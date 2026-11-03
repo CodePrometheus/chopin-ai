@@ -28,12 +28,12 @@ describe("evolveIfDue", () => {
     await writeFile(bin, 'import { writeFileSync } from "node:fs"; writeFileSync(process.env.CHOPIN_HOME + "/ran-" + process.argv[2], "");\n');
     const idle = async () => true;
 
-    expect(await evolveIfDue(bin, home, idle)).toBe(false);
+    expect(await evolveIfDue([bin], home, idle)).toBe(false);
     await writeFile(join(home, "config.json"), JSON.stringify({ rsi: { weeklyBudgetUsd: 5 } }));
-    expect(await evolveIfDue(bin, home, async () => false)).toBe(false);
-    expect(await evolveIfDue(bin, home, idle)).toBe(true);
+    expect(await evolveIfDue([bin], home, async () => false)).toBe(false);
+    expect(await evolveIfDue([bin], home, idle)).toBe(true);
     expect(await until(join(home, "ran-evolve"))).toBe(true);
-    expect(await evolveIfDue(bin, home, idle)).toBe(false);
-    expect(await evolveIfDue(bin, home, idle, Date.now() + EVOLVE_EVERY_MS)).toBe(true);
+    expect(await evolveIfDue([bin], home, idle)).toBe(false);
+    expect(await evolveIfDue([bin], home, idle, Date.now() + EVOLVE_EVERY_MS)).toBe(true);
   });
 });

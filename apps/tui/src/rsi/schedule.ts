@@ -8,9 +8,10 @@ export const EVOLVE_EVERY_MS = 6 * 60 * 60_000;
 
 /**
  * Starts `chopin evolve` in the background when the loop is set up, its last run is long enough ago, and `idle` says
- * the agent has nothing in hand, so the loop never competes with the user's own work. Says whether it started one.
+ * the agent has nothing in hand, so the loop never competes with the user's own work. `chopin` is the node arguments
+ * that start chopin. Says whether it started one.
  */
-export async function evolveIfDue(bin: string, home: string, idle: () => Promise<boolean>, now = Date.now()): Promise<boolean> {
+export async function evolveIfDue(chopin: readonly string[], home: string, idle: () => Promise<boolean>, now = Date.now()): Promise<boolean> {
   if ((await readSettings()).rsi?.weeklyBudgetUsd === undefined) return false;
   const root = rsiDirectory();
   const marker = join(root, "last-run.json");
@@ -20,7 +21,7 @@ export async function evolveIfDue(bin: string, home: string, idle: () => Promise
   await writeWhole(marker, JSON.stringify({ at: now }), 0o600);
   const log = await open(join(root, "evolve.log"), "a", 0o600);
   try {
-    const child = spawn(process.execPath, [bin, "evolve"], { detached: true, stdio: ["ignore", log.fd, log.fd], env: { ...process.env, CHOPIN_HOME: home } });
+    const child = spawn(process.execPath, [...chopin, "evolve"], { detached: true, stdio: ["ignore", log.fd, log.fd], env: { ...process.env, CHOPIN_HOME: home } });
     child.unref();
   } finally {
     await log.close();
