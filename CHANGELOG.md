@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.3.0] - 2026-11-04
+
 ### Added
 
 - A conversation left idle is compacted just before its prompt cache expires, with a summary request that reads that
@@ -173,6 +175,7 @@ the agent loop, sessions, UI, skills and model access.
 - Model endpoint proxy through `CHOPIN_LLM_PROXY`, and opt-in hot reload while developing with
   `CHOPIN_HMR=1`.
 
-[unreleased]: https://github.com/CodePrometheus/chopin-ai/compare/v0.2.0...HEAD
+[unreleased]: https://github.com/CodePrometheus/chopin-ai/compare/v0.3.0...HEAD
+[0.3.0]: https://github.com/CodePrometheus/chopin-ai/compare/v0.2.0...v0.3.0
 [0.2.0]: https://github.com/CodePrometheus/chopin-ai/compare/v0.1.0...v0.2.0
 [0.1.0]: https://github.com/CodePrometheus/chopin-ai/releases/tag/v0.1.0
