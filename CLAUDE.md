@@ -47,6 +47,9 @@ without running tools, which the daily loop's gate needs. Anything else a harnes
 - Identity comes from short-lived tokens signed by the integrator and verified with its public key. Single-user
   mode admits one launch token, the service serves no page and sets no cookie, and a WebSocket from a page of
   another origin is refused. There are no accounts.
+- A sealed service reads nothing of its owner's before a client unlocks it, holds keys in memory alone, and is handed
+  a key derived from the owner's data key, which never leaves the owner's clients. Its volume holds only what it
+  sealed; the home it works in lives in memory.
 - Both harnesses reach models through the same model library. Credentials are per person, injected by the
   integrator, and never stored in the repository.
 - Prefer open standards to formats of our own: ACP for events and integration, Agent Skills, AGENTS.md, MCP.

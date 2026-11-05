@@ -39,9 +39,9 @@ describe("the service over HTTP", () => {
     try {
       const status = (credential?: string) => fetch(`http://127.0.0.1:${server.port}/status`, credential === undefined ? {} : { headers: { authorization: `Bearer ${credential}` } });
       const reached = server.reachedAt;
-      expect(await (await status("secret")).json()).toEqual({ busy: false });
+      expect(await (await status("secret")).json()).toEqual({ busy: false, locked: false });
       busy = true;
-      expect(await (await status("secret")).json()).toEqual({ busy: true });
+      expect(await (await status("secret")).json()).toEqual({ busy: true, locked: false });
       expect((await status("wrong")).status).toBe(401);
       expect((await status()).status).toBe(401);
       expect(server.reachedAt).toBe(reached);

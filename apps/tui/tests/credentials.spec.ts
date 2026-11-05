@@ -1,4 +1,4 @@
-import { mkdtemp, stat } from "node:fs/promises";
+import { mkdtemp, stat, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { setTimeout as sleep } from "node:timers/promises";
@@ -29,4 +29,13 @@ describe("FileCredentialStore", () => {
     await store.delete("a");
     expect(await other.read("a")).toBeUndefined();
   });
+
+  it("says a file it cannot read holds no credentials, without quoting what it holds", async () => {
+    const file = join(await mkdtemp(join(tmpdir(), "chopin-auth-")), "auth.json");
+    await writeFile(file, "sk-cut-short-secret");
+    const store = new FileCredentialStore(file);
+    const refused = await store.list().then(() => undefined, (error: Error) => error.message);
+    expect(refused).toBe(`${file} holds no credentials object`);
+  });
 });
+

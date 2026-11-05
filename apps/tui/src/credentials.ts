@@ -2,7 +2,7 @@ import { mkdir, readFile } from "node:fs/promises";
 import { dirname, join } from "node:path";
 import { InMemoryCredentialStore, type AuthOperationOptions, type Credential, type CredentialInfo, type CredentialStore } from "@earendil-works/pi-ai";
 import { ModelRuntime } from "@earendil-works/pi-coding-agent";
-import { chopinHome, writeWhole } from "./home.js";
+import { chopinHome, writeKept } from "./home.js";
 import { locked } from "./lock.js";
 
 /**
@@ -51,13 +51,19 @@ export class FileCredentialStore implements CredentialStore {
       if (error.code === "ENOENT") return "{}";
       throw error;
     });
-    const all = JSON.parse(text) as unknown;
+    let all: unknown;
+    try {
+      all = JSON.parse(text);
+    } catch {
+      // A parser's complaint quotes what it read, keys and all.
+      all = undefined;
+    }
     if (typeof all !== "object" || all === null || Array.isArray(all)) throw new Error(`${this.#file} holds no credentials object`);
     return all as Record<string, Credential>;
   }
 
   async #write(all: Record<string, Credential>): Promise<void> {
-    await writeWhole(this.#file, `${JSON.stringify(all, null, 2)}\n`, 0o600);
+    await writeKept(this.#file, `${JSON.stringify(all, null, 2)}\n`, 0o600);
   }
 }
 

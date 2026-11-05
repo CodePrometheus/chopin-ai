@@ -1,6 +1,6 @@
 import { randomBytes } from "node:crypto";
 import { once } from "node:events";
-import { isAbsolute, join } from "node:path";
+import { isAbsolute, join, relative } from "node:path";
 import { parseArgs } from "node:util";
 import { BACKGROUND_CONTEXT } from "@earendil-works/chord/context";
 import type { Command } from "@chopin-ai/core";
@@ -32,13 +32,15 @@ function serveOptions(args: readonly string[]) {
       // One owner, whose workspace's listener answers on this loopback port and keeps its files under the root.
       "workspace-port": { type: "string" },
       root: { type: "string" },
+      // That owner's things kept sealed in this directory, opened once a client unlocks the service.
+      sealed: { type: "string" },
     },
   }).values;
 }
 
 export const serveCommand: Command = {
   name: "serve",
-  args: "[--jwks <url> [--issuer <iss>] [--audience <aud>]] [--image <image>] [--prefix <name>] | --workspace-port <port> --root <dir>; [--host <address>] [--port <port>]",
+  args: "[--jwks <url> [--issuer <iss>] [--audience <aud>]] [--image <image>] [--prefix <name>] | --workspace-port <port> --root <dir> [--sealed <dir>]; [--host <address>] [--port <port>]",
   summary: "run a service with one container workspace per owner, or for one owner whose workspace answers on a loopback port, until interrupted",
   run: async (args, io) => {
     let values: ReturnType<typeof serveOptions>;
@@ -65,6 +67,9 @@ export const serveCommand: Command = {
       [owned !== undefined && containers, "--workspace-port serves one owner in a workspace of its own; --jwks, --issuer, --audience, --image and --prefix do not apply"],
       [values.root !== undefined && !isAbsolute(values.root), "--root is the workspace's directory, as an absolute path"],
       [owned !== undefined && !token, "--workspace-port admits the one credential in CHOPIN_TOKEN, which is not set"],
+      [values.sealed !== undefined && owned === undefined, "--sealed keeps the things of the one owner --workspace-port serves"],
+      [values.sealed !== undefined && !isAbsolute(values.sealed), "--sealed is an absolute path"],
+      [values.sealed !== undefined && !relative(values.sealed, chopinHome()).startsWith(".."), "the chopin home lives in memory, outside --sealed"],
     ] as const).find(([wrong]) => wrong)?.[1];
     if (problem !== undefined) {
       io.err(`chopin serve: ${problem}`);
@@ -78,7 +83,8 @@ export const serveCommand: Command = {
       await serveWorkspace({
         workspacePort, root: values.root, token, port, signal: stop.signal,
         ...(values.host !== undefined && { hostname: values.host }),
-        listening: (at) => io.err(`chopin: serving ws://${values.host ?? "127.0.0.1"}:${at}/ for one owner with the credential in CHOPIN_TOKEN, whose workspace answers at 127.0.0.1:${workspacePort}`),
+        ...(values.sealed !== undefined && { sealed: values.sealed }),
+        listening: (at) => io.err(`chopin: serving ws://${values.host ?? "127.0.0.1"}:${at}/ for one owner with the credential in CHOPIN_TOKEN, whose workspace answers at 127.0.0.1:${workspacePort}${values.sealed === undefined ? "" : "; locked until a client unlocks it with its key"}`),
       });
       return 0;
     }

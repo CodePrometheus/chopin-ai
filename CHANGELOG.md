@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- `chopin serve --workspace-port` with `--sealed <dir>` keeps the owner's conversations, credentials, MCP servers,
+  settings and loop records only sealed on `<dir>`, locked until a client unlocks it with the owner's key.
+- `@chopin-ai/harness-pi/keys` makes a user's data key and wraps it by a passphrase and a recovery key with Web Crypto.
+
+### Changed
+
+- `GET /status` also says whether the service is locked.
+
 ### Fixed
 
 - `chopin serve` starts with no model chosen; each new conversation then takes the model its client picks.

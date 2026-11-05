@@ -8,14 +8,17 @@ import { fileURLToPath } from "node:url";
 import { BACKGROUND_CONTEXT } from "@earendil-works/chord/context";
 import { InMemoryCredentialStore, type CredentialStore } from "@earendil-works/pi-ai";
 import { localDaemon } from "@earendil-works/pi-env";
-import { AgentService, DAEMON_PATH, launchToken, listen, type AgentServiceOptions, type Listening, type ListenOptions } from "@chopin-ai/harness-pi";
+import {
+  AgentService, DAEMON_PATH, launchToken, listen, openSealedStore, type AgentServiceOptions, type Listening, type ListenOptions, type Sealed,
+} from "@chopin-ai/harness-pi";
 import { LayerVersions } from "@chopin-ai/core";
 import { DirectoryWorkspaceProvider, LoopbackWorkspaceProvider } from "@chopin-ai/workspace";
 import { agentSetup } from "./agent.js";
-import { chopinHome, rsiDirectory, writeWhole } from "./home.js";
+import { chopinHome, keepWrites, rsiDirectory, writeWhole } from "./home.js";
 import { exclusive } from "./lock.js";
 import { chopinCredentials, chopinModels } from "./credentials.js";
 import { resolveModel, type ChooseModel } from "./model.js";
+import { Vault } from "./vault.js";
 import { loopControl } from "./rsi/control.js";
 import { evolving } from "./rsi/evolve.js";
 import { exportTranscripts } from "./rsi/export.js";
@@ -181,6 +184,11 @@ export interface WorkspaceServiceOptions {
   token: string;
   hostname?: string;
   port?: number;
+  /**
+   * A persistent directory to keep everything of the owner's in, sealed with their key, the service locked until a
+   * client hands that key over; the chopin home, then, lives in memory, and this directory holds its sealed copy.
+   */
+  sealed?: string;
   /** Told the port once the service listens. */
   listening?: (port: number) => void;
   /** Ends the service. */
@@ -192,66 +200,166 @@ export interface WorkspaceServiceOptions {
  * the project service of local use, with the workspace started and stopped by whoever runs it.
  */
 export async function serveWorkspace(options: WorkspaceServiceOptions): Promise<void> {
+  const workspaces = new LoopbackWorkspaceProvider({ port: options.workspacePort, root: options.root, daemon: DAEMON_PATH });
+  const listening = { authenticate: launchToken(options.token), ...(options.hostname !== undefined && { hostname: options.hostname }), ...(options.port !== undefined && { port: options.port }) };
+  const until = async (server: Listening) => {
+    options.listening?.(server.port);
+    if (!options.signal.aborted) await once(options.signal, "abort");
+  };
+  if (options.sealed !== undefined) return serveSealed(options.root, options.sealed, workspaces, listening, until);
   const paths = await pathsOf(options.root);
   const lock = exclusive(paths.lock);
   if (lock === undefined) throw new Error(`another service holds the store of ${options.root}`);
   try {
-    const workspace = {
-      workspaces: new LoopbackWorkspaceProvider({ port: options.workspacePort, root: options.root, daemon: DAEMON_PATH }),
-      // Credentials its clients hand over live in memory alone, never on any volume.
-      credentials: new InMemoryCredentialStore(),
-      inMemory: true,
-    };
-    const listening = { authenticate: launchToken(options.token), ...(options.hostname !== undefined && { hostname: options.hostname }), ...(options.port !== undefined && { port: options.port }) };
-    await serveProject(paths, workspace, listening, async (server) => {
-      options.listening?.(server.port);
-      if (!options.signal.aborted) await once(options.signal, "abort");
-    });
+    // Credentials its clients hand over live in memory alone, never on any volume.
+    await serveProject(paths, { workspaces, credentials: new InMemoryCredentialStore(), inMemory: true }, listening, until);
   } finally {
     lock.close();
   }
 }
 
 /**
- * Runs the project's service while `during` runs, and writes out what the loop learns from as it goes, so the loop
- * never opens the store itself; the loop runs now and then while the agent has nothing in hand, and its own lock
- * keeps it to one at a time.
+ * Serves an owner whose things are kept sealed in `volume`: locked, reading nothing of theirs, until a client hands
+ * over the key; then the home is restored from its sealed copy, the conversation store opened from its own, and the
+ * service runs as any other, keeping its clients' credentials and MCP servers in the home.
  */
-async function serveProject(
-  paths: Paths,
-  workspace: Placement,
+async function serveSealed(
+  root: string,
+  volume: string,
+  workspaces: LoopbackWorkspaceProvider,
   listening: ListenOptions,
-  during: (server: Listening, service: AgentService) => Promise<void>,
+  during: (server: Listening) => Promise<void>,
 ): Promise<void> {
-  const service = await agentService(paths, workspace);
-  try {
-    const server = await listen(service, { ...listening, busy: async () => (await service.working()).length > 0 || (await evolving()), loop: loopControl });
-    const exportNow = () => exportTranscripts(service, join(paths.rsi, "transcripts")).catch((error) => console.error(`chopin: ${errorChain(error)}`));
-    const exporting = setInterval(exportNow, EXPORT_MS);
-    exporting.unref();
-    // Credentials held in this process alone are handed to the loop; a home's own the loop reads, and keeps refreshed.
-    const loop = workspace.inMemory === true ? { credentials: workspace.credentials } : {};
-    const scheduling = setInterval(() => void evolveIfDue(CHOPIN, paths.home, async () => (await service.working()).length === 0, loop)
-      .catch((error) => console.error(`chopin: ${errorChain(error)}`)), EVOLVE_CHECK_MS);
-    scheduling.unref();
+  let open: { vault: Vault; project: Started; lock: { close(): void } } | undefined;
+  const report = (error: unknown) => console.error(`chopin: ${errorChain(error)}`);
+  const unlock = async (key: Uint8Array) => {
+    // Checked every time, so a key other than the owner's is refused however often it is tried.
+    if (open !== undefined) return open.vault.verify(key);
+    const vault = await Vault.open(volume, chopinHome(), key);
+    // Credentials, settings and the MCP servers clients set are sealed before their writers go on: a refresh replaces
+    // a token, which a crash before the next sync would lose.
+    const seal = () => vault.sync();
+    keepWrites(seal);
+    const paths = await pathsOf(root);
+    const lock = exclusive(paths.lock);
+    let project: Started | undefined;
     try {
-      await during(server, service);
+      if (lock === undefined) throw new Error(`another service holds the store of ${root}`);
+      project = await startProject(paths, {
+        workspaces, credentials: chopinCredentials(), keepClientMcp: true, persist: seal, store: () => openSealedStore({ ...vault.store, report }),
+      });
+      // Opened now, so a store changed at rest refuses the unlock rather than the first conversation; the launch
+      // token names the one owner, "local".
+      await project.service.harness("local");
+    } catch (error) {
+      await project?.stop().catch(() => {});
+      lock?.close();
+      keepWrites(undefined);
+      throw error;
+    }
+    vault.keepSynced(HOME_SYNC_MS, report);
+    open = { vault, project, lock };
+  };
+  let unlocking: Promise<unknown> = Promise.resolve();
+  const sealed: Sealed = {
+    get service() {
+      return open?.project.service;
+    },
+    // One at a time, so clients unlocking at once open the service once.
+    unlock: (key) => {
+      const next = unlocking.then(() => unlock(key));
+      unlocking = next.catch(() => {});
+      return next;
+    },
+  };
+  try {
+    const server = await listen(sealed, { ...listening, busy: async () => open !== undefined && (await open.project.busy()), loop: loopControl });
+    try {
+      await during(server);
     } finally {
-      clearInterval(exporting);
-      clearInterval(scheduling);
-      await exportNow();
       await server.close();
     }
   } finally {
-    await service.close(BACKGROUND_CONTEXT);
+    try {
+      await open?.project.stop();
+    } finally {
+      // Last, so it seals what the service wrote as it stopped.
+      keepWrites(undefined);
+      await open?.vault.close();
+      open?.lock.close();
+    }
   }
+}
+
+/**
+ * How often a sealed service seals what else changed in its home, such as the loop's records; a crash loses at most
+ * this much of it. Credentials, settings and the MCP servers clients set are sealed as they are written.
+ */
+const HOME_SYNC_MS = 5_000;
+
+/** Runs the project's service while `during` runs. */
+async function serveProject(
+  paths: Paths,
+  placement: Placement,
+  listening: ListenOptions,
+  during: (server: Listening, service: AgentService) => Promise<void>,
+): Promise<void> {
+  const project = await startProject(paths, placement);
+  try {
+    const server = await listen(project.service, { ...listening, busy: project.busy, loop: loopControl });
+    try {
+      await during(server, project.service);
+    } finally {
+      await server.close();
+    }
+  } finally {
+    await project.stop();
+  }
+}
+
+/** A project's agent service, at work until stopped. */
+interface Started {
+  readonly service: AgentService;
+  /** Whether its agent or its loop is at work. */
+  busy(): Promise<boolean>;
+  stop(): Promise<void>;
+}
+
+/**
+ * Starts the project's agent service, and writes out what the loop learns from as it goes, so the loop never opens
+ * the store itself; the loop runs now and then while the agent has nothing in hand, and its own lock keeps it to one
+ * at a time.
+ */
+async function startProject(paths: Paths, placement: Placement): Promise<Started> {
+  const service = await agentService(paths, placement);
+  const exportNow = () => exportTranscripts(service, join(paths.rsi, "transcripts")).catch((error) => console.error(`chopin: ${errorChain(error)}`));
+  const exporting = setInterval(exportNow, EXPORT_MS);
+  exporting.unref();
+  // Credentials held in this process alone are handed to the loop; a home's own the loop reads, and keeps refreshed.
+  const loop = placement.inMemory === true ? { credentials: placement.credentials } : {};
+  const scheduling = setInterval(() => void evolveIfDue(CHOPIN, paths.home, async () => (await service.working()).length === 0, loop)
+    .catch((error) => console.error(`chopin: ${errorChain(error)}`)), EVOLVE_CHECK_MS);
+  scheduling.unref();
+  return {
+    service,
+    busy: async () => (await service.working()).length > 0 || (await evolving()),
+    stop: async () => {
+      clearInterval(exporting);
+      clearInterval(scheduling);
+      try {
+        await exportNow();
+      } finally {
+        await service.close(BACKGROUND_CONTEXT);
+      }
+    },
+  };
 }
 
 /**
  * Where a project service's agent works, and the credentials it reaches models with, which its clients may set;
  * `inMemory` when they live in the service alone.
  */
-type Placement = Pick<AgentServiceOptions, "workspaces" | "daemon"> & { credentials: CredentialStore; inMemory?: boolean };
+type Placement = Pick<AgentServiceOptions, "workspaces" | "daemon" | "keepClientMcp" | "store" | "persist"> & { credentials: CredentialStore; inMemory?: boolean };
 
 async function agentService(paths: Paths, { credentials, ...workspace }: Placement): Promise<AgentService> {
   return new AgentService({

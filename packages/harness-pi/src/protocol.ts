@@ -1,6 +1,7 @@
 import { createHost, hostNamed, isChordError, method, remote, webSocketLink, type Ctx, type Host, type Ref } from "@earendil-works/chord";
 import { Type, type Static, type TArray, type TNumber, type TObject, type TSchema, type TUnknown } from "typebox";
 import { backoff } from "./backoff.js";
+import { serviceKey, type DataKey } from "./keys.js";
 
 /**
  * The client protocol: remote objects over a WebSocket. A client sees each object's state as a snapshot followed by
@@ -243,7 +244,8 @@ const McpNameArgs = Type.Object({ name: McpServerName });
 
 /**
  * The MCP servers an owner's clients set, on top of the layer's: kept in memory alone, headers and all, so a client
- * sets them again once the service restarts. Setting one by a name already set replaces it, its headers included.
+ * sets them again once the service restarts, except that a sealed service keeps them, encrypted at rest. Setting one
+ * by a name already set replaces it, its headers included.
  */
 export const Mcp = remote("chopin.mcp", {
   version: 1,
@@ -259,6 +261,42 @@ export const Mcp = remote("chopin.mcp", {
     },
   },
 });
+
+/** The key a sealed service opens with, as `serviceKey` derives it from the owner's data key: 32 bytes in base64url. */
+const UnlockArgs = Type.Object({ key: Type.String({ pattern: "^[A-Za-z0-9_-]{43}$" }) });
+
+/**
+ * Whether the service waits for its key. A sealed service keeps everything of its owner's encrypted at rest and opens
+ * none of it before a client unlocks it, serving nothing else until then; any other service is never locked.
+ */
+export const Vault = remote("chopin.vault", {
+  version: 1,
+  input: Type.Object({}),
+  host: hostNamed(HOST),
+  variants: {
+    owner: {
+      state: { locked: Type.Boolean() },
+      methods: {
+        /** Refused with `wrong_key` for any key but the one the service was first unlocked with; harmless once open. */
+        unlock: method(UnlockArgs) as Call<typeof UnlockArgs>,
+      },
+    },
+  },
+});
+
+/** Opens a sealed service with the owner's data key unless it is open already, waiting no longer than one call. */
+export function unlock(host: Host, key: DataKey, options: CallOptions = {}): Promise<void> {
+  return within(options, async (signal) => {
+    const vault = await host.get(Vault, {}, { signal });
+    try {
+      if (!vault.locked.value) return;
+      const derived = await serviceKey(key);
+      await host.root((ctx) => vault.unlock({ key: derived }, ctx), { signal });
+    } finally {
+      vault.release();
+    }
+  });
+}
 
 /** Where the RSI loop stands: the layer version in use, the failures it knows, what waits for the owner, what it spent. */
 export const LoopStandingSchema = Type.Object({

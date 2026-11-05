@@ -13,25 +13,81 @@ import { ClientContextDoc } from "./client-context.js";
 import { ModeDoc, NameDoc } from "./mode.js";
 import { isRunning, userText } from "./acp.js";
 import {
-  Conversation, Conversations, CredentialSchema, Credentials, HOST, Loop, Mcp, McpServerSchema, ModeSchema, REWIND_KIND, RunningSchema, SubmissionSchema,
-  type Image, type LoopControl, type Principal,
+  Conversation, Conversations, CredentialSchema, Credentials, HOST, Loop, Mcp, McpServerSchema, ModeSchema, REWIND_KIND, RunningSchema, SubmissionSchema, Vault,
+  errorChain, type Image, type LoopControl, type Principal,
 } from "./protocol.js";
 import { backoff } from "./backoff.js";
-import type { AgentService } from "./service.js";
+import { AgentService } from "./service.js";
 import { shellEntry } from "./shell.js";
 import { lost, merge, outcomeOf, progressOf, RECENT_SUBMISSIONS, type Outcome } from "./submissions.js";
 
 
-/** Serves the client protocol for `service`, and `loop` if it has one; every object belongs to the owner that asked for it. */
-export function createAgentHost(service: AgentService, loop?: LoopControl): Host<Principal> {
+/**
+ * A service that opens only once a client hands it its key, so nothing of its owner's is read before: until then,
+ * clients reach the vault alone.
+ */
+export interface Sealed {
+  /** The service, once open. */
+  readonly service: AgentService | undefined;
+  /** Opens the service with `key`, or checks the key once it is open; a key it was not first unlocked with fails with `WrongKey`. */
+  unlock(key: Uint8Array): Promise<void>;
+}
+
+/** A key other than the one a sealed service was first unlocked with. */
+export class WrongKey extends Error {
+  constructor() {
+    super("this is not the key the service was first unlocked with");
+  }
+}
+
+/**
+ * Serves the client protocol for `source`, and `loop` if it has one; every object belongs to the owner that asked for
+ * it. A sealed source serves the vault alone until it is unlocked.
+ */
+export function createAgentHost(source: AgentService | Sealed, loop?: LoopControl): Host<Principal> {
   const host = createHost<Principal>({
     name: HOST,
     self: { kind: "host" },
     principalKey: (principal) => (principal.kind === "owner" ? `owner:${principal.owner}` : "host"),
   });
+  const sealed = source instanceof AgentService ? undefined : source;
+  // Objects are made anew for each client that asks, so one asked for while locked is refused, and made once open.
+  const current = (): AgentService => {
+    const service = sealed === undefined ? source as AgentService : sealed.service;
+    if (service === undefined) throw invalid("locked", "the service is locked until a client unlocks it with its key");
+    return service;
+  };
+  /** Tells every vault a client holds that the service is open. */
+  const unlocked = new Set<() => void>();
+
+  host.serve(Vault, (_input, principal, self) => {
+    ownerOf(principal);
+    const locked = self.state("locked", Type.Boolean(), { init: () => sealed !== undefined && sealed.service === undefined });
+    self.resource("unlocked", {
+      version: 1,
+      open: () => {
+        const tell = () => void host.root((root) => locked.replace(root, false)).catch(() => {});
+        unlocked.add(tell);
+        return tell;
+      },
+      close: (tell) => void unlocked.delete(tell),
+    });
+    return {
+      variant: "owner",
+      locked,
+      unlock: async ({ key }) => {
+        if (sealed === undefined) throw invalid("not_sealed", "this service keeps nothing sealed, so it takes no key");
+        await sealed.unlock(Buffer.from(key, "base64url")).catch((error: unknown) => {
+          throw error instanceof WrongKey ? invalid("wrong_key", error.message) : invalid("unlock_failed", errorChain(error));
+        });
+        for (const tell of unlocked) tell();
+      },
+    };
+  });
 
   host.serve(Conversations, (_input, principal, self) => {
     const owner = ownerOf(principal);
+    const service = current();
     // A conversation made anywhere, such as by a task run, joins the list while it is held.
     let unhear = () => {};
     const harness = self.resource("harness", {
@@ -74,6 +130,7 @@ export function createAgentHost(service: AgentService, loop?: LoopControl): Host
 
   host.serve(Conversation, ({ conversation: id }, principal, self) => {
     const owner = ownerOf(principal);
+    const service = current();
     const opened = self.resource("conversation", {
       version: 1,
       open: async () => {
@@ -325,6 +382,7 @@ export function createAgentHost(service: AgentService, loop?: LoopControl): Host
 
   host.serve(Credentials, (_input, principal, self) => {
     const owner = ownerOf(principal);
+    const service = current();
     const listed = async () => (await service.credentials(owner)).map(({ providerId, type }) => ({ provider: providerId, type }));
     const providers = self.state("providers", Type.Array(CredentialSchema), { init: listed });
     const settled = async (problem: string | undefined, ctx: Ctx<Principal>) => {
@@ -341,6 +399,8 @@ export function createAgentHost(service: AgentService, loop?: LoopControl): Host
 
   host.serve(Loop, (_input, principal) => {
     ownerOf(principal);
+    // The loop's records are the owner's too, kept where the service keeps the rest.
+    current();
     const control = () => {
       if (loop === undefined) throw invalid("no_loop", "this service runs no RSI loop");
       return loop;
@@ -364,6 +424,7 @@ export function createAgentHost(service: AgentService, loop?: LoopControl): Host
 
   host.serve(Mcp, (_input, principal, self) => {
     const owner = ownerOf(principal);
+    const service = current();
     const servers = self.state("servers", Type.Array(McpServerSchema), { init: () => service.mcpServers(owner) });
     return {
       variant: "owner",
@@ -371,11 +432,11 @@ export function createAgentHost(service: AgentService, loop?: LoopControl): Host
       set: async ({ name, url, headers = {} }, ctx) => {
         const problem = await service.setMcpServer(owner, name, url, headers);
         if (problem !== undefined) throw invalid("mcp_refused", problem);
-        servers.replace(ctx, service.mcpServers(owner));
+        servers.replace(ctx, await service.mcpServers(owner));
       },
       remove: async ({ name }, ctx) => {
         await service.removeMcpServer(owner, name);
-        servers.replace(ctx, service.mcpServers(owner));
+        servers.replace(ctx, await service.mcpServers(owner));
       },
     };
   });
@@ -404,9 +465,10 @@ export interface Listening {
   close(): Promise<void>;
 }
 
-/** Serves the client protocol over WebSocket, and over HTTP only whether it is busy, on one port. */
-export async function listen(service: AgentService, options: ListenOptions): Promise<Listening> {
-  const host = createAgentHost(service, options.loop);
+/** Serves the client protocol over WebSocket, and over HTTP only whether it is busy or locked, on one port. */
+export async function listen(source: AgentService | Sealed, options: ListenOptions): Promise<Listening> {
+  const host = createAgentHost(source, options.loop);
+  const service = () => (source instanceof AgentService ? source : source.service);
   let reachedAt = Date.now();
   // Only someone who may use the service keeps it from being idle.
   const authenticated = async (credential: string | undefined): Promise<Principal | undefined> => {
@@ -414,7 +476,10 @@ export async function listen(service: AgentService, options: ListenOptions): Pro
     if (principal !== undefined) reachedAt = Date.now();
     return principal;
   };
-  const status = statusHandler(options.authenticate, options.busy ?? (async () => (await service.working()).length > 0));
+  const status = statusHandler(options.authenticate, {
+    busy: options.busy ?? (async () => (await service()?.working() ?? []).length > 0),
+    locked: () => service() === undefined,
+  });
   const http = createServer((request, response) => {
     if (URL.parse(request.url ?? "/", "http://localhost")?.pathname !== "/status") return void response.writeHead(404).end("not found");
     status(request, response).catch(() => {

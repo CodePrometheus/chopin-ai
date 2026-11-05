@@ -64,7 +64,7 @@ export async function readSettings(): Promise<Settings> {
 
 export async function writeSettings(settings: Settings): Promise<void> {
   await mkdir(chopinHome(), { recursive: true });
-  await writeWhole(settingsFile(), `${JSON.stringify(settings, null, 2)}\n`);
+  await writeKept(settingsFile(), `${JSON.stringify(settings, null, 2)}\n`);
 }
 
 let changing: Promise<unknown> = Promise.resolve();
@@ -84,6 +84,23 @@ export function changeSettings(change: Partial<Settings> | ((current: Settings) 
   });
   changing = next.catch(() => {});
   return next;
+}
+
+/** What makes a file written with `writeKept` outlast a crash before its writer goes on; the write alone by default. */
+let keeping: (file: string) => Promise<void> = async () => {};
+
+/**
+ * Has each file written with `writeKept` from now on kept by `keep` before the write returns, as a sealed service
+ * seals it at once; `undefined` goes back to the write alone.
+ */
+export function keepWrites(keep: ((file: string) => Promise<void>) | undefined): void {
+  keeping = keep ?? (async () => {});
+}
+
+/** `writeWhole` for what a crash must not lose, such as credentials a refresh replaced: kept before it returns. */
+export async function writeKept(file: string, text: string, mode?: number): Promise<void> {
+  await writeWhole(file, text, mode);
+  await keeping(file);
 }
 
 /**

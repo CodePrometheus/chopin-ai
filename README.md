@@ -111,6 +111,15 @@ network, such as another container of the same pod, running the workspace packag
 model `CHOPIN_MODEL` names, and `GET /status` with that credential says whether it is busy. The user's client hands
 it their model API key through the client protocol, and it keeps the key in memory alone.
 
+With `--sealed <dir>` (Node 24.16 or later) it keeps that user's conversations, settings, loop records, and the
+credentials and MCP servers clients hand over only sealed on `<dir>`, and starts locked, reading nothing until a client
+unlocks it. Conversations are then held in memory, each commit journaled to `<dir>` before it takes effect, and
+`CHOPIN_HOME`, which must be memory-backed, is restored from `<dir>` and synced back to it, credentials, settings and
+MCP servers as they are written; the workspace's files stay as they are. Sealing keeps what the volume holds from being
+read, not from being put back: a volume replaced by an earlier copy of itself, or its journal cut at a record's end,
+opens as that earlier state. Clients make the user's data key and wrap it by a passphrase and a recovery key with
+`@chopin-ai/harness-pi/keys`, and unlock with `unlock` from the client protocol.
+
 | Package | Purpose |
 |---|---|
 | `chopin-ai` | The `chopin` command: terminal client, ACP and the project service |

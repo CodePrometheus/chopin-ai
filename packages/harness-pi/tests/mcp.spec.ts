@@ -213,7 +213,7 @@ describe("MCP servers a client sets", () => {
     };
     try {
       expect(await service.setMcpServer("alice", "who", who.url, { authorization: "Bearer one" })).toBeUndefined();
-      expect(service.mcpServers("alice")).toEqual([{ name: "who", url: who.url, tools: 1 }]);
+      expect(await service.mcpServers("alice")).toEqual([{ name: "who", url: who.url, tools: 1 }]);
       expect(await answers()).toEqual(["Bearer one"]);
       // Set again by its name, a server takes its new headers, as a renewed credential does.
       await service.setMcpServer("alice", "who", who.url, { authorization: "Bearer two" });
@@ -221,7 +221,7 @@ describe("MCP servers a client sets", () => {
       expect((await service.loaded("alice", context)).mcpServers).toEqual(["layered", "who"]);
 
       await service.removeMcpServer("alice", "who");
-      expect(service.mcpServers("alice")).toEqual([]);
+      expect(await service.mcpServers("alice")).toEqual([]);
       expect(await service.setMcpServer("alice", "layered", who.url, {})).toContain("the layer already serves");
       expect(await service.setMcpServer("alice", "files", "file:///etc", {})).toContain("no http or https address");
     } finally {

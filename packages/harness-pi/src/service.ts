@@ -1,5 +1,5 @@
 import { createHash } from "node:crypto";
-import { chmod, mkdir } from "node:fs/promises";
+import { chmod, mkdir, readFile, rename, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import type { Context } from "@earendil-works/chord";
 import { BACKGROUND_CONTEXT } from "@earendil-works/chord/context";
@@ -77,6 +77,18 @@ export interface AgentServiceOptions {
   daemon?: string;
   /** Stops workspaces whose owner has been idle this long, keeping their volumes; never when absent. */
   reclaimAfterMs?: number;
+  /**
+   * Keeps the MCP servers an owner's clients set in `dataDir`, headers and all, so they outlast a restart; only where
+   * that directory is sealed at rest. In memory alone when absent.
+   */
+  keepClientMcp?: boolean;
+  /** Opens an owner's store; an SQLite file in `dataDir` by default. */
+  store?: (owner: string) => Promise<Storage>;
+  /**
+   * Makes a file the service wrote in `dataDir` outlast a crash, as sealing it at once does, before the client that
+   * asked for the write is answered; the write alone by default.
+   */
+  persist?: (file: string) => Promise<void>;
 }
 
 /** A conversation that changed, as `changedSince` gives it. */
@@ -123,8 +135,10 @@ export class AgentService {
   readonly #holds = new Map<string, number>();
   /** How many of each owner's own commands are running. */
   readonly #commands = new Map<string, number>();
-  /** The MCP servers each owner's clients set, kept in memory alone, headers and all. */
+  /** The MCP servers each owner's clients set, headers and all, as far as they are read. */
   readonly #clientMcp = new Map<string, Record<string, McpServer>>();
+  /** Keeping the servers clients set, one write at a time, so none overtakes a later one. */
+  #keeping: Promise<unknown> = Promise.resolve();
   /** When this service started, which is as recent as anything it knows of an owner it has not seen. */
   readonly #started = Date.now();
   readonly #lastActive = new Map<string, number>();
@@ -201,7 +215,7 @@ export class AgentService {
       instructions: layer?.instructions !== undefined,
       projectInstructions: project.map((file) => file.path),
       skills: layer?.skills.map((skill) => skill.name) ?? [],
-      mcpServers: [...Object.keys(layer?.mcpServers ?? {}), ...Object.keys(this.#clientMcp.get(owner) ?? {})],
+      mcpServers: [...Object.keys(layer?.mcpServers ?? {}), ...Object.keys(await this.#clientServers(owner))],
     };
   }
 
@@ -294,31 +308,68 @@ export class AgentService {
    * The MCP servers the owner's clients set, each with how many tools it offers, or why it offers none yet. Asking
    * opens nothing: an agent not open now offers none of their tools.
    */
-  mcpServers(owner: string): McpServerState[] {
+  async mcpServers(owner: string): Promise<McpServerState[]> {
+    const servers = await this.#clientServers(owner);
     const opened = this.#agents.get(owner)?.ready;
-    return Object.entries(this.#clientMcp.get(owner) ?? {})
-      .map(([name, server]) => ({ name, url: "url" in server ? server.url : "", ...opened?.mcp.status(name) ?? { tools: 0 } }));
+    return Object.entries(servers).map(([name, server]) => ({ name, url: "url" in server ? server.url : "", ...opened?.mcp.status(name) ?? { tools: 0 } }));
   }
 
   /**
-   * Serves an MCP server a client sets for the owner, in place of any it set by that name, kept in memory alone;
-   * else why it cannot: the layer has one by that name, or the address is no web address.
+   * Serves an MCP server a client sets for the owner, in place of any it set by that name; else why it cannot: the
+   * layer has one by that name, or the address is no web address.
    */
   async setMcpServer(owner: string, name: string, url: string, headers: Readonly<Record<string, string>>): Promise<string | undefined> {
     if (name in (this.#options.layer?.mcpServers ?? {})) return `the layer already serves an MCP server named ${name}`;
     if (!/^https?:$/.test(URL.parse(url)?.protocol ?? "")) return `${url} is no http or https address`;
     const server: McpServer = { type: "http", url, ...(Object.keys(headers).length > 0 && { headers: { ...headers } }) };
-    this.#clientMcp.set(owner, { ...this.#clientMcp.get(owner), [name]: server });
+    await this.#keepClientServers(owner, { ...await this.#clientServers(owner), [name]: server });
     await (await this.#openedFor(owner)).serve(name, server);
     return undefined;
   }
 
   /** Stops serving an MCP server a client set for the owner. */
   async removeMcpServer(owner: string, name: string): Promise<void> {
-    const { [name]: gone, ...rest } = this.#clientMcp.get(owner) ?? {};
+    const { [name]: gone, ...rest } = await this.#clientServers(owner);
     if (gone === undefined) return;
-    this.#clientMcp.set(owner, rest);
+    await this.#keepClientServers(owner, rest);
     await this.#agents.get(owner)?.ready?.serve(name, undefined);
+  }
+
+  /** The MCP servers the owner's clients set, read from `dataDir` the first time where they are kept there. */
+  async #clientServers(owner: string): Promise<Record<string, McpServer>> {
+    const known = this.#clientMcp.get(owner);
+    if (known !== undefined || this.#options.keepClientMcp !== true) return known ?? {};
+    const file = this.#clientMcpFile(owner);
+    const text = await readFile(file, "utf8").catch((error: NodeJS.ErrnoException) => {
+      if (error.code === "ENOENT") return "{}";
+      throw error;
+    });
+    const read = parsedOrUndefined(text);
+    // A parser's complaint quotes what it read, headers and all, so it is told in other words.
+    if (typeof read !== "object" || read === null || Array.isArray(read)) throw new Error(`${file} holds no MCP servers`);
+    // One set meanwhile is newer than what was read.
+    const kept = this.#clientMcp.get(owner) ?? read as Record<string, McpServer>;
+    this.#clientMcp.set(owner, kept);
+    return kept;
+  }
+
+  async #keepClientServers(owner: string, servers: Record<string, McpServer>): Promise<void> {
+    this.#clientMcp.set(owner, servers);
+    if (this.#options.keepClientMcp !== true) return;
+    const file = this.#clientMcpFile(owner);
+    const write = this.#keeping.then(async () => {
+      await mkdir(this.#options.dataDir, { recursive: true, mode: 0o700 });
+      // Written whole, so a restart midway finds the servers as they were or as they are.
+      await writeFile(`${file}.draft`, JSON.stringify(this.#clientMcp.get(owner) ?? {}), { mode: 0o600 });
+      await rename(`${file}.draft`, file);
+      await this.#options.persist?.(file);
+    });
+    this.#keeping = write.catch(() => {});
+    await write;
+  }
+
+  #clientMcpFile(owner: string): string {
+    return join(this.#options.dataDir, `${fingerprint(owner)}.mcp.json`);
   }
 
   /** The providers the owner holds a credential for, never the secrets; none where clients cannot set them. */
@@ -522,7 +573,7 @@ export class AgentService {
   async #open(owner: string, context: Context): Promise<Opened> {
     const report = this.#options.report ?? (() => {});
     const workspace = this.#options.workspaces.open(owner);
-    const mcp = new McpServers({ ...this.#options.layer?.mcpServers, ...this.#clientMcp.get(owner) }, workspace);
+    const mcp = new McpServers({ ...this.#options.layer?.mcpServers, ...await this.#clientServers(owner) }, workspace);
     const connection = new Connection({ command: () => this.#daemon(workspace) });
     let storage: Storage | undefined;
     let harness: Harness | undefined;
@@ -571,7 +622,7 @@ export class AgentService {
       // Conversations are private to their owner; nobody else on the machine reads the store.
       await mkdir(this.#options.dataDir, { recursive: true });
       await chmod(this.#options.dataDir, 0o700);
-      storage = await openNodeSqliteStorage(join(this.#options.dataDir, `${fingerprint(owner)}.sqlite`));
+      storage = await (this.#options.store?.(owner) ?? openNodeSqliteStorage(join(this.#options.dataDir, `${fingerprint(owner)}.sqlite`)));
       harness = await Harness.open(storage, {
         models: this.#options.models(owner),
         registry,
@@ -701,6 +752,14 @@ export class AgentService {
     await workspace.start();
     // No variables are carried, so the command line is the whole launch.
     return workspace.command([this.#options.daemon ?? DAEMON_PATH]).argv;
+  }
+}
+
+function parsedOrUndefined(text: string): unknown {
+  try {
+    return JSON.parse(text);
+  } catch {
+    return undefined;
   }
 }
 

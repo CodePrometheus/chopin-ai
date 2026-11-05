@@ -21,6 +21,10 @@
       "types": "./dist/protocol.d.ts",
       "default": "./dist/protocol.js"
     },
+    "./keys": {
+      "types": "./dist/keys.d.ts",
+      "default": "./dist/keys.js"
+    },
     "./acp": {
       "types": "./dist/acp.d.ts",
       "default": "./dist/acp.js"
