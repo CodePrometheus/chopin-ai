@@ -9,21 +9,26 @@ export interface ModelRef {
 
 export type ChooseModel = (models: ModelRuntime) => Promise<ModelRef>;
 
-/** The model to run with: CHOPIN_MODEL, else the one chosen before, else `choose` picks one and it is kept. */
-export async function resolveModel(models: ModelRuntime, choose: ChooseModel): Promise<ModelRef> {
+/** CHOPIN_MODEL, else the model chosen before; none when neither names one. */
+export async function chosenModel(models: ModelRuntime): Promise<ModelRef | undefined> {
   const fromEnvironment = process.env.CHOPIN_MODEL?.trim();
   const named = fromEnvironment === undefined || fromEnvironment === "" ? (await readSettings()).model : fromEnvironment;
-  if (named !== undefined) {
-    const [provider = "", ...rest] = named.split("/");
-    const modelId = rest.join("/");
-    // One a terminal found when it fetched the catalogs since is in those kept on disk.
-    if (models.getModel(provider, modelId) === undefined) await models.refresh({ allowNetwork: false });
-    if (models.getModel(provider, modelId) !== undefined) return { provider, modelId };
-    throw new Error(`unknown model ${named}; use provider/model, as the model library names them`);
-  }
-  const chosen = await choose(models);
-  await changeSettings({ model: `${chosen.provider}/${chosen.modelId}` });
-  return chosen;
+  if (named === undefined) return undefined;
+  const [provider = "", ...rest] = named.split("/");
+  const modelId = rest.join("/");
+  // One a terminal found when it fetched the catalogs since is in those kept on disk.
+  if (models.getModel(provider, modelId) === undefined) await models.refresh({ allowNetwork: false });
+  if (models.getModel(provider, modelId) !== undefined) return { provider, modelId };
+  throw new Error(`unknown model ${named}; use provider/model, as the model library names them`);
+}
+
+/** The model to run with: the one chosen, else `choose` picks one and it is kept. */
+export async function resolveModel(models: ModelRuntime, choose: ChooseModel): Promise<ModelRef> {
+  const chosen = await chosenModel(models);
+  if (chosen !== undefined) return chosen;
+  const picked = await choose(models);
+  await changeSettings({ model: `${picked.provider}/${picked.modelId}` });
+  return picked;
 }
 
 /**

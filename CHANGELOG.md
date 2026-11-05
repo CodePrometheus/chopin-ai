@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- `chopin serve` starts with no model chosen; each new conversation then takes the model its client picks.
+
 ## [0.3.0] - 2026-11-04
 
 The RSI loop, and what an integrator needs to give each user an agent of their own in the cloud: a service beside

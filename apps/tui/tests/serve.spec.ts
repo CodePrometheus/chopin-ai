@@ -102,16 +102,37 @@ describe("chopin serve", () => {
     expect(stderr).toContain("--port is a port number");
   });
 
-  it("explains how to choose a model when none is chosen", async () => {
+  it("serves with no model chosen, leaving a new conversation's model to its client", async () => {
     const child = spawn(process.execPath, [bin, "serve"], {
       env: { ...process.env, CHOPIN_HOME: await mkdtemp(join(tmpdir(), "chopin-home-")), CHOPIN_MODEL: "" },
+      stdio: ["ignore", "ignore", "pipe"],
+    });
+    const address = await new Promise<{ port: string; token: string }>((resolve, reject) => {
+      child.stderr.on("data", (chunk: Buffer) => {
+        const found = /ws:\/\/127\.0\.0\.1:(\d+)\/ for one owner with credential (\S+);/.exec(chunk.toString());
+        if (found !== null) resolve({ port: found[1] ?? "", token: found[2] ?? "" });
+      });
+      child.once("exit", (code) => reject(new Error(`serve exited early with ${code}`)));
+    });
+    const host = connect(`ws://127.0.0.1:${address.port}/?token=${address.token}`);
+    const conversations = await host.get(Conversations, {});
+    expect((await host.root((ctx) => conversations.models(ctx))).current).toBeNull();
+    expect(await host.root((ctx) => conversations.create(ctx))).toBeTypeOf("number");
+    await host.close();
+    child.kill("SIGTERM");
+    expect((await once(child, "exit"))[0]).toBe(0);
+  }, 30_000);
+
+  it("refuses to serve with a model it does not know", async () => {
+    const child = spawn(process.execPath, [bin, "serve"], {
+      env: { ...process.env, CHOPIN_HOME: await mkdtemp(join(tmpdir(), "chopin-home-")), CHOPIN_MODEL: "nowhere/nothing" },
       stdio: ["ignore", "ignore", "pipe"],
     });
     let stderr = "";
     child.stderr.on("data", (chunk: Buffer) => { stderr += chunk.toString(); });
     const [code] = await once(child, "exit");
     expect(code).toBe(1);
-    expect(stderr).toContain("run chopin once to connect a provider and pick one");
+    expect(stderr).toContain("unknown model nowhere/nothing");
   });
 
   it("serves the owners an integrator names when given its key set", async () => {
