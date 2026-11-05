@@ -1,5 +1,5 @@
 import { createHash } from "node:crypto";
-import { chmod, mkdir, readFile, rename, writeFile } from "node:fs/promises";
+import { chmod, mkdir, rename, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import type { Context } from "@earendil-works/chord";
 import { BACKGROUND_CONTEXT } from "@earendil-works/chord/context";
@@ -26,7 +26,7 @@ import {
 import { openNodeSqliteStorage } from "@earendil-works/pi-durable/storage/sqlite/node";
 import { CodingTools } from "@earendil-works/pi-durable/tools";
 import { Connection, RemoteExecutionEnv } from "@earendil-works/pi-env";
-import { checkGates, isMcpToolOf, withChopinMeta, type Layer, type McpServer, type TaskRun, type TranscriptEntry } from "@chopin-ai/core";
+import { checkGates, isMcpToolOf, readJsonObject, withChopinMeta, type Layer, type McpServer, type TaskRun, type TranscriptEntry } from "@chopin-ai/core";
 import { diff, reclaimIdle, snapshot, type Workspace, type WorkspaceProvider } from "@chopin-ai/workspace";
 import { entryTranscript, stopReason, totalUsage, userText } from "./acp.js";
 import { IdleCompaction } from "./idle-compaction.js";
@@ -339,14 +339,7 @@ export class AgentService {
   async #clientServers(owner: string): Promise<Record<string, McpServer>> {
     const known = this.#clientMcp.get(owner);
     if (known !== undefined || this.#options.keepClientMcp !== true) return known ?? {};
-    const file = this.#clientMcpFile(owner);
-    const text = await readFile(file, "utf8").catch((error: NodeJS.ErrnoException) => {
-      if (error.code === "ENOENT") return "{}";
-      throw error;
-    });
-    const read = parsedOrUndefined(text);
-    // A parser's complaint quotes what it read, headers and all, so it is told in other words.
-    if (typeof read !== "object" || read === null || Array.isArray(read)) throw new Error(`${file} holds no MCP servers`);
+    const read = (await readJsonObject(this.#clientMcpFile(owner), "MCP servers")) ?? {};
     // One set meanwhile is newer than what was read.
     const kept = this.#clientMcp.get(owner) ?? read as Record<string, McpServer>;
     this.#clientMcp.set(owner, kept);
@@ -752,14 +745,6 @@ export class AgentService {
     await workspace.start();
     // No variables are carried, so the command line is the whole launch.
     return workspace.command([this.#options.daemon ?? DAEMON_PATH]).argv;
-  }
-}
-
-function parsedOrUndefined(text: string): unknown {
-  try {
-    return JSON.parse(text);
-  } catch {
-    return undefined;
   }
 }
 

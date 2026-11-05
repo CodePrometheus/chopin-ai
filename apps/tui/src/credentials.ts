@@ -1,7 +1,8 @@
-import { mkdir, readFile } from "node:fs/promises";
+import { mkdir } from "node:fs/promises";
 import { dirname, join } from "node:path";
 import { InMemoryCredentialStore, type AuthOperationOptions, type Credential, type CredentialInfo, type CredentialStore } from "@earendil-works/pi-ai";
 import { ModelRuntime } from "@earendil-works/pi-coding-agent";
+import { readJsonObject } from "@chopin-ai/core";
 import { chopinHome, writeKept } from "./home.js";
 import { locked } from "./lock.js";
 
@@ -47,19 +48,7 @@ export class FileCredentialStore implements CredentialStore {
   }
 
   async #all(): Promise<Record<string, Credential>> {
-    const text = await readFile(this.#file, "utf8").catch((error: NodeJS.ErrnoException) => {
-      if (error.code === "ENOENT") return "{}";
-      throw error;
-    });
-    let all: unknown;
-    try {
-      all = JSON.parse(text);
-    } catch {
-      // A parser's complaint quotes what it read, keys and all.
-      all = undefined;
-    }
-    if (typeof all !== "object" || all === null || Array.isArray(all)) throw new Error(`${this.#file} holds no credentials object`);
-    return all as Record<string, Credential>;
+    return ((await readJsonObject(this.#file, "credentials object")) ?? {}) as Record<string, Credential>;
   }
 
   async #write(all: Record<string, Credential>): Promise<void> {
@@ -92,8 +81,13 @@ export async function credentialsFrom(text: string): Promise<CredentialStore> {
 /**
  * Every model chopin knows, reaching each provider with the credentials signed in here or the usual variables, and
  * the providers `models.json` in the chopin home adds; catalogs are kept beside it, read as kept at the start and
- * fetched anew on request.
+ * fetched anew on request. A `models.json` that cannot be read in full is told to `told` by its name alone.
  */
-export function chopinModels(credentials: CredentialStore = chopinCredentials()): Promise<ModelRuntime> {
-  return ModelRuntime.create({ credentials, modelsPath: join(chopinHome(), "models.json") });
+export async function chopinModels(credentials: CredentialStore = chopinCredentials(), told?: (notice: string) => void): Promise<ModelRuntime> {
+  const file = join(chopinHome(), "models.json");
+  const runtime = await ModelRuntime.create({ credentials, modelsPath: file });
+  // Fresh, the runtime has fetched nothing, so what went wrong lies in what that file adds; the runtime's own account
+  // of it may quote the file.
+  if (runtime.getError() !== undefined) told?.(`${file} could not be read in full; models it adds may be missing`);
+  return runtime;
 }

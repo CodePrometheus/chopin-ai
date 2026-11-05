@@ -1,6 +1,7 @@
 import { createHash } from "node:crypto";
 import { appendFile, mkdir, readFile, rename, writeFile } from "node:fs/promises";
 import { dirname } from "node:path";
+import { parseJson } from "../json-file.js";
 
 /** The share of kept changes that may be false, over the loop's whole life. */
 export const FALSE_DISCOVERY_RATE = 0.1;
@@ -64,7 +65,7 @@ export class AdmissionLedger {
     for (const [index, line] of lines.entries()) {
       let entry: Entry;
       try {
-        entry = JSON.parse(line) as Entry;
+        entry = parseJson(line, this.path) as Entry;
       } catch {
         return index;
       }
@@ -87,7 +88,7 @@ export class AdmissionLedger {
   }
 
   async #entries(): Promise<Entry[]> {
-    return (await this.#lines()).map((line) => JSON.parse(line) as Entry);
+    return (await this.#lines()).map((line, index) => parseJson(line, this.path, index + 1) as Entry);
   }
 
   async #lines(): Promise<string[]> {

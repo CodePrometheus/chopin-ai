@@ -120,7 +120,7 @@ export const chatCommand: Command = {
     const project = await openProject(process.cwd(), pickInTerminal);
     const host = connect(project.url, { token: project.token, find: findProject(process.cwd()) });
     try {
-      await chat(host, new ProcessTerminal(), { models: await chopinModels() });
+      await chat(host, new ProcessTerminal(), { models: await chopinModels(undefined, (notice) => io.err(`chopin: ${notice}`)) });
     } finally {
       await host.close();
     }

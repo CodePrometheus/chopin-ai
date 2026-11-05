@@ -1,7 +1,8 @@
-import { appendFile, mkdir, readFile } from "node:fs/promises";
+import { appendFile, mkdir } from "node:fs/promises";
 import { dirname } from "node:path";
 import type { FailureSignature } from "../evidence/classify.js";
 import { correctedStep } from "../evidence/points.js";
+import { readJsonLines } from "../json-file.js";
 import type { TranscriptEntry } from "../transcript.js";
 import type { AuditInput, AuditOutcome } from "./audit.js";
 import { judgeContext, type RepeatVerdict } from "./continuation.js";
@@ -65,11 +66,7 @@ export class Calibration {
   }
 
   async #answers(judge: string): Promise<Answer[]> {
-    const text = await readFile(this.path, "utf8").catch((error: NodeJS.ErrnoException) => {
-      if (error.code === "ENOENT") return "";
-      throw error;
-    });
-    return text.split("\n").filter((line) => line !== "").map((line) => JSON.parse(line) as Answer).filter((answer) => answer.judge === judge);
+    return (await readJsonLines(this.path) as Answer[]).filter((answer) => answer.judge === judge);
   }
 }
 

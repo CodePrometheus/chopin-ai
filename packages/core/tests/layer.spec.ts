@@ -108,12 +108,29 @@ describe("loadLayer", () => {
       "server nul holds a NUL character, which no program can be given",
       'server shell_names needs env names of letters, digits and "_", not starting with a digit, other than "_" and those starting with CHOPIN_ENV_, which "_" is not',
       "server empty needs a command",
-      "server file_url needs an http or https url, not file:///x",
+      "server file_url needs an http or https url",
       'server bad_header needs header names an HTTP request can carry, which "Bad Name" is not',
       'server bad_value needs header values an HTTP request can carry, which that of "Authorization" is not',
       'server wide_value needs header values an HTTP request can carry, which that of "X-User" is not',
       "server remote needs headers as an object of string values",
     ]);
+  });
+
+  it("names a file it cannot read, or the entry that is wrong, and never quotes a value, such as a password", async () => {
+    const unreadable = await layer({
+      "mcp.json": '{"mcpServers": {"docs": {"type": "http", "url": "https://example.test/mcp", "headers": {"Authorization": "Bearer layer-password"}}',
+      "gates.yaml": "- tool: [layer-password\n",
+      "skills/broken/SKILL.md": "---\nname: layer-password: x\n---\n",
+    });
+    const result = await loadLayer(unreadable);
+    expect((result.ok ? [] : result.problems).sort()).toEqual([
+      `${join(unreadable, "gates.yaml")} is not valid YAML`,
+      `${join(unreadable, "mcp.json")} is not valid JSON`,
+      `${join(unreadable, "skills", "broken", "SKILL.md")}: frontmatter is not valid YAML`,
+    ]);
+    const wrong = await layer({ "mcp.json": JSON.stringify({ mcpServers: { docs: { type: "http", url: "ftp://user:layer-password@example.test/mcp" } } }) });
+    const told = await loadLayer(wrong);
+    expect(told.ok ? [] : told.problems).toEqual(["mcp.json: server docs needs an http or https url"]);
   });
 
   it("reports malformed files instead of throwing", async () => {

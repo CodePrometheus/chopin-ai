@@ -21,6 +21,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - `chopin serve` starts with no model chosen; each new conversation then takes the model its client picks.
 - `loopback-listener.sh` starts a daemon whose path is long or holds a space, colon or comma.
+- Errors about a file chopin cannot read, and logs of an MCP server's failure, never quote the file or the server.
+- A `models.json` that cannot be read in full is told by its name, not left out unsaid.
 
 ## [0.3.0] - 2026-11-04
 

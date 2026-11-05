@@ -1,4 +1,5 @@
 export { coreCommands, runCli } from "./cli.js";
+export { InvalidFile, parseJson, parseJsonLines, readJson, readJsonLines, readJsonObject } from "./json-file.js";
 export type { CliIo, Command } from "./cli.js";
 export { BEHAVIORS, CAUSES, classify, CLASSIFIER_VERSION, parseSignature, signatureKey } from "./evidence/classify.js";
 export type { Classified, Complete, FailureSignature } from "./evidence/classify.js";

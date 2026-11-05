@@ -1,6 +1,7 @@
 import { createHash } from "node:crypto";
 import { cp, mkdir, mkdtemp, readdir, readFile, rename, rm, writeFile } from "node:fs/promises";
 import { dirname, join, relative } from "node:path";
+import { parseJson } from "../json-file.js";
 import type { Layer } from "./layer.js";
 import { loadSkills, type Skill } from "./skills.js";
 
@@ -57,7 +58,8 @@ export class LayerVersions {
 
   async items(version: number): Promise<LayerItem[]> {
     if (version === 0) return [];
-    return JSON.parse(await readFile(join(this.directory(version), ITEMS), "utf8")) as LayerItem[];
+    const file = join(this.directory(version), ITEMS);
+    return parseJson(await readFile(file, "utf8"), file) as LayerItem[];
   }
 
   directory(version: number): string {

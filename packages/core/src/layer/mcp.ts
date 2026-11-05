@@ -47,7 +47,7 @@ function serverProblem(name: string, server: unknown): string | undefined {
     return undefined;
   }
   if (entry.type === "http" && typeof entry.url === "string") {
-    if (!/^https?:$/.test(URL.parse(entry.url)?.protocol ?? "")) return `needs an http or https url, not ${entry.url}`;
+    if (!/^https?:$/.test(URL.parse(entry.url)?.protocol ?? "")) return "needs an http or https url";
     if (entry.headers !== undefined && !textRecord(entry.headers)) return "needs headers as an object of string values";
     const header = Object.keys((entry.headers ?? {}) as object).find((key) => !HEADER_NAME.test(key));
     if (header !== undefined) return `needs header names an HTTP request can carry, which ${JSON.stringify(header)} is not`;

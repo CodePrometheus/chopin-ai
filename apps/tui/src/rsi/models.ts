@@ -1,7 +1,7 @@
-import { appendFile, mkdir, readFile } from "node:fs/promises";
+import { appendFile, mkdir } from "node:fs/promises";
 import { dirname } from "node:path";
 import { retryAssistantCall, type Api, type AssistantMessage, type Model, type Models, type RetryPolicy } from "@earendil-works/pi-ai";
-import type { Complete } from "@chopin-ai/core";
+import { readJsonLines, type Complete } from "@chopin-ai/core";
 
 const WEEK_MS = 7 * 24 * 60 * 60_000;
 
@@ -17,11 +17,7 @@ export class Budget {
 
   /** Spent over the last seven days. */
   async spent(now = Date.now()): Promise<number> {
-    const text = await readFile(this.path, "utf8").catch((error: NodeJS.ErrnoException) => {
-      if (error.code === "ENOENT") return "";
-      throw error;
-    });
-    return text.split("\n").filter((line) => line !== "").map((line) => JSON.parse(line) as { at: number; usd: number })
+    return (await readJsonLines(this.path) as { at: number; usd: number }[])
       .filter((charge) => now - charge.at < WEEK_MS).reduce((sum, charge) => sum + charge.usd, 0);
   }
 

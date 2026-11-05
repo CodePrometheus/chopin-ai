@@ -1,7 +1,8 @@
 import { randomUUID } from "node:crypto";
-import { mkdir, readFile, rename, rm, writeFile } from "node:fs/promises";
+import { mkdir, rename, rm, writeFile } from "node:fs/promises";
 import { homedir } from "node:os";
 import { join } from "node:path";
+import { readJsonObject } from "@chopin-ai/core";
 import { locked } from "./lock.js";
 
 /** Where this machine's chopin state lives: settings, the layer, and each project's store. */
@@ -54,12 +55,7 @@ export function rsiDirectory(): string {
 }
 
 export async function readSettings(): Promise<Settings> {
-  try {
-    return JSON.parse(await readFile(settingsFile(), "utf8")) as Settings;
-  } catch (error) {
-    if ((error as NodeJS.ErrnoException).code === "ENOENT") return {};
-    throw error;
-  }
+  return ((await readJsonObject(settingsFile(), "settings object")) ?? {}) as Settings;
 }
 
 export async function writeSettings(settings: Settings): Promise<void> {

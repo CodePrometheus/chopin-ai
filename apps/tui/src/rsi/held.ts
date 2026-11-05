@@ -1,6 +1,6 @@
-import { appendFile, mkdir, readFile } from "node:fs/promises";
+import { appendFile, mkdir } from "node:fs/promises";
 import { dirname } from "node:path";
-import type { Proposal } from "@chopin-ai/core";
+import { readJsonLines, type Proposal } from "@chopin-ai/core";
 
 /** A proposal the audit could not settle, held for the user, and what the user decided on it. */
 export interface HeldProposal {
@@ -27,15 +27,8 @@ export class HeldProposals {
 
   /** Every proposal in its latest state. */
   async all(): Promise<HeldProposal[]> {
-    const text = await readFile(this.path, "utf8").catch((error: NodeJS.ErrnoException) => {
-      if (error.code === "ENOENT") return "";
-      throw error;
-    });
     const latest = new Map<string, HeldProposal>();
-    for (const line of text.split("\n").filter((line) => line !== "")) {
-      const held = JSON.parse(line) as HeldProposal;
-      latest.set(held.id, held);
-    }
+    for (const held of await readJsonLines(this.path) as HeldProposal[]) latest.set(held.id, held);
     return [...latest.values()];
   }
 

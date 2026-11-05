@@ -2,7 +2,7 @@ import { createHash } from "node:crypto";
 import { appendFile, mkdir, readdir, readFile, stat } from "node:fs/promises";
 import { join } from "node:path";
 import {
-  classify, CLASSIFIER_VERSION, correctedStep, failureStep, fromMessagesJsonl, groupFailures, kindAliases, kindKey, parseTranscript,
+  classify, CLASSIFIER_VERSION, correctedStep, failureStep, fromMessagesJsonl, groupFailures, kindAliases, kindKey, parseTranscript, readJson, readJsonLines,
   proposeCorrections, redactTranscript, signals, signatureKey, type Complete, type CorrectionCandidate, type Failure,
   type FailureClass, type FailureSignature, type TranscriptEntry,
 } from "@chopin-ai/core";
@@ -216,9 +216,9 @@ export class Evidence {
     return this.#json(KINDS, { reviewed: [], aliases: {} });
   }
 
-  /** A JSON file's value, or `fallback` until the file is written. */
+  /** A JSON file's value, or `fallback` until the file is written, or when it cannot be read. */
   async #json<T>(file: string, fallback: T): Promise<T> {
-    return readFile(join(this.root, file), "utf8").then((text) => JSON.parse(text) as T, () => fallback);
+    return ((await readJson(join(this.root, file)).catch(() => undefined)) ?? fallback) as T;
   }
 
   async #write(file: string, value: object): Promise<void> {
@@ -232,18 +232,14 @@ export class Evidence {
   }
 
   async #lines<T>(file: string): Promise<T[]> {
-    const text = await readFile(join(this.root, file), "utf8").catch((error: NodeJS.ErrnoException) => {
-      if (error.code === "ENOENT") return "";
-      throw error;
-    });
-    return text.split("\n").filter((line) => line !== "").map((line) => JSON.parse(line) as T);
+    return readJsonLines(join(this.root, file)) as Promise<T[]>;
   }
 }
 
 /** A session's entries as the loop reads them: converted to ACP when needed, and redacted. */
 export async function readSession(source: Source, secrets: readonly string[]): Promise<TranscriptEntry[]> {
   const text = await readFile(source.path, "utf8");
-  return redactTranscript(source.kind === "acp" ? parseTranscript(text) : fromMessagesJsonl(text), secrets);
+  return redactTranscript(source.kind === "acp" ? parseTranscript(text, source.path) : fromMessagesJsonl(text), secrets);
 }
 
 /**

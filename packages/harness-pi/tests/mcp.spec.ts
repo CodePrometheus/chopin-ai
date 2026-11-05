@@ -246,6 +246,33 @@ describe("reaching MCP servers", () => {
     }
   });
 
+  it("logs only the kind of failure a server met, keeping its own words, which may quote a credential, for its owner", async () => {
+    const answering = createServer((request, response) => {
+      const unauthorized = request.headers.authorization === "Bearer refused";
+      response.writeHead(unauthorized ? 401 : 500, { "content-type": "text/plain" }).end("token sk-quoted-secret is not valid");
+    }).listen(0, "127.0.0.1");
+    await once(answering, "listening");
+    const url = `http://127.0.0.1:${(answering.address() as AddressInfo).port}/mcp`;
+    const reports: string[] = [];
+    const mcp = new McpServers({
+      failing: { type: "http", url },
+      refusing: { type: "http", url, headers: { authorization: "Bearer refused" } },
+      unreachable: { type: "http", url: "http://127.0.0.1:9/mcp" },
+    }, local.open("alice"));
+    try {
+      expect(await mcp.connect((error) => reports.push(error.message))).toEqual([]);
+      expect(reports.sort()).toEqual([
+        "MCP server failing is unavailable: it answered HTTP 500",
+        "MCP server refusing is unavailable: it refused its credentials",
+        "MCP server unreachable is unavailable: it could not be reached",
+      ]);
+      expect(mcp.status("failing").error).toContain("sk-quoted-secret");
+    } finally {
+      await mcp.close();
+      answering.close();
+    }
+  });
+
   it("says once that a workspace will not run a command server, and does not try it again", async () => {
     const refusing: Workspace = {
       ...local.open("alice"),
@@ -257,7 +284,7 @@ describe("reaching MCP servers", () => {
     const mcp = new McpServers({ echo: { command: process.execPath, args: [server] } }, refusing);
     try {
       expect(await mcp.connect((error) => reports.push(error.message))).toEqual([]);
-      expect(reports).toEqual(["MCP server echo cannot run here: this workspace runs only its execution daemon"]);
+      expect(reports).toEqual(["MCP server echo cannot run here"]);
       expect(mcp.unavailable.size).toBe(0);
       expect(mcp.status("echo")).toEqual({ tools: 0, error: "this workspace runs only its execution daemon" });
     } finally {

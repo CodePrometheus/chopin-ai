@@ -45,7 +45,7 @@ async function paid(credentials?: CredentialStore) {
     ...(settings.model === undefined ? ["model"] : []),
   ];
   if (missing.length > 0) throw new Error(`set ${missing.join(", ")} in ${join(chopinHome(), "config.json")} before the loop may spend anything`);
-  const models = await chopinModels(credentials);
+  const models = await chopinModels(credentials, (notice) => console.error(`chopin: ${notice}`));
   const budget = new Budget(records().spend, rsi.weeklyBudgetUsd!);
   const sessionModel = namedModel(models, settings.model!);
   return {

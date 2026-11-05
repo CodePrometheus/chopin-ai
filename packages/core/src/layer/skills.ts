@@ -38,8 +38,9 @@ function parseSkill(text: string, directoryName: string, file: string, problems:
   let front: unknown;
   try {
     front = parse(match[1] ?? "");
-  } catch (error) {
-    problems.push(`${file}: frontmatter is not valid YAML: ${(error as Error).message}`);
+  } catch {
+    // The parser shows the lines around its complaint.
+    problems.push(`${file}: frontmatter is not valid YAML`);
     return undefined;
   }
   const { name, description } = (typeof front === "object" && front !== null ? front : {}) as Record<string, unknown>;

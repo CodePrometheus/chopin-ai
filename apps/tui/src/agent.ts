@@ -13,7 +13,7 @@ import { chosenModel } from "./model.js";
  * else the conversation's client picks; and the layer in its home when there is one.
  */
 export async function agentSetup(credentials: CredentialStore = chopinCredentials()): Promise<Pick<AgentServiceOptions, "models" | "agent" | "layer">> {
-  const models = await chopinModels(credentials);
+  const models = await chopinModels(credentials, (notice) => console.error(`chopin: ${notice}`));
   // A model named but unknown is a mistake to report now rather than at the first conversation.
   await chosenModel(models);
   const directory = layerDirectory();

@@ -1,7 +1,10 @@
 import { readFile } from "node:fs/promises";
 import { Type } from "@earendil-works/pi-ai";
 import { defineExtension, type Extension, type ToolRegistration } from "@earendil-works/pi-durable";
-import { McpClient, StdioTransport, StreamableHttpTransport, toLlmContent, type McpTransport } from "@earendil-works/pi-mcp";
+import {
+  McpAuthRequiredError, McpClient, McpConnectionClosedError, McpError, McpHttpError, McpTimeoutError, StdioTransport, StreamableHttpTransport, toLlmContent,
+  type McpTransport,
+} from "@earendil-works/pi-mcp";
 import { mcpToolName, type McpServer } from "@chopin-ai/core";
 import type { Workspace } from "@chopin-ai/workspace";
 
@@ -18,6 +21,17 @@ function packageVersion(): Promise<string> {
 
 /** A command server the workspace will not run, as one that runs only its execution daemon will not. */
 class Refused extends Error {}
+
+/** What kind of failure reaching an MCP server met, in words of this module's own. */
+function failureKind(error: unknown): string {
+  if (error instanceof McpAuthRequiredError || (error instanceof McpHttpError && (error.status === 401 || error.status === 403))) return "refused its credentials";
+  if (error instanceof McpHttpError) return `answered HTTP ${error.status}`;
+  if (error instanceof McpError) return "broke the protocol";
+  if (error instanceof McpTimeoutError) return "did not answer in time";
+  // A request that never got through: the connection closed, the fetch failed, or the system refused, as for a command not found.
+  if (error instanceof McpConnectionClosedError || error instanceof TypeError || (error instanceof Error && "code" in error)) return "could not be reached";
+  return "failed";
+}
 
 /** The extension a server's tools come in. */
 export function mcpExtensionName(server: string): string {
@@ -134,13 +148,15 @@ export class McpServers {
         // A client that connected but cannot list its tools is let go, so the next try starts afresh.
         this.#drop(server, client);
         if (this.#closed || !current()) return [];
+        // The owner sees the server's own words; a log names only the kind of failure, as those words may quote what
+        // the server sent back, a credential among it.
         this.#failures.set(server, (error as Error).message);
         // A workspace that cannot run the server never will, so it is told once and not tried again.
         if (error instanceof Refused) {
-          report(new Error(`MCP server ${server} cannot run here: ${error.message}`));
+          report(new Error(`MCP server ${server} cannot run here`));
           return [];
         }
-        if (!this.unavailable.has(server)) report(new Error(`MCP server ${server} is unavailable: ${(error as Error).message}`));
+        if (!this.unavailable.has(server)) report(new Error(`MCP server ${server} is unavailable: it ${failureKind(error)}`));
         this.unavailable.add(server);
         return [];
       }

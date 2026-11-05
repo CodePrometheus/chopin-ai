@@ -1,5 +1,6 @@
 import { appendFile, readFile } from "node:fs/promises";
 import type { PromptResponse, SessionNotification } from "@agentclientprotocol/sdk";
+import { parseJsonLines } from "./json-file.js";
 
 /** One line of a transcript: something the agent reported, or how a turn ended. Both are plain ACP. */
 export type TranscriptEntry =
@@ -12,12 +13,15 @@ export async function appendTranscript(path: string, entry: TranscriptEntry): Pr
 }
 
 export async function readTranscript(path: string): Promise<TranscriptEntry[]> {
-  return parseTranscript(await readFile(path, "utf8"));
+  return parseTranscript(await readFile(path, "utf8"), path);
 }
 
-/** The entries of a transcript's text; a last line without its newline is one a crash cut short. */
-export function parseTranscript(text: string): TranscriptEntry[] {
-  return text.split("\n").slice(0, -1).filter((line) => line !== "").map((line) => JSON.parse(line) as TranscriptEntry);
+/**
+ * The entries of a transcript's text, read from `source`, which a failure names; a last line without its newline is
+ * one a crash cut short.
+ */
+export function parseTranscript(text: string, source = "the transcript"): TranscriptEntry[] {
+  return parseJsonLines(text.slice(0, text.lastIndexOf("\n") + 1), source) as TranscriptEntry[];
 }
 
 /** What one task run leaves behind: its transcript, and the patch it made to the workspace's git work tree. */

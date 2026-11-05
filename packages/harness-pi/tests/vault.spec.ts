@@ -151,7 +151,7 @@ describe("an agent service's store", () => {
       const [file] = (await readdir(kept)).filter((name) => name.endsWith(".mcp.json"));
       await writeFile(join(kept, file ?? ""), "Bearer cut-short");
       const refused = await (await agentService(kept, true)).mcpServers("local").then(() => undefined, (error: Error) => error.message);
-      expect(refused).toBe(`${join(kept, file ?? "")} holds no MCP servers`);
+      expect(refused).toBe(`${join(kept, file ?? "")} is not valid JSON`);
     } finally {
       await service.close(context);
     }

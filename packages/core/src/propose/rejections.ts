@@ -1,5 +1,6 @@
-import { appendFile, mkdir, readFile } from "node:fs/promises";
+import { appendFile, mkdir } from "node:fs/promises";
 import { dirname } from "node:path";
+import { readJsonLines } from "../json-file.js";
 import { RECURRENCE } from "../gate/daily.js";
 
 /** After this many refusals a kind of failure is set aside for the user. */
@@ -36,12 +37,7 @@ export class Rejections {
   }
 
   async for(failure: string): Promise<Rejection[]> {
-    const text = await readFile(this.path, "utf8").catch((error: NodeJS.ErrnoException) => {
-      if (error.code === "ENOENT") return "";
-      throw error;
-    });
-    return text.split("\n").filter((line) => line !== "").map((line) => JSON.parse(line) as Rejection)
-      .filter((rejection) => rejection.failure === failure);
+    return (await readJsonLines(this.path) as Rejection[]).filter((rejection) => rejection.failure === failure);
   }
 
   /**
