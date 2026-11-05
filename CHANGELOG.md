@@ -7,6 +7,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.4.0] - 2026-11-05
+
+A single-owner service in the cloud that keeps its owner's things sealed at rest, opened only by a key derived
+from the owner's data key, which never leaves the owner's clients.
+
 ### Added
 
 - `chopin serve --workspace-port` with `--sealed <dir>` keeps the owner's conversations, credentials, MCP servers,
@@ -218,7 +223,8 @@ the agent loop, sessions, UI, skills and model access.
 - Model endpoint proxy through `CHOPIN_LLM_PROXY`, and opt-in hot reload while developing with
   `CHOPIN_HMR=1`.
 
-[unreleased]: https://github.com/CodePrometheus/chopin-ai/compare/v0.3.0...HEAD
+[unreleased]: https://github.com/CodePrometheus/chopin-ai/compare/v0.4.0...HEAD
+[0.4.0]: https://github.com/CodePrometheus/chopin-ai/compare/v0.3.0...v0.4.0
 [0.3.0]: https://github.com/CodePrometheus/chopin-ai/compare/v0.2.0...v0.3.0
 [0.2.0]: https://github.com/CodePrometheus/chopin-ai/compare/v0.1.0...v0.2.0
 [0.1.0]: https://github.com/CodePrometheus/chopin-ai/releases/tag/v0.1.0

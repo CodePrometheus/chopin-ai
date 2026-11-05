@@ -14,8 +14,8 @@
 
 </div>
 
-> **Status:** `v0.3.0` adds the loop that improves the agent from your sessions; see
-> [How it improves itself](#how-it-improves-itself).
+> **Status:** `v0.4.0` keeps a cloud agent's conversations and credentials sealed at rest; the loop that improves the
+> agent from your sessions came in `v0.3.0`, see [How it improves itself](#how-it-improves-itself).
 
 ## Install
 
