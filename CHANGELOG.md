@@ -20,6 +20,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Fixed
 
 - `chopin serve` starts with no model chosen; each new conversation then takes the model its client picks.
+- `loopback-listener.sh` starts a daemon whose path is long or holds a space, colon or comma.
 
 ## [0.3.0] - 2026-11-04
 

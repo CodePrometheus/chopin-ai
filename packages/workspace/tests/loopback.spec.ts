@@ -1,6 +1,6 @@
 import { spawn, spawnSync, type ChildProcess } from "node:child_process";
 import { once } from "node:events";
-import { chmod, mkdtemp, writeFile } from "node:fs/promises";
+import { chmod, mkdir, mkdtemp, writeFile } from "node:fs/promises";
 import { createServer, type AddressInfo } from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -82,6 +82,17 @@ describe("LoopbackWorkspaceProvider", () => {
       expect(await through(provider, daemon, "c3d4", "three\n")).toBe("PI-ENV c3d4\nthree\n");
       // A token that is not hexadecimal never reaches the daemon's command line.
       expect(await through(provider, daemon, "0a; echo injected", "four\n")).toBe("");
+    });
+
+    it("starts a daemon whose path is long or holds what the relay's address would split on", async () => {
+      const dir = join(await mkdtemp(join(tmpdir(), "chopin-loopback-")), "d".repeat(200), "a daemon, here", "e".repeat(200));
+      await mkdir(dir, { recursive: true });
+      const daemon = await echoDaemon(dir);
+      const port = await freePort();
+      const provider = new LoopbackWorkspaceProvider({ port, root: dir, daemon });
+      listeners.push(spawn(LISTENER, [String(port), daemon], { stdio: "inherit" }));
+      await provider.open("local").start();
+      expect(await through(provider, daemon, "a1b2", "one\n")).toBe("PI-ENV a1b2\none\n");
     });
   });
 });
