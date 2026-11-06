@@ -111,7 +111,8 @@ network, such as another container of the same pod, running the workspace packag
 `loopback-listener.sh <port> <daemon>`. It admits the credential in `CHOPIN_TOKEN`, starts conversations with the
 model `CHOPIN_MODEL` names, and `GET /status` with that credential says whether it is busy. The user's client hands
 it their model API key, or signs them in to a provider, through the client protocol, and it keeps what it gets in
-memory alone.
+memory alone. Variables a client sets with `chopin.environment` reach every command the agent runs, such as a credential
+for a git remote, without passing through a conversation.
 
 With `--sealed <dir>` (Node 24.16 or later) it keeps that user's conversations, settings, loop records, and the
 credentials and MCP servers clients hand over only sealed on `<dir>`, and starts locked, reading nothing until a client

@@ -9,7 +9,7 @@ import { localDaemon } from "@earendil-works/pi-env";
 import { DirectoryWorkspaceProvider, type WorkspaceProvider } from "@chopin-ai/workspace";
 import { describe, expect, it } from "vitest";
 import { AgentService, launchToken, listen, ShellEntry, shellText } from "../src/index.js";
-import { connect, Conversation, Conversations } from "../src/protocol.js";
+import { connect, Conversation, Conversations, Environment } from "../src/protocol.js";
 import { localWorkspace } from "./local-workspace.js";
 
 const ran = { command: "make", output: "", cancelled: false, truncated: false, excluded: false };
@@ -57,6 +57,30 @@ async function started(responses: Parameters<ReturnType<typeof fauxProvider>["se
 }
 
 const shellRuns = (entries: readonly EntryRecord[]) => entries.filter((entry) => ShellEntry.is(entry));
+
+describe("variables the owner's clients set", () => {
+  it("reach every command, are named without their values, and stop at their removal", async () => {
+    const { client, conversation, entries, until, close } = await started();
+    try {
+      const environment = await client.get(Environment, {});
+      await client.root((ctx) => environment.set({ name: "GIT_TOKEN", value: "sealed-value" }, ctx));
+      expect(environment.names.value).toEqual(["GIT_TOKEN"]);
+      expect(JSON.stringify(environment.names.value)).not.toContain("sealed-value");
+      await client.root((ctx) => conversation.shell({ command: 'printf %s "$GIT_TOKEN"', excluded: true }, ctx));
+      await until(() => shellRuns(entries()).length === 1);
+      expect(shellRuns(entries())[0]?.data).toMatchObject({ output: "sealed-value", exitCode: 0 });
+
+      await client.root((ctx) => environment.remove({ name: "GIT_TOKEN" }, ctx));
+      expect(environment.names.value).toEqual([]);
+      await client.root((ctx) => conversation.shell({ command: 'printf %s "${GIT_TOKEN:-gone}"', excluded: true }, ctx));
+      await until(() => shellRuns(entries()).length === 2);
+      expect(shellRuns(entries())[1]?.data).toMatchObject({ output: "gone", exitCode: 0 });
+      await expect(client.root((ctx) => environment.set({ name: "not a name", value: "x" }, ctx))).rejects.toThrow();
+    } finally {
+      await close();
+    }
+  });
+});
 
 describe("a user's command", () => {
   it("runs in the workspace, and the model reads what it printed unless it is excluded", async () => {

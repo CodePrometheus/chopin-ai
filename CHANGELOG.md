@@ -7,6 +7,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- `chopin.environment` gives every command of an owner's agent the variables their clients set, such as a
+  credential for a host its tools reach, held in memory and named in its state without the values.
+
 ## [0.5.0] - 2026-11-06
 
 Signing a cloud agent's owner in to model providers from any of their clients.

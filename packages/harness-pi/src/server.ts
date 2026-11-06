@@ -13,7 +13,7 @@ import { ClientContextDoc } from "./client-context.js";
 import { ModeDoc, NameDoc } from "./mode.js";
 import { isRunning, userText } from "./acp.js";
 import {
-  Conversation, Conversations, CredentialSchema, Credentials, HOST, LoginSchema, Loop, Mcp, McpServerSchema, ModeSchema, REWIND_KIND, RunningSchema, SubmissionSchema, Vault,
+  Conversation, Conversations, CredentialSchema, Credentials, Environment, HOST, LoginSchema, Loop, Mcp, McpServerSchema, ModeSchema, REWIND_KIND, RunningSchema, SubmissionSchema, Vault,
   errorChain, errorText, type Image, type LoginEvent, type LoginPrompt, type LoginState, type LoopControl, type Principal,
 } from "./protocol.js";
 import { backoff } from "./backoff.js";
@@ -518,6 +518,25 @@ export function createAgentHost(source: AgentService | Sealed, loop?: LoopContro
       remove: async ({ name }, ctx) => {
         await service.removeMcpServer(owner, name);
         servers.replace(ctx, await service.mcpServers(owner));
+      },
+    };
+  });
+
+  host.serve(Environment, (_input, principal, self) => {
+    const owner = ownerOf(principal);
+    const service = current();
+    const names = self.state("names", Type.Array(Type.String()), { init: () => service.variableNames(owner) });
+    return {
+      variant: "owner",
+      names,
+      set: async ({ name, value }, ctx) => {
+        const problem = service.setVariable(owner, name, value);
+        if (problem !== undefined) throw invalid("variable_refused", problem);
+        names.replace(ctx, service.variableNames(owner));
+      },
+      remove: async ({ name }, ctx) => {
+        service.removeVariable(owner, name);
+        names.replace(ctx, service.variableNames(owner));
       },
     };
   });

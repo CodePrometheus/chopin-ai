@@ -314,6 +314,30 @@ export const Mcp = remote("chopin.mcp", {
   },
 });
 
+const VariableName = Type.String({ pattern: "^[A-Za-z_][A-Za-z0-9_]{0,63}$" });
+const VariableArgs = Type.Object({ name: VariableName, value: Type.String({ maxLength: 65_536 }) });
+const VariableNameArgs = Type.Object({ name: VariableName });
+
+/**
+ * Variables every command the owner's agent runs gets, such as a credential for a host its tools reach, which so reaches
+ * the commands without passing through a conversation: kept in memory alone, so a client sets them again once the
+ * service restarts. Setting one by a name already set replaces it; the state names them, never their values.
+ */
+export const Environment = remote("chopin.environment", {
+  version: 1,
+  input: Type.Object({}),
+  host: hostNamed(HOST),
+  variants: {
+    owner: {
+      state: { names: Type.Array(Type.String()) },
+      methods: {
+        set: method(VariableArgs) as Call<typeof VariableArgs>,
+        remove: method(VariableNameArgs) as Call<typeof VariableNameArgs>,
+      },
+    },
+  },
+});
+
 /** The key a sealed service opens with, as `serviceKey` derives it from the owner's data key: 32 bytes in base64url. */
 const UnlockArgs = Type.Object({ key: Type.String({ pattern: "^[A-Za-z0-9_-]{43}$" }) });
 

@@ -2,6 +2,7 @@ import { createHash } from "node:crypto";
 import { chmod, mkdir, rename, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import type { Context } from "@earendil-works/chord";
+import type { ExecutionError, Result, ShellExecOptions, ShellExecResult } from "@earendil-works/pi-durable/env";
 import { BACKGROUND_CONTEXT } from "@earendil-works/chord/context";
 import { getSupportedThinkingLevels, type AssistantMessage, type AuthInteraction, type AuthType, type CredentialInfo, type CredentialStore, type Models } from "@earendil-works/pi-ai";
 import {
@@ -51,6 +52,8 @@ const OPEN_PATIENCE_MS = 10 * 60_000;
 const MCP_RETRY_MS = 30_000;
 
 const FIXED_CREDENTIALS = "this service takes its credentials from where it runs, not from its clients";
+/** Beyond this, variables are no settings but a dump, which a client must not leave in every command. */
+const MOST_VARIABLES = 64;
 
 /** Where the workspace image keeps the execution daemon. */
 export const DAEMON_PATH = "/usr/local/bin/pi-env";
@@ -137,6 +140,8 @@ export class AgentService {
   readonly #commands = new Map<string, number>();
   /** The MCP servers each owner's clients set, headers and all, as far as they are read. */
   readonly #clientMcp = new Map<string, Record<string, McpServer>>();
+  /** The variables each owner's commands get, set by their clients; in memory alone. */
+  readonly #variables = new Map<string, Map<string, string>>();
   /** Keeping the servers clients set, one write at a time, so none overtakes a later one. */
   #keeping: Promise<unknown> = Promise.resolve();
   /** When this service started, which is as recent as anything it knows of an owner it has not seen. */
@@ -336,6 +341,23 @@ export class AgentService {
   }
 
   /** The MCP servers the owner's clients set, read from `dataDir` the first time where they are kept there. */
+  /** The names of the variables the owner's commands get, in order; never their values. */
+  variableNames(owner: string): string[] {
+    return [...this.#variables.get(owner)?.keys() ?? []].sort();
+  }
+
+  /** Gives every command of the owner's agent `name` set to `value` from now on, or says why not. */
+  setVariable(owner: string, name: string, value: string): string | undefined {
+    const variables = this.#variables.get(owner) ?? new Map<string, string>();
+    if (!variables.has(name) && variables.size >= MOST_VARIABLES) return `an owner sets at most ${MOST_VARIABLES} variables`;
+    this.#variables.set(owner, variables.set(name, value));
+    return undefined;
+  }
+
+  removeVariable(owner: string, name: string): void {
+    this.#variables.get(owner)?.delete(name);
+  }
+
   async #clientServers(owner: string): Promise<Record<string, McpServer>> {
     const known = this.#clientMcp.get(owner);
     if (known !== undefined || this.#options.keepClientMcp !== true) return known ?? {};
@@ -641,7 +663,7 @@ export class AgentService {
       const id = `workspace:${fingerprint(owner)}`;
       const env = (cwd = workspace.root) => {
         this.touch(owner);
-        return new RemoteExecutionEnv({ connection, id, cwd });
+        return new OwnerEnv({ connection, id, cwd }, () => this.#variables.get(owner));
       };
       // Conversations are private to their owner; nobody else on the machine reads the store.
       await mkdir(this.#options.dataDir, { recursive: true });
@@ -789,6 +811,22 @@ function toolNames(extensions: readonly Extension[]): string[] {
 
 function fingerprint(owner: string): string {
   return createHash("sha256").update(owner).digest("hex").slice(0, 16);
+}
+
+/** The workspace as the owner's agent runs commands in it: each command also gets the variables the owner's clients set. */
+class OwnerEnv extends RemoteExecutionEnv {
+  readonly #variables: () => ReadonlyMap<string, string> | undefined;
+
+  constructor(options: ConstructorParameters<typeof RemoteExecutionEnv>[0], variables: () => ReadonlyMap<string, string> | undefined) {
+    super(options);
+    this.#variables = variables;
+  }
+
+  override exec(command: string | readonly string[], options: ShellExecOptions | undefined, context: Context): Promise<Result<ShellExecResult, ExecutionError>> {
+    const variables = this.#variables();
+    if (variables === undefined || variables.size === 0) return super.exec(command, options, context);
+    return super.exec(command, { ...options, env: { ...options?.env, ...Object.fromEntries(variables) } }, context);
+  }
 }
 
 /** The host `url` names, or none for no URL or one that does not parse. */
