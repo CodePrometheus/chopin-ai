@@ -86,8 +86,22 @@ export async function rewrapDataKey(wrapped: WrappedKey, secret: string, passphr
 }
 
 /** The key a sealed service opens with, derived from the data key, for that and nothing else: 32 bytes, base64url. */
-export async function serviceKey(key: DataKey): Promise<string> {
-  const info = new TextEncoder().encode("chopin service");
+export function serviceKey(key: DataKey): Promise<string> {
+  return derived(key, "chopin service");
+}
+
+/**
+ * A key derived from the data key for one purpose of the integrator's, such as sealing a credential its own server
+ * keeps: 32 bytes, base64url. Each purpose has its own key, none of them the service's, so handing one over opens
+ * nothing else.
+ */
+export async function integratorKey(key: DataKey, purpose: string): Promise<string> {
+  if (purpose === "") throw new Error("a purpose cannot be empty");
+  return derived(key, `integrator ${purpose}`);
+}
+
+async function derived(key: DataKey, purpose: string): Promise<string> {
+  const info = new TextEncoder().encode(purpose);
   return encode(new Uint8Array(await crypto.subtle.deriveBits({ name: "HKDF", hash: "SHA-256", salt: new Uint8Array(0), info }, key, KEY_BYTES * 8)));
 }
 

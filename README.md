@@ -118,7 +118,8 @@ unlocks it. Conversations are then held in memory, each commit journaled to `<di
 MCP servers as they are written; the workspace's files stay as they are. Sealing keeps what the volume holds from being
 read, not from being put back: a volume replaced by an earlier copy of itself, or its journal cut at a record's end,
 opens as that earlier state. Clients make the user's data key and wrap it by a passphrase and a recovery key with
-`@chopin-ai/harness-pi/keys`, and unlock with `unlock` from the client protocol.
+`@chopin-ai/harness-pi/keys`, unlock with `unlock` from the client protocol, and derive a key for a purpose of their
+own with `integratorKey`.
 
 | Package | Purpose |
 |---|---|

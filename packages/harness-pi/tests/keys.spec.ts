@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { createDataKey, PASSPHRASE_ITERATIONS, rewrapDataKey, serviceKey, unwrapDataKey, WrongSecret, type WrappedKey } from "../src/keys.js";
+import { createDataKey, integratorKey, PASSPHRASE_ITERATIONS, rewrapDataKey, serviceKey, unwrapDataKey, WrongSecret, type WrappedKey } from "../src/keys.js";
 
 describe("data keys", () => {
   it("wraps a new key by a passphrase and a recovery key, either of which opens it into a key that cannot be read out", async () => {
@@ -18,6 +18,16 @@ describe("data keys", () => {
     expect(await serviceKey(recovered)).toBe(derived);
     // Wrapped keys are JSON, as an integrator keeps them.
     expect(JSON.parse(JSON.stringify(made.byPassphrase))).toEqual(made.byPassphrase);
+  });
+
+  it("derives one key per integrator purpose, the same from either opening, and none of them the service's", async () => {
+    const made = await createDataKey("a passphrase");
+    const github = await integratorKey(made.key, "github token");
+    expect(github).toMatch(/^[A-Za-z0-9_-]{43}$/);
+    expect(await integratorKey(await unwrapDataKey(made.byRecovery, made.recoveryKey), "github token")).toBe(github);
+    expect(await integratorKey(made.key, "other")).not.toBe(github);
+    expect(await integratorKey(made.key, "service")).not.toBe(await serviceKey(made.key));
+    await expect(integratorKey(made.key, "")).rejects.toThrow(/purpose/);
   });
 
   it("refuses a wrong passphrase or recovery key, and a wrapped key passed off as wrapped by the other", async () => {

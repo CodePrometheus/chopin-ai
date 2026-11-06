@@ -7,6 +7,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- `integratorKey` in `@chopin-ai/harness-pi/keys` derives a key from the data key for one purpose of the integrator's,
+  such as sealing a credential its own server keeps.
+
 ## [0.4.0] - 2026-11-05
 
 A single-owner service in the cloud that keeps its owner's things sealed at rest, opened only by a key derived
