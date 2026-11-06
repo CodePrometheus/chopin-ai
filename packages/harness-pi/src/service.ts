@@ -3,7 +3,7 @@ import { chmod, mkdir, rename, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import type { Context } from "@earendil-works/chord";
 import { BACKGROUND_CONTEXT } from "@earendil-works/chord/context";
-import { getSupportedThinkingLevels, type AssistantMessage, type CredentialInfo, type CredentialStore, type Models } from "@earendil-works/pi-ai";
+import { getSupportedThinkingLevels, type AssistantMessage, type AuthInteraction, type AuthType, type CredentialInfo, type CredentialStore, type Models } from "@earendil-works/pi-ai";
 import {
   CompactionEntry,
   createRegistry,
@@ -34,7 +34,7 @@ import { layerExtension, pinLayerVersions, type LayerSource } from "./layer.js";
 import { mcpExtensionName, McpServers } from "./mcp.js";
 import { drain } from "./pages.js";
 import { modeExtension, NameDoc } from "./mode.js";
-import { unansweredText, type Loaded, type McpServerState, type ModelChoices, type Summary } from "./protocol.js";
+import { unansweredText, type Loaded, type McpServerState, type ModelChoices, type ProviderEntry, type Summary } from "./protocol.js";
 import { clientContext } from "./client-context.js";
 import { contextFiles, projectContext } from "./project-context.js";
 import { runShell, ShellEntry, type ShellRun } from "./shell.js";
@@ -388,6 +388,37 @@ export class AgentService {
     if (store === undefined) return FIXED_CREDENTIALS;
     await store.delete(provider);
     return undefined;
+  }
+
+  /** Every provider the owner's models know that a client can sign in to, each way in, and where its models are reached. */
+  catalog(owner: string): ProviderEntry[] {
+    const models = this.#options.models(owner);
+    return models.getProviders().flatMap((provider) => {
+      const { oauth, apiKey } = provider.auth;
+      const ways = [
+        ...(oauth === undefined ? [] : [{ type: "oauth" as const, name: oauth.loginLabel ?? oauth.name, subscription: oauth.isSubscription === true }]),
+        ...(apiKey?.login === undefined ? [] : [{ type: "api_key" as const, name: apiKey.name, subscription: false }]),
+      ];
+      if (ways.length === 0) return [];
+      const urls = [provider.baseUrl, ...models.getModels(provider.id).map((model) => model.baseUrl)];
+      const hosts = [...new Set(urls.flatMap(hostOf))].sort();
+      return [{ id: provider.id, name: provider.name, ways, hosts }];
+    }).sort((a, b) => a.name.localeCompare(b.name));
+  }
+
+  /** Why the owner cannot sign in to `provider` the `type` way here, or undefined when they can. */
+  loginRefusal(owner: string, provider: string, type: AuthType): string | undefined {
+    if (this.#options.credentials?.(owner) === undefined) return FIXED_CREDENTIALS;
+    const auth = this.#options.models(owner).getProvider(provider)?.auth;
+    const takes = type === "oauth" ? auth?.oauth !== undefined : auth?.apiKey?.login !== undefined;
+    return takes ? undefined : `there is no provider ${provider} that takes ${type === "oauth" ? "a sign-in" : "a key"} here`;
+  }
+
+  /** Runs `provider`'s own `type` login with the owner through `interaction`, keeping what it yields as their credential. */
+  async login(owner: string, provider: string, type: AuthType, interaction: AuthInteraction): Promise<void> {
+    const problem = this.loginRefusal(owner, provider, type);
+    if (problem !== undefined) throw new Error(problem);
+    await this.#options.models(owner).login(provider, type, interaction, { agentName: "chopin", getDeviceId: () => fingerprint(owner) });
   }
 
   async #agent(owner: string): Promise<AgentChange | undefined> {
@@ -758,6 +789,12 @@ function toolNames(extensions: readonly Extension[]): string[] {
 
 function fingerprint(owner: string): string {
   return createHash("sha256").update(owner).digest("hex").slice(0, 16);
+}
+
+/** The host `url` names, or none for no URL or one that does not parse. */
+function hostOf(url: string | undefined): string[] {
+  if (url === undefined || !URL.canParse(url)) return [];
+  return [new URL(url).hostname];
 }
 
 /** A conversation clients see and use: neither the harness's reserved root nor one a task made. */

@@ -209,16 +209,60 @@ export const Conversation = remote("chopin.conversation", {
   },
 });
 
+const AuthTypeSchema = Type.Union([Type.Literal("api_key"), Type.Literal("oauth")]);
 /** A provider the owner holds a credential for, and its kind; never the secret. */
-export const CredentialSchema = Type.Object({ provider: Type.String(), type: Type.Union([Type.Literal("api_key"), Type.Literal("oauth")]) });
+export const CredentialSchema = Type.Object({ provider: Type.String(), type: AuthTypeSchema });
 export type CredentialInfo = Static<typeof CredentialSchema>;
 const CredentialList = Type.Array(CredentialSchema);
 const KeyArgs = Type.Object({ provider: Type.String({ minLength: 1 }), key: Type.String({ minLength: 1 }) });
 const ProviderArgs = Type.Object({ provider: Type.String({ minLength: 1 }) });
 
+/** A way to sign in to a provider: its own sign-in, which a subscription may back, or an API key entered once. */
+export const LoginWaySchema = Type.Object({ type: AuthTypeSchema, name: Type.String(), subscription: Type.Boolean() });
 /**
- * The credentials an owner's agent reaches models with, where clients may set them. Secrets only ever travel to the
- * service, which keeps each where it keeps that owner's credentials.
+ * A provider the owner's models know, each way a client can sign in to it, and the hosts its models are reached at,
+ * so an integrator that limits where the service connects can admit them.
+ */
+export const ProviderEntrySchema = Type.Object({ id: Type.String(), name: Type.String(), ways: Type.Array(LoginWaySchema), hosts: Type.Array(Type.String()) });
+export type ProviderEntry = Static<typeof ProviderEntrySchema>;
+const ProviderList = Type.Array(ProviderEntrySchema);
+
+/** News from a login as the provider gives it: a page to open, a code to enter on any device, a note, or progress. */
+export const LoginEventSchema = Type.Union([
+  Type.Object({ type: Type.Literal("auth_url"), url: Type.String(), instructions: Type.Optional(Type.String()) }),
+  Type.Object({ type: Type.Literal("device_code"), userCode: Type.String(), verificationUri: Type.String(), expiresInSeconds: Type.Optional(Type.Number()) }),
+  Type.Object({ type: Type.Literal("info"), message: Type.String(), links: Type.Optional(Type.Array(Type.Object({ url: Type.String(), label: Type.Optional(Type.String()) }))) }),
+  Type.Object({ type: Type.Literal("progress"), message: Type.String() }),
+]);
+export type LoginEvent = Static<typeof LoginEventSchema>;
+/** What a login asks the owner now, answered by its `id`: a `select` with an option's id, the others with text. */
+export const LoginPromptSchema = Type.Object({
+  id: Type.Number(),
+  type: Type.Union([Type.Literal("text"), Type.Literal("secret"), Type.Literal("select"), Type.Literal("manual_code")]),
+  message: Type.String(),
+  placeholder: Type.Optional(Type.String()),
+  options: Type.Optional(Type.Array(Type.Object({ id: Type.String(), label: Type.String(), description: Type.Optional(Type.String()) }))),
+});
+export type LoginPrompt = Static<typeof LoginPromptSchema>;
+/** The owner's latest login: running, with what it said and what it asks now, or how it ended. */
+export const LoginSchema = Type.Object({
+  id: Type.Number(),
+  provider: Type.String(),
+  type: AuthTypeSchema,
+  status: Type.Union([Type.Literal("running"), Type.Literal("done"), Type.Literal("failed"), Type.Literal("cancelled")]),
+  events: Type.Array(LoginEventSchema),
+  prompt: Type.Optional(LoginPromptSchema),
+  error: Type.Optional(Type.String()),
+});
+export type LoginState = Static<typeof LoginSchema>;
+const LoginArgs = Type.Object({ provider: Type.String({ minLength: 1 }), type: AuthTypeSchema });
+const LoginAnswerArgs = Type.Object({ prompt: Type.Number(), value: Type.String() });
+const LoginIdArgs = Type.Object({ login: Type.Number() });
+
+/**
+ * The credentials an owner's agent reaches models with, where clients may set them, by a key or by a provider's own
+ * login, which the service runs and every client of the owner follows. Secrets only ever travel to the service, which
+ * keeps each where it keeps that owner's credentials.
  */
 export const Credentials = remote("chopin.credentials", {
   version: 1,
@@ -226,10 +270,18 @@ export const Credentials = remote("chopin.credentials", {
   host: hostNamed(HOST),
   variants: {
     owner: {
-      state: { providers: CredentialList },
+      state: { providers: CredentialList, login: Type.Union([LoginSchema, Type.Null()]) },
       methods: {
         setKey: method(KeyArgs) as Call<typeof KeyArgs>,
         remove: method(ProviderArgs) as Call<typeof ProviderArgs>,
+        /** Every provider the owner's models know, and how a client signs in to each. */
+        catalog: method(undefined, ProviderList) as Query<undefined, typeof ProviderList>,
+        /** Starts signing in to `provider` the `type` way, ending a login still running; resolves the new login's id. */
+        startLogin: method(LoginArgs, Type.Number()) as Query<typeof LoginArgs, TNumber>,
+        /** Answers what the running login asks, by the prompt's id. */
+        answer: method(LoginAnswerArgs) as Call<typeof LoginAnswerArgs>,
+        /** Ends the login `login` while it runs, keeping nothing it got. */
+        cancelLogin: method(LoginIdArgs) as Call<typeof LoginIdArgs>,
       },
     },
   },

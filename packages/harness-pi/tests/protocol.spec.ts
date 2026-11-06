@@ -18,7 +18,7 @@ import { credentialOf } from "../src/auth.js";
 import { AgentService, integratorTokens, launchToken, listen } from "../src/index.js";
 import {
   CallTimeout, connect, Conversation, Conversations, Credentials, endText, errorChain, errorText, heldList, IMAGES_MAX, lastFailure, Loop, openConversations,
-  type LoopControl, type LoopStanding,
+  type LoginState, type LoopControl, type LoopStanding,
 } from "../src/protocol.js";
 
 const nowhere: WorkspaceProvider = {
@@ -43,6 +43,8 @@ function reaches(ref: { status: string; onStatus(listener: (status: string) => v
   });
 }
 
+function until<T, U extends T>(subscribe: (listener: (value: T) => void) => () => void, test: (value: T) => value is U): Promise<U>;
+function until<T>(subscribe: (listener: (value: T) => void) => () => void, test: (value: T) => boolean): Promise<T>;
 function until<T>(subscribe: (listener: (value: T) => void) => () => void, test: (value: T) => boolean): Promise<T> {
   return new Promise((resolve) => {
     const stop = subscribe((value) => {
@@ -456,6 +458,100 @@ describe("client protocol", () => {
       await client.root((ctx) => keys.remove({ provider: "anthropic" }, ctx));
       await until(keys.providers.subscribe.bind(keys.providers), (providers) => providers.length === 0);
       expect(await models.getAuth("anthropic")).toBeUndefined();
+    } finally {
+      await client.close();
+      await server.close();
+      await service.close(context);
+    }
+  });
+
+  it("signs the owner in by a provider's own login or a key, and keeps nothing from a login that did not finish", async () => {
+    const credentials = new InMemoryCredentialStore();
+    const models = createModels({ credentials, authContext: { env: async () => undefined, fileExists: async () => false } });
+    const acme = fauxProvider({ provider: "acme" });
+    models.setProvider({
+      ...acme.provider,
+      name: "Acme",
+      baseUrl: "https://api.acme.test/v1",
+      auth: {
+        oauth: {
+          name: "Acme subscription",
+          isSubscription: true,
+          login: async (interaction) => {
+            interaction.notify({ type: "auth_url", url: "https://acme.test/authorize", instructions: "Copy the code it shows." });
+            const code = await interaction.prompt({ type: "manual_code", message: "Paste the code." });
+            return { type: "oauth", access: `access-${code}`, refresh: "refresh", expires: Date.now() + 3_600_000 };
+          },
+          refresh: async (credential) => credential,
+          toAuth: async (credential) => ({ apiKey: credential.access }),
+        },
+        apiKey: {
+          name: "Acme API key",
+          login: async (interaction) => ({ type: "api_key", key: await interaction.prompt({ type: "secret", message: "Enter the key." }) }),
+          resolve: async ({ credential }) => (credential?.key === undefined ? undefined : { auth: { apiKey: credential.key } }),
+        },
+      },
+    });
+    let refuse = false;
+    const beta = fauxProvider({ provider: "beta" });
+    models.setProvider({
+      ...beta.provider,
+      name: "Beta",
+      auth: {
+        oauth: {
+          name: "Beta",
+          login: async (interaction) => {
+            if (refuse) throw new Error("the provider said no");
+            interaction.notify({ type: "device_code", userCode: "ABCD-1234", verificationUri: "https://beta.test/device", expiresInSeconds: 900 });
+            return new Promise((_resolve, reject) => interaction.signal.addEventListener("abort", () => reject(new Error("Login cancelled"))));
+          },
+          refresh: async (credential) => credential,
+          toAuth: async (credential) => ({ apiKey: credential.access }),
+        },
+      },
+    });
+    const service = new AgentService({
+      dataDir: await mkdtemp(join(tmpdir(), "chopin-protocol-")), workspaces: nowhere, models: () => models, credentials: () => credentials,
+    });
+    const server = await listen(service, { authenticate: launchToken("secret") });
+    const client = connect(`ws://127.0.0.1:${server.port}/?token=secret`);
+    try {
+      const keys = await client.get(Credentials, {});
+      const login = (test: (state: LoginState) => boolean) =>
+        until(keys.login.subscribe.bind(keys.login), (state): state is LoginState => state !== null && test(state));
+      const catalog = await client.root((ctx) => keys.catalog(ctx));
+      expect(catalog.map(({ id, ways }) => [id, ways.map(({ type, subscription }) => `${type}:${subscription}`)])).toEqual([
+        ["acme", ["oauth:true", "api_key:false"]],
+        ["beta", ["oauth:false"]],
+      ]);
+      expect(catalog[0]?.hosts).toContain("api.acme.test");
+
+      const copied = await client.root((ctx) => keys.startLogin({ provider: "acme", type: "oauth" }, ctx));
+      const asked = await login((state) => state.id === copied && state.prompt !== undefined);
+      expect(asked.events).toEqual([{ type: "auth_url", url: "https://acme.test/authorize", instructions: "Copy the code it shows." }]);
+      expect(asked.prompt).toMatchObject({ type: "manual_code", message: "Paste the code." });
+      await client.root((ctx) => keys.answer({ prompt: asked.prompt?.id ?? 0, value: "c0de" }, ctx));
+      expect(await login((state) => state.id === copied && state.status !== "running")).toMatchObject({ status: "done" });
+      expect((await models.getAuth("acme"))?.auth).toMatchObject({ apiKey: "access-c0de" });
+      expect(keys.providers.value).toEqual([{ provider: "acme", type: "oauth" }]);
+
+      const keyed = await client.root((ctx) => keys.startLogin({ provider: "acme", type: "api_key" }, ctx));
+      const secret = await login((state) => state.id === keyed && state.prompt !== undefined);
+      expect(secret.prompt?.type).toBe("secret");
+      await client.root((ctx) => keys.answer({ prompt: secret.prompt?.id ?? 0, value: "sk-acme" }, ctx));
+      await login((state) => state.id === keyed && state.status === "done");
+      expect((await models.getAuth("acme"))?.auth).toMatchObject({ apiKey: "sk-acme" });
+
+      const waiting = await client.root((ctx) => keys.startLogin({ provider: "beta", type: "oauth" }, ctx));
+      const coded = await login((state) => state.id === waiting && state.events.length > 0);
+      expect(coded.events[0]).toEqual({ type: "device_code", userCode: "ABCD-1234", verificationUri: "https://beta.test/device", expiresInSeconds: 900 });
+      await client.root((ctx) => keys.cancelLogin({ login: waiting }, ctx));
+      await login((state) => state.id === waiting && state.status === "cancelled");
+      refuse = true;
+      const refused = await client.root((ctx) => keys.startLogin({ provider: "beta", type: "oauth" }, ctx));
+      expect(await login((state) => state.id === refused && state.status !== "running")).toMatchObject({ status: "failed", error: "the provider said no" });
+      expect(await credentials.read("beta")).toBeUndefined();
+      await expect(client.root((ctx) => keys.startLogin({ provider: "nowhere", type: "oauth" }, ctx))).rejects.toThrow("credential_refused");
     } finally {
       await client.close();
       await server.close();

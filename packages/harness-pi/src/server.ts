@@ -3,7 +3,7 @@ import { createServer, type IncomingMessage } from "node:http";
 import type { AddressInfo } from "node:net";
 import { acceptWebSockets, createHost, forbidden, invalid, type Context, type Ctx, type Host } from "@earendil-works/chord";
 import { BACKGROUND_CONTEXT, withAbortSignal } from "@earendil-works/chord/context";
-import type { ModelThinkingLevel } from "@earendil-works/pi-ai";
+import type { AuthEvent, AuthPrompt, ModelThinkingLevel } from "@earendil-works/pi-ai";
 import { configure, InboxDoc, type ConversationId, type ConversationView, type ModelRef, type Submission, type SubmissionId, type UserInput } from "@earendil-works/pi-durable";
 import { Type } from "typebox";
 import { WebSocketServer } from "ws";
@@ -13,14 +13,18 @@ import { ClientContextDoc } from "./client-context.js";
 import { ModeDoc, NameDoc } from "./mode.js";
 import { isRunning, userText } from "./acp.js";
 import {
-  Conversation, Conversations, CredentialSchema, Credentials, HOST, Loop, Mcp, McpServerSchema, ModeSchema, REWIND_KIND, RunningSchema, SubmissionSchema, Vault,
-  errorChain, type Image, type LoopControl, type Principal,
+  Conversation, Conversations, CredentialSchema, Credentials, HOST, LoginSchema, Loop, Mcp, McpServerSchema, ModeSchema, REWIND_KIND, RunningSchema, SubmissionSchema, Vault,
+  errorChain, errorText, type Image, type LoginEvent, type LoginPrompt, type LoginState, type LoopControl, type Principal,
 } from "./protocol.js";
 import { backoff } from "./backoff.js";
 import { AgentService } from "./service.js";
 import { shellEntry } from "./shell.js";
 import { lost, merge, outcomeOf, progressOf, RECENT_SUBMISSIONS, type Outcome } from "./submissions.js";
 
+/** A login nobody finishes ends after this, which outlasts the device codes providers hand out. */
+const LOGIN_LIMIT_MS = 20 * 60_000;
+/** How much of what a login said its state keeps, the latest first to go last. */
+const LOGIN_EVENTS = 8;
 
 /**
  * A service that opens only once a client hands it its key, so nothing of its owner's is read before: until then,
@@ -389,11 +393,88 @@ export function createAgentHost(source: AgentService | Sealed, loop?: LoopContro
       if (problem !== undefined) throw invalid("credential_refused", problem);
       providers.replace(ctx, await listed());
     };
+    // A login outlives the call that starts it: it waits on the owner's answers and the provider, until it ends, a
+    // newer one replaces it, the bound passes or this object closes.
+    const login = self.state("login", Type.Union([LoginSchema, Type.Null()]), null);
+    let running: { id: number; stop: AbortController; asked: Map<number, (value: string) => void> } | undefined;
+    let ids = 0;
+    self.resource("logins", { version: 1, open: () => true, close: () => running?.stop.abort() });
     return {
       variant: "owner",
       providers,
+      login,
       setKey: async ({ provider, key }, ctx) => settled(await service.setKey(owner, provider, key), ctx),
       remove: async ({ provider }, ctx) => settled(await service.removeKey(owner, provider), ctx),
+      catalog: async () => service.catalog(owner),
+      startLogin: async ({ provider, type }, ctx) => {
+        const problem = service.loginRefusal(owner, provider, type);
+        if (problem !== undefined) throw invalid("credential_refused", problem);
+        running?.stop.abort();
+        const mine = { id: ++ids, stop: new AbortController(), asked: new Map<number, (value: string) => void>() };
+        running = mine;
+        let shown: LoginState = { id: mine.id, provider, type, status: "running", events: [] };
+        login.replace(ctx, shown);
+        const show = (next: LoginState) => {
+          if (running !== mine) return;
+          shown = next;
+          void host.root((root) => login.replace(root, next)).catch(() => {});
+        };
+        let late = false;
+        const bound = setTimeout(() => {
+          late = true;
+          mine.stop.abort();
+        }, LOGIN_LIMIT_MS);
+        const end = (status: LoginState["status"], error?: string) => {
+          const { prompt: _asked, ...rest } = shown;
+          show({ ...rest, status, ...(error === undefined ? {} : { error }) });
+          if (running === mine) running = undefined;
+        };
+        void service.login(owner, provider, type, {
+          signal: mine.stop.signal,
+          notify: (event) => show({ ...shown, events: [...shown.events, loginEvent(event)].slice(-LOGIN_EVENTS) }),
+          prompt: (asking) => new Promise<string>((resolve, reject) => {
+            const id = ++ids;
+            const signals = [mine.stop.signal, ...(asking.signal === undefined ? [] : [asking.signal])];
+            const settle = () => {
+              mine.asked.delete(id);
+              for (const signal of signals) signal.removeEventListener("abort", cancel);
+              if (shown.prompt?.id !== id) return;
+              const { prompt: _done, ...rest } = shown;
+              show(rest);
+            };
+            const cancel = () => {
+              settle();
+              reject(new Error("Login cancelled"));
+            };
+            if (signals.some((signal) => signal.aborted)) return cancel();
+            for (const signal of signals) signal.addEventListener("abort", cancel, { once: true });
+            mine.asked.set(id, (value) => {
+              settle();
+              resolve(value);
+            });
+            show({ ...shown, prompt: loginPrompt(id, asking) });
+          }),
+        }).then(
+          async () => {
+            await host.root(async (root) => providers.replace(root, await listed())).catch(() => {});
+            end("done");
+          },
+          (error: unknown) => {
+            if (late) end("failed", `the login was not finished within ${LOGIN_LIMIT_MS / 60_000} minutes`);
+            else if (mine.stop.signal.aborted) end("cancelled");
+            else end("failed", errorText(error));
+          },
+        ).finally(() => clearTimeout(bound));
+        return mine.id;
+      },
+      answer: async ({ prompt, value }) => {
+        const reply = running?.asked.get(prompt);
+        if (reply === undefined) throw invalid("no_prompt", `the login asks nothing as ${prompt} now`);
+        reply(value);
+      },
+      cancelLogin: async ({ login: id }) => {
+        if (running?.id === id) running.stop.abort();
+      },
     };
   });
 
@@ -549,3 +630,26 @@ function retext(content: UserInput, text: string): UserInput {
   return typeof content === "string" ? text : [{ type: "text", text }, ...content.filter((block) => block.type !== "text")];
 }
 
+
+/** A login's news in the protocol's words, without what a provider adds beyond them. */
+function loginEvent(event: AuthEvent): LoginEvent {
+  switch (event.type) {
+    case "auth_url":
+      return { type: "auth_url", url: event.url, ...(event.instructions === undefined ? {} : { instructions: event.instructions }) };
+    case "device_code":
+      return { type: "device_code", userCode: event.userCode, verificationUri: event.verificationUri, ...(event.expiresInSeconds === undefined ? {} : { expiresInSeconds: event.expiresInSeconds }) };
+    case "info":
+      return { type: "info", message: event.message, ...(event.links === undefined ? {} : { links: event.links.map(({ url, label }) => (label === undefined ? { url } : { url, label })) }) };
+    case "progress":
+      return { type: "progress", message: event.message };
+  }
+}
+
+/** What a login asks, as clients answer it by `id`. */
+function loginPrompt(id: number, asking: AuthPrompt): LoginPrompt {
+  const placeholder = asking.type !== "select" && asking.placeholder !== undefined ? { placeholder: asking.placeholder } : {};
+  const options = asking.type === "select"
+    ? { options: asking.options.map(({ id: option, label, description }) => (description === undefined ? { id: option, label } : { id: option, label, description })) }
+    : {};
+  return { id, type: asking.type, message: asking.message, ...placeholder, ...options };
+}
