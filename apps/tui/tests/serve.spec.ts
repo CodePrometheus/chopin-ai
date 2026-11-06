@@ -286,12 +286,13 @@ describe("chopin serve", () => {
       first.child.kill("SIGKILL");
       await once(first.child, "exit");
       await first.host.close();
-      // In the clear in memory, where the service works with them; on the volume, sealed files alone.
+      // In the clear in memory, where the service works with them; on the volume, sealed files alone, a draft the kill
+      // cut short among them.
       for (const text of ["sk-sealed-credential", "sealed-header", "sealed-model-name"]) expect(await holds(first.home, text)).toBe(true);
       for (const text of markers) expect(await holds(volume, text)).toBe(false);
       const files = (await readdir(volume, { recursive: true, withFileTypes: true })).filter((entry) => entry.isFile())
         .map((entry) => join(entry.parentPath, entry.name).slice(volume.length + 1));
-      for (const file of files) expect(file).toMatch(/^(key-check|store\/(snapshot|journal)|home\/manifest|home\/objects\/[0-9a-f]{32})$/);
+      for (const file of files) expect(file).toMatch(/^(key-check|store\/(snapshot|journal)|home\/manifest|home\/objects\/[0-9a-f]{32})(\.partial)?$/);
       expect(files).toEqual(expect.arrayContaining(["key-check", "store/snapshot", "store/journal", "home/manifest"]));
 
       const second = await serve();
