@@ -338,7 +338,6 @@ export class AgentService {
     await this.#agents.get(owner)?.ready?.serve(name, undefined);
   }
 
-  /** The MCP servers the owner's clients set, read from `dataDir` the first time where they are kept there. */
   /** The names of the variables the owner's commands get, in order; never their values. */
   variableNames(owner: string): string[] {
     return [...this.#variables.get(owner)?.keys() ?? []].sort();
@@ -353,6 +352,7 @@ export class AgentService {
     this.#variables.get(owner)?.delete(name);
   }
 
+  /** The MCP servers the owner's clients set, read from `dataDir` the first time where they are kept there. */
   async #clientServers(owner: string): Promise<Record<string, McpServer>> {
     const known = this.#clientMcp.get(owner);
     if (known !== undefined || this.#options.keepClientMcp !== true) return known ?? {};
