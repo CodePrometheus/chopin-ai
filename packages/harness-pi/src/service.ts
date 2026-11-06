@@ -52,8 +52,6 @@ const OPEN_PATIENCE_MS = 10 * 60_000;
 const MCP_RETRY_MS = 30_000;
 
 const FIXED_CREDENTIALS = "this service takes its credentials from where it runs, not from its clients";
-/** Beyond this, variables are no settings but a dump, which a client must not leave in every command. */
-const MOST_VARIABLES = 64;
 
 /** Where the workspace image keeps the execution daemon. */
 export const DAEMON_PATH = "/usr/local/bin/pi-env";
@@ -346,12 +344,9 @@ export class AgentService {
     return [...this.#variables.get(owner)?.keys() ?? []].sort();
   }
 
-  /** Gives every command of the owner's agent `name` set to `value` from now on, or says why not. */
-  setVariable(owner: string, name: string, value: string): string | undefined {
-    const variables = this.#variables.get(owner) ?? new Map<string, string>();
-    if (!variables.has(name) && variables.size >= MOST_VARIABLES) return `an owner sets at most ${MOST_VARIABLES} variables`;
-    this.#variables.set(owner, variables.set(name, value));
-    return undefined;
+  /** Gives every command of the owner's agent `name` set to `value` from now on. */
+  setVariable(owner: string, name: string, value: string): void {
+    this.#variables.set(owner, (this.#variables.get(owner) ?? new Map<string, string>()).set(name, value));
   }
 
   removeVariable(owner: string, name: string): void {

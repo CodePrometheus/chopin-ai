@@ -530,8 +530,7 @@ export function createAgentHost(source: AgentService | Sealed, loop?: LoopContro
       variant: "owner",
       names,
       set: async ({ name, value }, ctx) => {
-        const problem = service.setVariable(owner, name, value);
-        if (problem !== undefined) throw invalid("variable_refused", problem);
+        service.setVariable(owner, name, value);
         names.replace(ctx, service.variableNames(owner));
       },
       remove: async ({ name }, ctx) => {

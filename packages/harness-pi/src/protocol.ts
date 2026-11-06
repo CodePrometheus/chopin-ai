@@ -314,8 +314,8 @@ export const Mcp = remote("chopin.mcp", {
   },
 });
 
-const VariableName = Type.String({ pattern: "^[A-Za-z_][A-Za-z0-9_]{0,63}$" });
-const VariableArgs = Type.Object({ name: VariableName, value: Type.String({ maxLength: 65_536 }) });
+const VariableName = Type.String({ pattern: "^[A-Za-z_][A-Za-z0-9_]*$" });
+const VariableArgs = Type.Object({ name: VariableName, value: Type.String() });
 const VariableNameArgs = Type.Object({ name: VariableName });
 
 /**
