@@ -1,6 +1,6 @@
 {
   "name": "@chopin-ai/harness-pi",
-  "version": "0.4.1",
+  "version": "0.5.0",
   "description": "Durable harness adapter: agent service, client protocol and ACP bridge",
   "license": "Apache-2.0",
   "repository": {

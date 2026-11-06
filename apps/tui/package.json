@@ -1,6 +1,6 @@
 {
   "name": "chopin-ai",
-  "version": "0.4.1",
+  "version": "0.5.0",
   "description": "The chopin command: terminal client, ACP and the project service",
   "license": "Apache-2.0",
   "repository": {

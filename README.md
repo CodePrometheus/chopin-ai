@@ -14,8 +14,9 @@
 
 </div>
 
-> **Status:** `v0.4.0` keeps a cloud agent's conversations and credentials sealed at rest; the loop that improves the
-> agent from your sessions came in `v0.3.0`, see [How it improves itself](#how-it-improves-itself).
+> **Status:** `v0.5.0` signs a cloud agent's owner in to any model provider from their clients, and `v0.4.0` keeps
+> what they have sealed at rest; the loop that improves the agent from your sessions came in `v0.3.0`, see
+> [How it improves itself](#how-it-improves-itself).
 
 ## Install
 
@@ -109,7 +110,8 @@ checkout with `pnpm --filter @chopin-ai/harness-pi image`. Clients reach it thro
 network, such as another container of the same pod, running the workspace package's
 `loopback-listener.sh <port> <daemon>`. It admits the credential in `CHOPIN_TOKEN`, starts conversations with the
 model `CHOPIN_MODEL` names, and `GET /status` with that credential says whether it is busy. The user's client hands
-it their model API key through the client protocol, and it keeps the key in memory alone.
+it their model API key, or signs them in to a provider, through the client protocol, and it keeps what it gets in
+memory alone.
 
 With `--sealed <dir>` (Node 24.16 or later) it keeps that user's conversations, settings, loop records, and the
 credentials and MCP servers clients hand over only sealed on `<dir>`, and starts locked, reading nothing until a client

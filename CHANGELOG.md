@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.5.0] - 2026-11-06
+
+Signing a cloud agent's owner in to model providers from any of their clients.
+
+### Added
+
+- `chopin.credentials` lists every provider the model library knows, with how to sign in to each and the hosts its
+  models are reached at (`catalog`), and runs a provider's own sign-in or key entry with the owner through
+  `startLogin`, `answer` and `cancelLogin`; every client of the owner follows it in the `login` state.
+
 ## [0.4.1] - 2026-11-06
 
 A key per purpose from the owner's data key, so an integrator can seal what its own server keeps for that owner.
@@ -232,7 +242,8 @@ the agent loop, sessions, UI, skills and model access.
 - Model endpoint proxy through `CHOPIN_LLM_PROXY`, and opt-in hot reload while developing with
   `CHOPIN_HMR=1`.
 
-[unreleased]: https://github.com/CodePrometheus/chopin-ai/compare/v0.4.1...HEAD
+[unreleased]: https://github.com/CodePrometheus/chopin-ai/compare/v0.5.0...HEAD
+[0.5.0]: https://github.com/CodePrometheus/chopin-ai/compare/v0.4.1...v0.5.0
 [0.4.1]: https://github.com/CodePrometheus/chopin-ai/compare/v0.4.0...v0.4.1
 [0.4.0]: https://github.com/CodePrometheus/chopin-ai/compare/v0.3.0...v0.4.0
 [0.3.0]: https://github.com/CodePrometheus/chopin-ai/compare/v0.2.0...v0.3.0
