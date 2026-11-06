@@ -10,7 +10,7 @@ import { WebSocketServer } from "ws";
 import { credentialOf, type Authenticate } from "./auth.js";
 import { statusHandler } from "./http.js";
 import { ClientContextDoc } from "./client-context.js";
-import { ModeDoc, NameDoc } from "./mode.js";
+import { ListingDoc, ModeDoc, NameDoc } from "./mode.js";
 import { isRunning, userText } from "./acp.js";
 import {
   Conversation, Conversations, CredentialSchema, Credentials, Environment, HOST, LoginSchema, Loop, Mcp, McpServerSchema, ModeSchema, REWIND_KIND, RunningSchema, SubmissionSchema, Vault,
@@ -169,6 +169,13 @@ export function createAgentHost(source: AgentService | Sealed, loop?: LoopContro
     const name = self.state("name", Type.String(), {
       init: async (ctx) => (await opened.value.harness.snapshot(NameDoc, id as ConversationId, durable(ctx)))?.name ?? "",
     });
+    // How the owner keeps it in the list; the list reads it on its next summaries.
+    const list = async (ctx: Ctx<Principal>, change: (listing: { pinned: boolean; archived: boolean; seen: number }) => void) => {
+      service.touch(owner);
+      await opened.value.conversation.commit(async (tx) => {
+        change(await tx.doc(ListingDoc, opened.value.conversation.id));
+      }, durable(ctx));
+    };
     // How submissions ended is the store's to say: every one the harness has not settled, the latest few, and any
     // a client still waits on, however old.
     const read = async (running: readonly number[]) => {
@@ -357,6 +364,21 @@ export function createAgentHost(source: AgentService | Sealed, loop?: LoopContro
           (await tx.doc(NameDoc, opened.value.conversation.id)).name = next;
         }, durable(ctx));
         name.replace(ctx, next);
+      },
+      setPinned: async ({ pinned }, ctx) => {
+        await list(ctx, (listing) => {
+          listing.pinned = pinned;
+        });
+      },
+      setArchived: async ({ archived }, ctx) => {
+        await list(ctx, (listing) => {
+          listing.archived = archived;
+        });
+      },
+      markSeen: async (_args, ctx) => {
+        await list(ctx, (listing) => {
+          listing.seen = Date.now();
+        });
       },
       setContext: async ({ text }, ctx) => {
         await opened.value.conversation.commit(async (tx) => {

@@ -11,6 +11,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - `chopin.environment` gives every command of an owner's agent the variables their clients set, such as a
   credential for a host its tools reach, held in memory and named in its state without the values.
+- A conversation's summary says whether it is running, whether its latest answer failed, and whether its owner pinned,
+  archived and has seen it since its last change, which `setPinned`, `setArchived` and `markSeen` set.
 
 ## [0.5.0] - 2026-11-06
 

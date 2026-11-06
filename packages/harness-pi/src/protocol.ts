@@ -77,6 +77,8 @@ const ModeArgs = Type.Object({ mode: ModeSchema });
 const ModelArgs = Type.Object({ provider: Type.String({ minLength: 1 }), modelId: Type.String({ minLength: 1 }) });
 const NoArgs = Type.Object({});
 const NameArgs = Type.Object({ name: Type.String({ maxLength: 200 }) });
+const PinnedArgs = Type.Object({ pinned: Type.Boolean() });
+const ArchivedArgs = Type.Object({ archived: Type.Boolean() });
 const ContextArgs = Type.Object({ text: Type.String({ maxLength: 4_000 }) });
 const RetryArgs = Type.Object({ text: Type.Optional(Type.String()), images: Type.Optional(Images) });
 const ResetArgs = Type.Object({ handoff: Type.Optional(Type.String({ minLength: 1 })) });
@@ -111,7 +113,11 @@ export const LoadedSchema = Type.Object({
 });
 export type Loaded = Static<typeof LoadedSchema>;
 
-/** A line about one conversation, for picking one to resume: times in milliseconds since the epoch. */
+/**
+ * A line about one conversation, for picking one to resume: times in milliseconds since the epoch. `running` while its
+ * agent answers, `failed` when its latest answer stopped on an error, `seen` when its owner last saw it (0 for never),
+ * so one modified since is unread.
+ */
 export const SummarySchema = Type.Object({
   id: Type.Number(),
   name: Type.String(),
@@ -119,6 +125,11 @@ export const SummarySchema = Type.Object({
   messages: Type.Number(),
   created: Type.Number(),
   modified: Type.Number(),
+  running: Type.Boolean(),
+  failed: Type.Boolean(),
+  pinned: Type.Boolean(),
+  archived: Type.Boolean(),
+  seen: Type.Number(),
 });
 export type Summary = Static<typeof SummarySchema>;
 const Summaries = Type.Array(SummarySchema);
@@ -200,6 +211,10 @@ export const Conversation = remote("chopin.conversation", {
         setMode: method(ModeArgs) as Call<typeof ModeArgs>,
         setModel: method(ModelArgs) as Call<typeof ModelArgs>,
         setName: method(NameArgs) as Call<typeof NameArgs>,
+        setPinned: method(PinnedArgs) as Call<typeof PinnedArgs>,
+        setArchived: method(ArchivedArgs) as Call<typeof ArchivedArgs>,
+        /** Marks the conversation seen as it stands now. */
+        markSeen: method(NoArgs) as Call<TObject<{}>>,
         /** What the client shows its user now, such as the page they are on; the model reads it before each request. */
         setContext: method(ContextArgs) as Call<typeof ContextArgs>,
         setThinking: method(ThinkingArgs) as Call<typeof ThinkingArgs>,

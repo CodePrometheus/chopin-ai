@@ -23,6 +23,20 @@ export const NameDoc = defineDoc<{ name: string }>({
   checkpointWhen: () => false,
 });
 
+/**
+ * How a conversation stands in its owner's list: pinned to the top, archived out of the way, and when its owner last saw
+ * it, in milliseconds since the epoch. A fork starts from none of these.
+ */
+export const ListingDoc = defineDoc<{ pinned: boolean; archived: boolean; seen: number }>({
+  kind: "chopin.listing",
+  version: 1,
+  scope: "conversation",
+  history: "latest",
+  fork: "initial",
+  initial: () => ({ pinned: false, archived: false, seen: 0 }),
+  checkpointWhen: () => false,
+});
+
 export function modeExtension(readOnly: (tool: string) => boolean): Extension {
   return defineExtension({
     name: "chopin-mode",

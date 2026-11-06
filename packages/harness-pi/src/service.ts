@@ -10,6 +10,7 @@ import {
   createRegistry,
   defineExtension,
   Harness,
+  LiveDoc,
   ROOT_CONVERSATION_ID,
   type AgentChange,
   type Conversation,
@@ -34,7 +35,7 @@ import { IdleCompaction } from "./idle-compaction.js";
 import { layerExtension, pinLayerVersions, type LayerSource } from "./layer.js";
 import { mcpExtensionName, McpServers } from "./mcp.js";
 import { drain } from "./pages.js";
-import { modeExtension, NameDoc } from "./mode.js";
+import { ListingDoc, modeExtension, NameDoc } from "./mode.js";
 import { unansweredText, type Loaded, type McpServerState, type ModelChoices, type ProviderEntry, type Summary } from "./protocol.js";
 import { clientContext } from "./client-context.js";
 import { contextFiles, projectContext } from "./project-context.js";
@@ -187,7 +188,8 @@ export class AgentService {
 
   /**
    * A line about each of the owner's conversations, last changed first: its name, its first message, how many
-   * messages it holds, and when it began and last changed.
+   * messages it holds, when it began and last changed, whether it is answering or its latest answer failed, and how its
+   * owner keeps it in the list.
    */
   async summaries(owner: string, context: Context): Promise<Summary[]> {
     const harness = await this.harness(owner);
@@ -197,7 +199,9 @@ export class AgentService {
         .flatMap((entry) => entry.kind === CompactionEntry.kind || entry.kind === ShellEntry.kind ? [] : entry.model ?? [])
         .filter((message) => message.role === "user" || message.role === "assistant");
       const first = messages.find((message) => message.role === "user");
+      const answer = messages.findLast((message) => message.role === "assistant");
       const times = messages.map((message) => message.timestamp).filter((time) => Number.isFinite(time));
+      const listing = await harness.snapshot(ListingDoc, id as ConversationId, context);
       return {
         id,
         name: (await harness.snapshot(NameDoc, id as ConversationId, context))?.name ?? "",
@@ -205,6 +209,11 @@ export class AgentService {
         messages: messages.length,
         created: times.length === 0 ? 0 : Math.min(...times),
         modified: times.length === 0 ? 0 : Math.max(...times),
+        running: (await harness.snapshot(LiveDoc, id as ConversationId, context))?.run !== undefined,
+        failed: answer?.role === "assistant" && answer.stopReason === "error",
+        pinned: listing?.pinned ?? false,
+        archived: listing?.archived ?? false,
+        seen: listing?.seen ?? 0,
       };
     }));
     return lines.sort((a, b) => b.modified - a.modified);

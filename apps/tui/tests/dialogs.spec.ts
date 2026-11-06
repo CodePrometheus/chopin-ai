@@ -38,7 +38,7 @@ describe("pickConversation", () => {
     let loads = 0;
     const summaries = async () => {
       loads++;
-      return [{ id: 4, name: "", first: "Hello.", messages: 2, created: 1, modified: 2 }];
+      return [{ id: 4, name: "", first: "Hello.", messages: 2, created: 1, modified: 2, running: false, failed: false, pinned: false, archived: false, seen: 0 }];
     };
     const picked = pickConversation(stageIn(tui, slot), "/project", summaries);
     for (let i = 0; i < 100 && !terminal.screen().includes("Hello."); i++) await new Promise((resolve) => setTimeout(resolve, 10));

@@ -312,6 +312,52 @@ describe("client protocol", () => {
     }
   });
 
+  it("lists how each conversation stands: failed, pinned, archived, and seen since its last change or not", async () => {
+    const faux = fauxProvider();
+    const models = createModels();
+    models.setProvider(faux.provider);
+    faux.setResponses([fauxAssistantMessage("Done."), fauxAssistantMessage("", { stopReason: "error", errorMessage: "the model went away" })]);
+    const model = faux.getModel();
+    const service = new AgentService({
+      dataDir: await mkdtemp(join(tmpdir(), "chopin-protocol-")), workspaces: nowhere, models: () => models,
+      agent: { model: { provider: model.provider, modelId: model.id } },
+    });
+    const server = await listen(service, { authenticate: launchToken("secret") });
+    const client = connect(`ws://127.0.0.1:${server.port}/?token=secret`);
+    try {
+      const conversations = await client.get(Conversations, {});
+      const open = async () => {
+        const id = await client.root((ctx) => conversations.create(ctx));
+        return { id, ref: await client.get(Conversation, { conversation: id }) };
+      };
+      const answered = await open();
+      const broken = await open();
+      const settled = ({ ref }: typeof answered) =>
+        until(ref.view.subscribe.bind(ref.view), (view) => JSON.stringify(view).includes("\"stopReason\"") && !JSON.stringify(view).includes("\"run\""));
+      await client.root((ctx) => answered.ref.submit({ text: "Do it.", request: "a" }, ctx));
+      await settled(answered);
+      await client.root((ctx) => broken.ref.submit({ text: "Try.", request: "b" }, ctx));
+      await settled(broken);
+      const line = async (id: number) => (await client.root((ctx) => conversations.summaries(ctx))).find((summary) => summary.id === id);
+      expect(await line(answered.id)).toMatchObject({ running: false, failed: false, pinned: false, archived: false, seen: 0 });
+      expect(await line(broken.id)).toMatchObject({ failed: true });
+
+      await client.root((ctx) => answered.ref.setPinned({ pinned: true }, ctx));
+      await client.root((ctx) => broken.ref.setArchived({ archived: true }, ctx));
+      await client.root((ctx) => answered.ref.markSeen({}, ctx));
+      const pinned = await line(answered.id);
+      expect(pinned).toMatchObject({ pinned: true, archived: false });
+      expect(pinned?.seen).toBeGreaterThanOrEqual(pinned?.modified ?? Infinity);
+      expect(await line(broken.id)).toMatchObject({ pinned: false, archived: true, seen: 0 });
+      await client.root((ctx) => answered.ref.setPinned({ pinned: false }, ctx));
+      expect(await line(answered.id)).toMatchObject({ pinned: false });
+    } finally {
+      await client.close();
+      await server.close();
+      await service.close(context);
+    }
+  });
+
   it("tells the model what the client shows its user, as it stands at each request", async () => {
     const faux = fauxProvider();
     const models = createModels();
