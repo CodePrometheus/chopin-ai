@@ -41,6 +41,14 @@ describe("a vault", () => {
     await expect(Vault.open(lost, await temporary("home"), key)).rejects.toThrow(TamperedHome);
   });
 
+  it("opens a fresh volume whose root holds only what its file system put there", async () => {
+    const volume = await temporary("volume");
+    await mkdir(join(volume, "lost+found"));
+    const key = randomBytes(32);
+    await (await Vault.open(volume, await temporary("home"), key)).close();
+    await (await Vault.open(volume, await temporary("home"), key)).close();
+  });
+
   it("restores the home from its sealed copy, which holds none of it as written and only what it still holds", async () => {
     const volume = await temporary("volume");
     const key = randomBytes(32);

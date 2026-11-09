@@ -195,7 +195,8 @@ function objectContext(object: string): string {
 
 /**
  * Refuses any key but the one the volume was first opened with, recording that one on first use; a volume holding
- * sealed things but no record of its key lost it, and is refused too.
+ * sealed things but no record of its key lost it, and is refused too. Only what the vault writes counts as sealed: a
+ * volume's root may hold what its file system put there, such as lost+found.
  */
 async function checkKey(volume: string, key: Uint8Array): Promise<void> {
   const file = join(volume, CHECK);
@@ -214,7 +215,7 @@ async function checkKey(volume: string, key: Uint8Array): Promise<void> {
     }
   }
   await mkdir(volume, { recursive: true, mode: 0o700 });
-  if ((await readdir(volume)).length > 0) throw new TamperedHome(`${volume} holds sealed things but no record of the key they were sealed with`);
+  if ((await readdir(volume)).some((name) => name === STORE || name === HOME)) throw new TamperedHome(`${volume} holds sealed things but no record of the key they were sealed with`);
   await writeSealed(file, check, CHECK_CONTEXT, randomBytes(16));
 }
 

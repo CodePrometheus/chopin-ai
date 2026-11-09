@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- A sealed service opens a fresh volume whose root holds what its file system put there, such as `lost+found`.
+
 ## [0.6.0] - 2026-11-09
 
 A cloud agent's owner hands its commands what they need without a conversation, and sees how each conversation stands.
