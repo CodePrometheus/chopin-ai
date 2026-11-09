@@ -14,8 +14,9 @@
 
 </div>
 
-> **Status:** `v0.5.0` signs a cloud agent's owner in to any model provider from their clients, and `v0.4.0` keeps
-> what they have sealed at rest; the loop that improves the agent from your sessions came in `v0.3.0`, see
+> **Status:** `v0.6.0` lets a cloud agent's owner hand its commands credentials without a conversation and see how each
+> conversation stands, `v0.5.0` signs them in to any model provider from their clients, and `v0.4.0` keeps what they
+> have sealed at rest; the loop that improves the agent from your sessions came in `v0.3.0`, see
 > [How it improves itself](#how-it-improves-itself).
 
 ## Install

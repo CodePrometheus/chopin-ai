@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.6.0] - 2026-11-09
+
+A cloud agent's owner hands its commands what they need without a conversation, and sees how each conversation stands.
+
 ### Added
 
 - `chopin.environment` gives every command of an owner's agent the variables their clients set, such as a
@@ -249,7 +253,8 @@ the agent loop, sessions, UI, skills and model access.
 - Model endpoint proxy through `CHOPIN_LLM_PROXY`, and opt-in hot reload while developing with
   `CHOPIN_HMR=1`.
 
-[unreleased]: https://github.com/CodePrometheus/chopin-ai/compare/v0.5.0...HEAD
+[unreleased]: https://github.com/CodePrometheus/chopin-ai/compare/v0.6.0...HEAD
+[0.6.0]: https://github.com/CodePrometheus/chopin-ai/compare/v0.5.0...v0.6.0
 [0.5.0]: https://github.com/CodePrometheus/chopin-ai/compare/v0.4.1...v0.5.0
 [0.4.1]: https://github.com/CodePrometheus/chopin-ai/compare/v0.4.0...v0.4.1
 [0.4.0]: https://github.com/CodePrometheus/chopin-ai/compare/v0.3.0...v0.4.0
