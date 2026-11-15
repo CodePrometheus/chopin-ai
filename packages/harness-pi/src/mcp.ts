@@ -1,5 +1,5 @@
 import { readFile } from "node:fs/promises";
-import { Type } from "@earendil-works/pi-ai";
+import { Type } from "typebox";
 import { defineExtension, type Extension, type ToolRegistration } from "@earendil-works/pi-durable";
 import {
   McpAuthRequiredError, McpClient, McpConnectionClosedError, McpError, McpHttpError, McpTimeoutError, StdioTransport, StreamableHttpTransport, toLlmContent,

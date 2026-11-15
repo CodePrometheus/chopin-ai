@@ -170,6 +170,13 @@ describe("laterBuild", () => {
     expect(laterBuild("0.2.0,0.2.0:5", "0.2.0,0.2.0:5")).toBe(false);
     expect(laterBuild("0.2.0-beta.1,0.2.0:5", "0.3.0,0.3.0:1")).toBe(false);
   });
+  it("preserves prerelease precedence independently of file timestamps", () => {
+    expect(laterBuild("0.7.0,0.7.0:1", "0.7.0-rc1,0.7.0-rc1:99")).toBe(true);
+    expect(laterBuild("0.7.0-rc1,0.7.0-rc1:99", "0.7.0,0.7.0:1")).toBe(false);
+    expect(laterBuild("0.7.0-rc.10,0.7.0-rc.10:1", "0.7.0-rc.2,0.7.0-rc.2:99")).toBe(true);
+    expect(laterBuild("invalid:99", "0.7.0:1")).toBe(false);
+    expect(laterBuild("0.7.0:99", "0.7.0,0.7.0:1")).toBe(false);
+  });
 });
 
 describe("resolveModel", () => {

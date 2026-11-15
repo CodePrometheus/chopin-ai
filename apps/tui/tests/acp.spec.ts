@@ -5,7 +5,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { Readable, Writable } from "node:stream";
 import { fileURLToPath } from "node:url";
-import { ClientSideConnection, ndJsonStream, PROTOCOL_VERSION } from "@agentclientprotocol/sdk";
+import { client as createClient, methods, ndJsonStream, PROTOCOL_VERSION } from "@agentclientprotocol/sdk";
 import { BACKGROUND_CONTEXT as context } from "@earendil-works/chord/context";
 import { createModels } from "@earendil-works/pi-ai";
 import { fauxAssistantMessage, fauxProvider } from "@earendil-works/pi-ai/providers/faux";
@@ -47,16 +47,17 @@ describe("chopin acp", () => {
       env: { ...process.env, CHOPIN_TOKEN: "secret" }, stdio: ["pipe", "pipe", "inherit"],
     });
     const texts: string[] = [];
-    const client = new ClientSideConnection(() => ({
-      requestPermission: async () => { throw new Error("unexpected"); },
-      sessionUpdate: async ({ update }) => {
+    const connection = createClient()
+      .onRequest(methods.client.session.requestPermission, () => { throw new Error("unexpected"); })
+      .onNotification(methods.client.session.update, ({ params: { update } }) => {
         if (update.sessionUpdate === "agent_message_chunk" && update.content.type === "text") texts.push(update.content.text);
-      },
-    }), ndJsonStream(Writable.toWeb(child.stdin), Readable.toWeb(child.stdout) as ReadableStream<Uint8Array>));
+      })
+      .connect(ndJsonStream(Writable.toWeb(child.stdin), Readable.toWeb(child.stdout) as ReadableStream<Uint8Array>));
+    const client = connection.agent;
     try {
-      await client.initialize({ protocolVersion: PROTOCOL_VERSION, clientCapabilities: {} });
-      const { sessionId } = await client.newSession({ cwd: "/", mcpServers: [] });
-      expect((await client.prompt({ sessionId, prompt: [{ type: "text", text: "Hi." }] })).stopReason).toBe("end_turn");
+      await client.request(methods.agent.initialize, { protocolVersion: PROTOCOL_VERSION, clientCapabilities: {} });
+      const { sessionId } = await client.request(methods.agent.session.new, { cwd: "/", mcpServers: [] });
+      expect((await client.request(methods.agent.session.prompt, { sessionId, prompt: [{ type: "text", text: "Hi." }] })).stopReason).toBe("end_turn");
       expect(texts).toEqual(["Hello over stdio."]);
     } finally {
       child.stdin.end();

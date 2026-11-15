@@ -1,4 +1,5 @@
 import { execFile } from "node:child_process";
+import { randomUUID } from "node:crypto";
 import { mkdtemp } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -20,7 +21,7 @@ describe.runIf(image)("AgentService", () => {
     const models = createModels();
     models.setProvider(faux.provider);
     const model = faux.getModel();
-    const workspaces = new ContainerWorkspaceProvider({ image: image ?? "", prefix: "chopin-test" });
+    const workspaces = new ContainerWorkspaceProvider({ image: image ?? "", prefix: process.env.CHOPIN_TEST_RESOURCE_PREFIX ?? `chopin-test-${randomUUID()}` });
     const owner = `test-${process.pid}`;
     const dataDir = await mkdtemp(join(tmpdir(), "chopin-service-"));
     const options = { dataDir, workspaces, models: () => models, agent: { model: { provider: model.provider, modelId: model.id } } };

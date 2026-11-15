@@ -1,21 +1,23 @@
 import { mkdtemp } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { ClientSideConnection, ndJsonStream, PROTOCOL_VERSION, type SessionNotification } from "@agentclientprotocol/sdk";
+import { client as createClient, methods, ndJsonStream, PROTOCOL_VERSION, type SessionNotification } from "@agentclientprotocol/sdk";
 import { BACKGROUND_CONTEXT as context } from "@earendil-works/chord/context";
-import { createModels, Type } from "@earendil-works/pi-ai";
+import { createModels } from "@earendil-works/pi-ai";
+import { Type } from "typebox";
 import { fauxAssistantMessage, fauxProvider, fauxToolCall } from "@earendil-works/pi-ai/providers/faux";
 import { defineExtension, defineTool } from "@earendil-works/pi-durable";
 import type { Workspace, WorkspaceProvider } from "@chopin-ai/workspace";
-import { ChordError, type Host } from "@earendil-works/chord";
+import type { ConversationId } from "@earendil-works/pi-durable";
+import { proxy } from "./bridge-proxy.js";
 import { describe, expect, it } from "vitest";
 import { AgentService, launchToken, listen, serveAcp } from "../src/index.js";
-import { connect, Conversations } from "../src/protocol.js";
+import { connect, Conversation, contracts } from "../src/protocol.js";
 
 const nowhere: WorkspaceProvider = {
   open: (owner): Workspace => ({
     owner, root: "/", state: async () => "running",
-    start: async () => {}, pause: async () => {}, stop: async () => {}, destroy: async () => {}, command: (argv, env = {}) => ({ argv: [...argv], env: { ...env } }),
+    start: async () => { }, pause: async () => { }, stop: async () => { }, destroy: async () => { }, command: (argv, env = {}) => ({ argv: [...argv], env: { ...env } }),
   }),
   list: async () => [],
 };
@@ -47,17 +49,18 @@ describe("ACP bridge", () => {
 
     const toAgent = new TransformStream<Uint8Array, Uint8Array>();
     const toClient = new TransformStream<Uint8Array, Uint8Array>();
-    serveAcp(ndJsonStream(toClient.writable, toAgent.readable), host);
+    const bridge = serveAcp(ndJsonStream(toClient.writable, toAgent.readable), host);
     const updates: SessionNotification[] = [];
-    const client = new ClientSideConnection(() => ({
-      requestPermission: async () => { throw new Error("no permission requests expected"); },
-      sessionUpdate: async (notification) => void updates.push(notification),
-    }), ndJsonStream(toAgent.writable, toClient.readable));
+    const connection = createClient()
+      .onRequest(methods.client.session.requestPermission, () => { throw new Error("no permission requests expected"); })
+      .onNotification(methods.client.session.update, ({ params }) => { updates.push(params); })
+      .connect(ndJsonStream(toAgent.writable, toClient.readable));
+    const client = connection.agent;
 
     try {
-      await client.initialize({ protocolVersion: PROTOCOL_VERSION, clientCapabilities: {} });
-      const { sessionId } = await client.newSession({ cwd: "/", mcpServers: [] });
-      const response = await client.prompt({ sessionId, prompt: [{ type: "text", text: "What is the answer?" }] });
+      await client.request(methods.agent.initialize, { protocolVersion: PROTOCOL_VERSION, clientCapabilities: {} });
+      const { sessionId } = await client.request(methods.agent.session.new, { cwd: "/", mcpServers: [] });
+      const response = await client.request(methods.agent.session.prompt, { sessionId, prompt: [{ type: "text", text: "What is the answer?" }] });
 
       expect(response.stopReason).toBe("end_turn");
       expect(updates.every((n) => n.sessionId === sessionId)).toBe(true);
@@ -67,6 +70,9 @@ describe("ACP bridge", () => {
         { sessionUpdate: "agent_message_chunk", content: { type: "text", text: "The answer is 42." } },
       ]);
     } finally {
+      connection.close();
+      bridge.close();
+      await Promise.all([connection.closed, bridge.closed]);
       await host.close();
       await server.close();
       await service.close(context);
@@ -77,7 +83,7 @@ describe("ACP bridge", () => {
     const faux = fauxProvider();
     const models = createModels();
     models.setProvider(faux.provider);
-    let answer = (): void => {};
+    let answer = (): void => { };
     faux.setResponses([() => new Promise((resolve) => { answer = () => resolve(fauxAssistantMessage("Too late.")); })]);
     const model = faux.getModel();
     const service = new AgentService({
@@ -88,105 +94,97 @@ describe("ACP bridge", () => {
     const host = connect(`ws://127.0.0.1:${server.port}/?token=secret`);
     const toAgent = new TransformStream<Uint8Array, Uint8Array>();
     const toClient = new TransformStream<Uint8Array, Uint8Array>();
-    serveAcp(ndJsonStream(toClient.writable, toAgent.readable), host, { lostAfterMs: 200 });
-    const client = new ClientSideConnection(() => ({
-      requestPermission: async () => { throw new Error("no permission requests expected"); },
-      sessionUpdate: async () => {},
-    }), ndJsonStream(toAgent.writable, toClient.readable));
+    const bridge = serveAcp(ndJsonStream(toClient.writable, toAgent.readable), host, { lostAfterMs: 200 });
+    const connection = createClient()
+      .onRequest(methods.client.session.requestPermission, () => { throw new Error("no permission requests expected"); })
+      .onNotification(methods.client.session.update, () => {})
+      .connect(ndJsonStream(toAgent.writable, toClient.readable));
+    const client = connection.agent;
     try {
-      await client.initialize({ protocolVersion: PROTOCOL_VERSION, clientCapabilities: {} });
-      const { sessionId } = await client.newSession({ cwd: "/", mcpServers: [] });
-      const prompt = client.prompt({ sessionId, prompt: [{ type: "text", text: "Think forever." }] });
+      await client.request(methods.agent.initialize, { protocolVersion: PROTOCOL_VERSION, clientCapabilities: {} });
+      const { sessionId } = await client.request(methods.agent.session.new, { cwd: "/", mcpServers: [] });
+      const prompt = client.request(methods.agent.session.prompt, { sessionId, prompt: [{ type: "text", text: "Think forever." }] });
       await new Promise((resolve) => setTimeout(resolve, 200));
       await server.close();
       await expect(prompt).rejects.toMatchObject({ data: { reason: "lost", detail: "the service stopped answering" } });
-      await expect(client.newSession({ cwd: "/", mcpServers: [] })).rejects.toThrow();
+      await expect(client.request(methods.agent.session.new, { cwd: "/", mcpServers: [] })).rejects.toThrow();
     } finally {
       answer();
+      connection.close();
+      bridge.close();
+      await Promise.all([connection.closed, bridge.closed]);
       await host.close();
       await service.close(context);
     }
   });
 
-  it("sends a prompt again under the same request when its link fails mid-send", async () => {
-    const requests: string[] = [];
-    const listeners: ((value: unknown) => void)[] = [];
-    const submissions = {
-      value: {} as Record<string, unknown>,
-      subscribe(listener: (value: unknown) => void) {
-        listeners.push(listener);
-        listener(this.value);
-        return () => {};
-      },
-    };
-    const conversation = {
-      status: "live",
-      view: { value: { entries: [], docs: {} }, subscribe: (listener: (value: unknown) => void) => (listener({ entries: [], docs: {} }), () => {}) },
-      submissions,
-      onStatus: () => () => {},
-      release: () => {},
-      submit: async ({ request }: { request: string }) => {
-        requests.push(request);
-        if (requests.length === 1) {
-          // The link drops mid-call: the conversation reconnects, then is back.
-          conversation.status = "loading";
-          setTimeout(() => void (conversation.status = "live"), 50);
-          throw new ChordError("unavailable", "link to chopin closed");
+  for (const loss of [true, false]) {
+    it(loss ? "recovers a committed submission after its response is lost" : "does not resend a refusal on a live connection", async () => {
+      const faux = fauxProvider();
+      const models = createModels();
+      models.setProvider(faux.provider);
+      faux.setResponses([fauxAssistantMessage("Answered once.")]);
+      const model = faux.getModel();
+      const service = new AgentService({
+        dataDir: await mkdtemp(join(tmpdir(), "chopin-bridge-wire-")), workspaces: nowhere, models: () => models,
+        agent: { model: { provider: model.provider, modelId: model.id } },
+      });
+      const server = await listen(service, { authenticate: launchToken("secret") });
+      const declaration = contracts.find((entry) => entry.type === Conversation)!;
+      const method = Object.keys(declaration.spec.variants.owner.methods).sort().indexOf("submit");
+      expect(method).toBeGreaterThanOrEqual(0);
+      const holds = new Map<string, string>();
+      const requests: string[] = [];
+      let pending: string | undefined;
+      let dropped = false;
+      const transport = await proxy(`ws://127.0.0.1:${server.port}/`, ({ link, direction, message, disconnect }) => {
+        if (direction === "client" && message.kind === "hold") holds.set(`${link}:${message.hold}`, message.type);
+        if (direction === "client" && message.kind === "call" && holds.get(`${link}:${message.hold}`) === Conversation.name && message.method === method) {
+          expect(message.args).toBeInstanceOf(Uint8Array);
+          const args = JSON.parse(new TextDecoder().decode(message.args as Uint8Array)) as { request: string; text: string };
+          requests.push(args.request);
+          if (!loss) return { ...message, args: JSON.stringify({ ...args, text: "" }) };
+          if (!dropped) pending = `${link}:${message.call}`;
         }
-        submissions.value = { 7: { status: "done" } };
-        queueMicrotask(() => listeners.forEach((listener) => listener(submissions.value)));
-        return 7;
-      },
-    };
-    // A service whose first submit is lost on the way: the bridge cannot tell whether it arrived.
-    const client = {
-      get: async (type: unknown) => (type === Conversations ? { create: async () => 1, release: () => {} } : conversation),
-      root: async (work: (ctx: unknown) => unknown) => work({}),
-    } as unknown as Host;
-    const toAgent = new TransformStream<Uint8Array, Uint8Array>();
-    const toClient = new TransformStream<Uint8Array, Uint8Array>();
-    serveAcp(ndJsonStream(toClient.writable, toAgent.readable), client);
-    const editor = new ClientSideConnection(() => ({
-      requestPermission: async () => { throw new Error("no permission requests expected"); },
-      sessionUpdate: async () => {},
-    }), ndJsonStream(toAgent.writable, toClient.readable));
-
-    await editor.initialize({ protocolVersion: PROTOCOL_VERSION, clientCapabilities: {} });
-    const { sessionId } = await editor.newSession({ cwd: "/", mcpServers: [] });
-    const response = await editor.prompt({ sessionId, prompt: [{ type: "text", text: "Once." }] });
-    expect(response.stopReason).toBe("end_turn");
-    expect(requests).toHaveLength(2);
-    expect(requests[1]).toBe(requests[0]);
-  });
-
-  it("does not send again what failed on a live conversation", async () => {
-    let tries = 0;
-    const conversation = {
-      status: "live",
-      view: { value: { entries: [], docs: {} }, subscribe: (listener: (value: unknown) => void) => (listener({ entries: [], docs: {} }), () => {}) },
-      submissions: { value: {}, subscribe: (listener: (value: unknown) => void) => (listener({}), () => {}) },
-      onStatus: () => () => {},
-      release: () => {},
-      submit: async () => {
-        tries++;
-        throw new ChordError("unavailable", "the store failed");
-      },
-    };
-    const client = {
-      get: async (type: unknown) => (type === Conversations ? { create: async () => 1, release: () => {} } : conversation),
-      root: async (work: (ctx: unknown) => unknown) => work({}),
-    } as unknown as Host;
-    const toAgent = new TransformStream<Uint8Array, Uint8Array>();
-    const toClient = new TransformStream<Uint8Array, Uint8Array>();
-    serveAcp(ndJsonStream(toClient.writable, toAgent.readable), client);
-    const editor = new ClientSideConnection(() => ({
-      requestPermission: async () => { throw new Error("no permission requests expected"); },
-      sessionUpdate: async () => {},
-    }), ndJsonStream(toAgent.writable, toClient.readable));
-
-    await editor.initialize({ protocolVersion: PROTOCOL_VERSION, clientCapabilities: {} });
-    const { sessionId } = await editor.newSession({ cwd: "/", mcpServers: [] });
-    await expect(editor.prompt({ sessionId, prompt: [{ type: "text", text: "Once." }] })).rejects.toThrow();
-    expect(tries).toBe(1);
-  });
+        if (direction === "server" && message.kind === "result" && pending === `${link}:${message.call}`) {
+          pending = undefined;
+          dropped = true;
+          disconnect();
+          return null;
+        }
+      });
+      const host = connect(transport.url, { token: "secret" });
+      const toAgent = new TransformStream<Uint8Array, Uint8Array>();
+      const toClient = new TransformStream<Uint8Array, Uint8Array>();
+      const bridge = serveAcp(ndJsonStream(toClient.writable, toAgent.readable), host);
+      const connection = createClient()
+        .onRequest(methods.client.session.requestPermission, () => { throw new Error("no permission requests expected"); })
+        .onNotification(methods.client.session.update, () => {})
+        .connect(ndJsonStream(toAgent.writable, toClient.readable));
+      const editor = connection.agent;
+      try {
+        await editor.request(methods.agent.initialize, { protocolVersion: PROTOCOL_VERSION, clientCapabilities: {} });
+        const { sessionId } = await editor.request(methods.agent.session.new, { cwd: "/", mcpServers: [] });
+        const prompt = editor.request(methods.agent.session.prompt, { sessionId, prompt: [{ type: "text", text: "Once." }] });
+        if (loss) {
+          expect((await prompt).stopReason).toBe("end_turn");
+          expect(dropped).toBe(true);
+          expect(requests).toHaveLength(2);
+          expect(requests[1]).toBe(requests[0]);
+        } else {
+          await expect(prompt).rejects.toThrow();
+          expect(requests).toHaveLength(1);
+        }
+        const stored = await service.submissions("local", Number(sessionId) as ConversationId, requests.length);
+        expect(stored).toHaveLength(loss ? 1 : 0);
+        if (loss) expect(stored[0]?.status).toBe("done");
+      } finally {
+        const errors: unknown[] = [];
+        for (const close of [() => { connection.close(); bridge.close(); return Promise.all([connection.closed, bridge.closed]); }, () => host.close(), () => transport.close(), () => server.close(), () => service.close(context)]) {
+          try { await close(); } catch (error) { errors.push(error); }
+        }
+        if (errors.length > 0) throw new AggregateError(errors, "test resources failed to close");
+      }
+    });
+  }
 });

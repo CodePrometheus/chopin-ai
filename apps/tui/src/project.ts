@@ -5,6 +5,7 @@ import { chmod, mkdir, open, readdir, readFile, realpath, rm, stat } from "node:
 import { basename, dirname, extname, join } from "node:path";
 import { setTimeout as sleep } from "node:timers/promises";
 import { fileURLToPath } from "node:url";
+import { compare as compareVersions, valid as validVersion } from "semver";
 import { BACKGROUND_CONTEXT } from "@earendil-works/chord/context";
 import { InMemoryCredentialStore, type CredentialStore } from "@earendil-works/pi-ai";
 import { localDaemon } from "@earendil-works/pi-env";
@@ -436,13 +437,20 @@ function buildId(): Promise<string> {
 
 /** Whether build `a` is later than `b`: by its packages' versions, then by when its code last changed. */
 export function laterBuild(a: string, b: string): boolean {
-  const order = (build: string) => {
-    const [versions = "", changed = "0"] = build.split(":");
-    return [...versions.split(",").flatMap((version) => (version.split("-")[0] ?? "").split(".").map(Number)), Number(changed)];
+  const parse = (build: string) => {
+    const [versions = "", changed, ...extra] = build.split(":");
+    const packages = versions.split(",");
+    const time = Number(changed);
+    if (extra.length > 0 || !Number.isFinite(time) || packages.some((version) => validVersion(version) === null)) return undefined;
+    return { packages, time };
   };
-  const [left, right] = [order(a), order(b)];
-  const at = left.findIndex((part, index) => part !== right[index]);
-  return at !== -1 && (left[at] ?? 0) > (right[at] ?? 0);
+  const [left, right] = [parse(a), parse(b)];
+  if (left === undefined || right === undefined || left.packages.length !== right.packages.length) return false;
+  for (const [index, version] of left.packages.entries()) {
+    const order = compareVersions(version, right.packages[index]!);
+    if (order !== 0) return order > 0;
+  }
+  return left.time > right.time;
 }
 
 /** A daemon being started, and why it could not be, once that is known. */

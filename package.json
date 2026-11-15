@@ -10,16 +10,18 @@
   "packageManager": "pnpm@12.4.1",
   "type": "module",
   "engines": {
-    "node": ">=24.8.0"
+    "node": ">=26.1.0"
   },
   "scripts": {
     "build": "tsc -b",
     "typecheck": "tsc -b && tsc -p tsconfig.test.json",
-    "test": "vitest run"
+    "test": "vitest run",
+    "protocol:fixtures": "node scripts/protocol-contracts.mjs --check && node packages/harness-pi/tests/fixtures/protocol-deltas.mjs --check",
+    "protocol:test": "pnpm build && pnpm protocol:fixtures && cargo test --locked -p chopin-protocol"
   },
   "devDependencies": {
-    "@types/node": "^24.13.4",
+    "@types/node": "^26.6.6",
     "typescript": "^7.0.2",
-    "vitest": "^5.0.0"
+    "vitest": "^5.1.0"
   }
 }

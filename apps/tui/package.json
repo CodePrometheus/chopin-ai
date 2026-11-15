@@ -1,6 +1,6 @@
 {
   "name": "chopin-ai",
-  "version": "0.6.0",
+  "version": "0.7.0-rc1",
   "description": "The chopin command: terminal client, ACP and the project service",
   "license": "Apache-2.0",
   "repository": {
@@ -10,7 +10,7 @@
   },
   "type": "module",
   "engines": {
-    "node": ">=24.8.0"
+    "node": ">=26.1.0"
   },
   "bin": {
     "chopin": "./dist/bin.js"
@@ -19,17 +19,21 @@
     "dist"
   ],
   "dependencies": {
-    "@agentclientprotocol/sdk": "^1.9.0",
-    "@chopin-ai/core": "workspace:^",
-    "@chopin-ai/harness-pi": "workspace:^",
-    "@chopin-ai/workspace": "workspace:^",
-    "@earendil-works/chord": "1.4.0",
-    "@earendil-works/pi-ai": "1.4.0",
-    "@earendil-works/pi-coding-agent": "1.4.0",
-    "@earendil-works/pi-durable": "1.4.0",
-    "@earendil-works/pi-env": "1.4.0",
-    "@earendil-works/pi-tui": "1.4.0",
-    "jose": "^6.2.12",
-    "undici": "^8.11.2"
+    "@agentclientprotocol/sdk": "^2.7.0",
+    "@chopin-ai/core": "workspace:*",
+    "@chopin-ai/harness-pi": "workspace:*",
+    "@chopin-ai/workspace": "workspace:*",
+    "@earendil-works/chord": "1.5.2",
+    "@earendil-works/pi-ai": "1.5.2",
+    "@earendil-works/pi-coding-agent": "1.5.2",
+    "@earendil-works/pi-durable": "1.5.2",
+    "@earendil-works/pi-env": "1.5.2",
+    "@earendil-works/pi-tui": "1.5.2",
+    "jose": "^6.2.17",
+    "semver": "7.8.6",
+    "undici": "^8.12.4"
+  },
+  "devDependencies": {
+    "@types/semver": "7.8.0"
   }
 }

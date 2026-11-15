@@ -1,3 +1,6 @@
+import { ChordError, type RefState } from "@earendil-works/chord";
+import type { NativeWatchable, Watchable } from "@earendil-works/chord/watch";
+import { subscribe } from "../src/protocol.js";
 import { once } from "node:events";
 import type { IncomingMessage } from "node:http";
 import { createServer, type AddressInfo } from "node:net";
@@ -32,27 +35,19 @@ const nowhere: WorkspaceProvider = {
 const request = (headers: Record<string, string>, url = "/") => ({ headers, url }) as unknown as IncomingMessage;
 
 /** Resolves once `ref` has `status`, now or later. */
-function reaches(ref: { status: string; onStatus(listener: (status: string) => void): () => void }, status: string): Promise<void> {
-  return new Promise((resolve) => {
-    if (ref.status === status) return resolve();
-    const stop = ref.onStatus((now) => {
-      if (now !== status) return;
-      stop();
-      resolve();
-    });
-  });
-}
+async function reaches(ref: { state: NativeWatchable<RefState> }, kind: RefState["kind"]): Promise<void> {
+    await until(ref.state, (state) => state.kind === kind);
+  }
 
-function until<T, U extends T>(subscribe: (listener: (value: T) => void) => () => void, test: (value: T) => value is U): Promise<U>;
-function until<T>(subscribe: (listener: (value: T) => void) => () => void, test: (value: T) => boolean): Promise<T>;
-function until<T>(subscribe: (listener: (value: T) => void) => () => void, test: (value: T) => boolean): Promise<T> {
-  return new Promise((resolve) => {
-    const stop = subscribe((value) => {
-      if (test(value)) {
-        queueMicrotask(() => stop());
-        resolve(value);
-      }
-    });
+function until<T, U extends T>(source: Watchable<T> | NativeWatchable<T>, test: (value: T) => value is U): Promise<U>;
+function until<T>(source: Watchable<T> | NativeWatchable<T>, test: (value: T) => boolean): Promise<T>;
+function until<T>(source: Watchable<T> | NativeWatchable<T>, test: (value: T) => boolean): Promise<T> {
+  return new Promise((resolve, reject) => {
+    const current = source.value;
+    if (test(current)) { resolve(current); return; }
+    const stop = subscribe(source, (value) => {
+      if (test(value)) { stop(); resolve(value); }
+    }, (error) => { stop(); reject(error); });
   });
 }
 
@@ -80,10 +75,10 @@ describe("client protocol", () => {
 
       const conversation = await client.get(Conversation, { conversation: id });
       await client.root((ctx) => conversation.submit({ text: "Hi." }, ctx));
-      await until(conversation.view.subscribe.bind(conversation.view), (view) => JSON.stringify(view).includes("Hello from the agent."));
+      await until(conversation.view, (view) => JSON.stringify(view).includes("Hello from the agent."));
 
       await client.root((ctx) => conversation.setMode({ mode: "read" }, ctx));
-      await until(conversation.mode.subscribe.bind(conversation.mode), (mode) => mode === "read");
+      await until(conversation.mode, (mode) => mode === "read");
 
       // A fork made through one list reaches every list the owner holds.
       const other = connect(`ws://127.0.0.1:${server.port}/?token=secret`);
@@ -91,7 +86,7 @@ describe("client protocol", () => {
         const theirs = await other.get(Conversations, {});
         const entry = (conversation.view.value as { entries: { id: number }[] }).entries.at(-1)?.id ?? 0;
         const fork = await client.root((ctx) => conversations.fork({ conversation: id, at: entry }, ctx));
-        await until(theirs.ids.subscribe.bind(theirs.ids), (ids) => ids.includes(fork));
+        await until(theirs.ids, (ids) => ids.includes(fork));
       } finally {
         await other.close();
       }
@@ -110,7 +105,7 @@ describe("client protocol", () => {
       const [first, second] = await Promise.all([list.get(), list.get()]);
       expect(first).toBe(second);
       list.release();
-      expect(first.status).toBe("released");
+      expect(first.state.value.kind).toBe("ended");
       const late = heldList(client);
       const arriving = late.get();
       late.release();
@@ -121,7 +116,7 @@ describe("client protocol", () => {
       const abandoned = patient.get(quitting.signal);
       quitting.abort(new Error("gave up"));
       await expect(abandoned).rejects.toThrow("gave up");
-      expect((await patient.get()).status).toBe("live");
+      expect((await patient.get()).state.value.kind).toBe("live");
       patient.release();
     } finally {
       await client.close();
@@ -137,15 +132,16 @@ describe("client protocol", () => {
     try {
       const conversations = await client.get(Conversations, {});
       const statuses: string[] = [];
-      conversations.onStatus((status) => statuses.push(status));
+      const stopStatus = subscribe(conversations.state, (state) => statuses.push(state.kind), (error) => { throw error; });
       await first.close();
       await reaches(conversations, "loading");
       const second = await listen(service, { authenticate: launchToken("secret"), port: first.port });
       try {
         await reaches(conversations, "live");
         expect(await client.root((ctx) => conversations.create(ctx))).toBeTypeOf("number");
-        expect(statuses).toEqual(["loading", "live"]);
+        expect(statuses).toEqual(["live", "loading", "live"]);
       } finally {
+        stopStatus();
         await second.close();
       }
     } finally {
@@ -194,7 +190,7 @@ describe("client protocol", () => {
       const id = await first.root((ctx) => conversations.create(ctx));
       const conversation = await first.get(Conversation, { conversation: id });
       const sent = await first.root((ctx) => conversation.submit({ text: "Hi." }, ctx));
-      await until(conversation.submissions.subscribe.bind(conversation.submissions), (all) => all[String(sent)]?.status === "done");
+      await until(conversation.submissions, (all) => all[String(sent)]?.status === "done");
       await first.close();
 
       const read = service.submissions.bind(service);
@@ -207,8 +203,8 @@ describe("client protocol", () => {
         return read(...args);
       };
       const again = await later.get(Conversation, { conversation: id });
-      expect(again.status).toBe("live");
-      await until(again.submissions.subscribe.bind(again.submissions), (all) => all[String(sent)]?.status === "done");
+      expect(again.state.value.kind).toBe("live");
+      await until(again.submissions, (all) => all[String(sent)]?.status === "done");
     } finally {
       await later.close();
       await server.close();
@@ -259,7 +255,7 @@ describe("client protocol", () => {
       const conversations = await client.get(Conversations, {});
       const conversation = await client.get(Conversation, { conversation: await client.root((ctx) => conversations.create(ctx)) });
       const id = await client.root((ctx) => conversation.submit({ text: "Talk." }, ctx));
-      await until(conversation.view.subscribe.bind(conversation.view), (view) => (view as { docs: Record<string, { run?: unknown }> }).docs["pi.live"]?.run !== undefined);
+      await until(conversation.view, (view) => (view as { docs: Record<string, { run?: unknown }> }).docs["pi.live"]?.run !== undefined);
       await server.close();
       await service.close(context);
 
@@ -267,7 +263,7 @@ describe("client protocol", () => {
       const again = new AgentService(options);
       restarted = { service: again, server: await listen(again, { authenticate: launchToken("secret"), port: server.port }) };
       // Nothing asks the new service for this owner until the client is back; its first open resumes the run.
-      const ended = await until(conversation.submissions.subscribe.bind(conversation.submissions), (all) => all[String(id)]?.status === "done");
+      const ended = await until(conversation.submissions, (all) => all[String(id)]?.status === "done");
       expect(ended[String(id)]).toEqual({ status: "done" });
     } finally {
       await client.close();
@@ -303,7 +299,7 @@ describe("client protocol", () => {
       const modelOf = (view: unknown) => (view as { docs: Record<string, { model?: { modelId?: string } } | undefined> }).docs["pi.agent"]?.model?.modelId;
       expect(modelOf(conversation.view.value)).toBe("alpha");
       await client.root((ctx) => conversation.setModel({ provider: faux.provider.id, modelId: "beta" }, ctx));
-      await until(conversation.view.subscribe.bind(conversation.view), (view) => modelOf(view) === "beta");
+      await until(conversation.view, (view) => modelOf(view) === "beta");
       await expect(client.root((ctx) => conversation.setModel({ provider: faux.provider.id, modelId: "gamma" }, ctx))).rejects.toThrow("unusable_model");
     } finally {
       await client.close();
@@ -333,7 +329,7 @@ describe("client protocol", () => {
       const answered = await open();
       const broken = await open();
       const settled = ({ ref }: typeof answered) =>
-        until(ref.view.subscribe.bind(ref.view), (view) => JSON.stringify(view).includes("\"stopReason\"") && !JSON.stringify(view).includes("\"run\""));
+        until(ref.view, (view) => JSON.stringify(view).includes("\"stopReason\"") && !JSON.stringify(view).includes("\"run\""));
       await client.root((ctx) => answered.ref.submit({ text: "Do it.", request: "a" }, ctx));
       await settled(answered);
       await client.root((ctx) => broken.ref.submit({ text: "Try.", request: "b" }, ctx));
@@ -377,7 +373,7 @@ describe("client protocol", () => {
     });
     const server = await listen(service, { authenticate: launchToken("secret") });
     const client = connect(`ws://127.0.0.1:${server.port}/?token=secret`);
-    const answered = (count: number) => until(conversation.view.subscribe.bind(conversation.view), (view) => JSON.stringify(view).split("Noted.").length > count);
+    const answered = (count: number) => until(conversation.view, (view) => JSON.stringify(view).split("Noted.").length > count);
     let conversation: Awaited<ReturnType<typeof client.get<typeof Conversation>>>;
     try {
       const conversations = await client.get(Conversations, {});
@@ -419,18 +415,18 @@ describe("client protocol", () => {
     try {
       const conversations = await client.get(Conversations, {});
       const conversation = await client.get(Conversation, { conversation: await client.root((ctx) => conversations.create(ctx)) });
-      const answered = (n: number) => until(conversation.view.subscribe.bind(conversation.view), (view) => JSON.stringify(view).includes(`Answer ${n}.`));
-      await expect(client.root((ctx) => conversation.retry({}, ctx))).rejects.toThrow("nothing_to_retry");
+      const answered = (n: number) => until(conversation.view, (view) => JSON.stringify(view).includes(`Answer ${n}.`));
+      await expect(client.root((ctx) => conversation.resubmit({}, ctx))).rejects.toThrow("nothing_to_retry");
       await client.root((ctx) => conversation.submit({ text: "Question." }, ctx));
       await answered(1);
 
-      await client.root((ctx) => conversation.retry({}, ctx));
+      await client.root((ctx) => conversation.resubmit({}, ctx));
       await answered(2);
       expect(seen[1]).toEqual(["Question."]);
-      await client.root((ctx) => conversation.retry({ text: "Better question." }, ctx));
+      await client.root((ctx) => conversation.resubmit({ text: "Better question." }, ctx));
       await answered(3);
       expect(seen[2]).toEqual(["Better question."]);
-      await expect(client.root((ctx) => conversation.retry({ text: "" }, ctx))).rejects.toThrow("empty_message");
+      await expect(client.root((ctx) => conversation.resubmit({ text: "" }, ctx))).rejects.toThrow("empty_message");
 
       await client.root((ctx) => conversation.reset({}, ctx));
       await client.root((ctx) => conversation.submit({ text: "Fresh." }, ctx));
@@ -460,7 +456,7 @@ describe("client protocol", () => {
       const conversations = await client.get(Conversations, {});
       const conversation = await client.get(Conversation, { conversation: await client.root((ctx) => conversations.create(ctx)) });
       await client.root((ctx) => conversation.submit({ text: "What is this?", images: [{ data: pixel, mimeType: "image/png" }] }, ctx));
-      const view = await until(conversation.view.subscribe.bind(conversation.view), (value) => JSON.stringify(value).includes("A single pixel."));
+      const view = await until(conversation.view, (value) => JSON.stringify(value).includes("A single pixel."));
       expect(JSON.stringify(view)).toContain(pixel);
       // An image alone is a message too; nothing at all is not.
       await client.root((ctx) => conversation.submit({ text: "", images: [{ data: pixel, mimeType: "image/png" }] }, ctx));
@@ -492,7 +488,7 @@ describe("client protocol", () => {
       expect(keys.providers.value).toEqual([]);
       expect((await choices()).models).toEqual([]);
       await client.root((ctx) => keys.setKey({ provider: "anthropic", key: "sk-test-key" }, ctx));
-      await until(keys.providers.subscribe.bind(keys.providers), (providers) => providers.length === 1);
+      await until(keys.providers, (providers) => providers.length === 1);
       expect(keys.providers.value).toEqual([{ provider: "anthropic", type: "api_key" }]);
       expect((await models.getAuth("anthropic"))?.auth).toMatchObject({ apiKey: "sk-test-key" });
       // The provider's models are the owner's to pick from once its key is set.
@@ -502,7 +498,7 @@ describe("client protocol", () => {
       await expect(client.root((ctx) => keys.setKey({ provider: "nowhere", key: "k" }, ctx))).rejects.toThrow("credential_refused");
 
       await client.root((ctx) => keys.remove({ provider: "anthropic" }, ctx));
-      await until(keys.providers.subscribe.bind(keys.providers), (providers) => providers.length === 0);
+      await until(keys.providers, (providers) => providers.length === 0);
       expect(await models.getAuth("anthropic")).toBeUndefined();
     } finally {
       await client.close();
@@ -564,7 +560,7 @@ describe("client protocol", () => {
     try {
       const keys = await client.get(Credentials, {});
       const login = (test: (state: LoginState) => boolean) =>
-        until(keys.login.subscribe.bind(keys.login), (state): state is LoginState => state !== null && test(state));
+        until(keys.login, (state): state is LoginState => state !== null && test(state));
       const catalog = await client.root((ctx) => keys.catalog(ctx));
       expect(catalog.map(({ id, ways }) => [id, ways.map(({ type, subscription }) => `${type}:${subscription}`)])).toEqual([
         ["acme", ["oauth:true", "api_key:false"]],
@@ -687,8 +683,9 @@ describe("client protocol", () => {
     const looped = new Error("first");
     looped.cause = new Error("second", { cause: looped });
     expect(errorChain(looped)).toBe("first: second");
-    expect(endText({ status: "gone" })).toBe("gone");
-    expect(endText({ status: "gone", error: new Error("no conversation 7") })).toBe("no conversation 7");
+    expect(endText({ state: { value: { kind: "loading" } } })).toBe("loading");
+    const ended = new ChordError({ code: "gone", message: "no conversation 7" });
+    expect(endText({ state: { value: { kind: "ended", error: ended } } })).toBe(ended.message);
   });
 
   it("bundles for browsers, reaching no Node built-in", async () => {

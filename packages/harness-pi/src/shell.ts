@@ -1,5 +1,5 @@
 import { stripVTControlCharacters } from "node:util";
-import type { Context } from "@earendil-works/chord";
+import type { Context } from "@earendil-works/chord/context";
 import { OutputBuffer, Progress, utf8ByteLength } from "@earendil-works/chord/output";
 import type { UserMessage } from "@earendil-works/pi-ai";
 import { defineEntry, type EntryDraft } from "@earendil-works/pi-durable";

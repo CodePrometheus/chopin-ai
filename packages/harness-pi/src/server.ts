@@ -1,11 +1,16 @@
 import { once } from "node:events";
 import { createServer, type IncomingMessage } from "node:http";
 import type { AddressInfo } from "node:net";
-import { acceptWebSockets, createHost, forbidden, invalid, type Context, type Ctx, type Host } from "@earendil-works/chord";
+import { broken, createHost, defineFacet, forbidden, webSocketLink, type Ctx, type Host } from "@earendil-works/chord";
+import type { Context } from "@earendil-works/chord/context";
+import { nodeCompression } from "@earendil-works/chord/compression";
+import { projection } from "./projection.js";
+import { refusal, ServiceError } from "./service-error.js";
 import { BACKGROUND_CONTEXT, withAbortSignal } from "@earendil-works/chord/context";
 import type { AuthEvent, AuthPrompt, ModelThinkingLevel } from "@earendil-works/pi-ai";
 import { configure, InboxDoc, type ConversationId, type ConversationView, type ModelRef, type Submission, type SubmissionId, type UserInput } from "@earendil-works/pi-durable";
-import { Type } from "typebox";
+import { goalPage, historyPage } from "./history.js";
+import { GoalDoc, requireSnapshot } from "./goals/store.js";
 import { WebSocketServer } from "ws";
 import { credentialOf, type Authenticate } from "./auth.js";
 import { statusHandler } from "./http.js";
@@ -13,8 +18,8 @@ import { ClientContextDoc } from "./client-context.js";
 import { ListingDoc, ModeDoc, NameDoc } from "./mode.js";
 import { isRunning, userText } from "./acp.js";
 import {
-  Conversation, Conversations, CredentialSchema, Credentials, Environment, HOST, LoginSchema, Loop, Mcp, McpServerSchema, ModeSchema, REWIND_KIND, RunningSchema, SubmissionSchema, Vault,
-  errorChain, errorText, type Image, type LoginEvent, type LoginPrompt, type LoginState, type LoopControl, type Principal,
+  AgentHost, Conversation, Conversations, Credentials, Environment, Goal, Goals, Loop, Mcp, REWIND_KIND, Vault,
+  errorChain, errorText, type Image, type LoginEvent, type LoginPrompt, type LoginState, type LoopControl, type Principal, type Running,
 } from "./protocol.js";
 import { backoff } from "./backoff.js";
 import { AgentService } from "./service.js";
@@ -48,520 +53,615 @@ export class WrongKey extends Error {
  * Serves the client protocol for `source`, and `loop` if it has one; every object belongs to the owner that asked for
  * it. A sealed source serves the vault alone until it is unlocked.
  */
-export function createAgentHost(source: AgentService | Sealed, loop?: LoopControl): Host<Principal> {
+export async function createAgentHost(source: AgentService | Sealed, loop?: LoopControl): Promise<Host<Principal>> {
   const host = createHost<Principal>({
-    name: HOST,
-    self: { kind: "host" },
+    address: AgentHost({}),
+    principal: { kind: "host" },
+    compression: nodeCompression,
+    onError: (error) => console.error(`agent service: ${error.kind}`),
     principalKey: (principal) => (principal.kind === "owner" ? `owner:${principal.owner}` : "host"),
   });
   const sealed = source instanceof AgentService ? undefined : source;
   // Objects are made anew for each client that asks, so one asked for while locked is refused, and made once open.
   const current = (): AgentService => {
     const service = sealed === undefined ? source as AgentService : sealed.service;
-    if (service === undefined) throw invalid("locked", "the service is locked until a client unlocks it with its key");
+    if (service === undefined) throw refusal("locked", "the service is locked until a client unlocks it with its key");
     return service;
   };
   /** Tells every vault a client holds that the service is open. */
   const unlocked = new Set<() => void>();
 
-  host.serve(Vault, (_input, principal, self) => {
-    ownerOf(principal);
-    const locked = self.state("locked", Type.Boolean(), { init: () => sealed !== undefined && sealed.service === undefined });
-    self.resource("unlocked", {
-      version: 1,
-      open: () => {
-        const tell = () => void host.root((root) => locked.replace(root, false)).catch(() => {});
+  const facet = defineFacet<Principal>((provider) => {
+    provider.serve(Goals, (_input, principal) => {
+      const owner = ownerOf(principal); const service = current();
+      return { variant: "owner", members: {
+        execute: async (envelope, ctx) => service.executeGoal(owner, envelope, durable(ctx)),
+        request: async ({ requestId }, ctx) => (await (await service.goals(owner)).request(requestId, durable(ctx))) ?? null,
+        page: async ({ limit, cursor }, ctx) => goalPage(owner, await service.goals(owner), limit, cursor, durable(ctx)),
+        forConversation: async ({ conversation }, ctx) => (await (await service.goals(owner)).forConversation(conversation as ConversationId, durable(ctx))) ?? null,
+        wake: async (ctx) => (await service.goals(owner)).wake(durable(ctx)),
+        resume: async (ctx) => { await (await service.goals(owner)).resume(durable(ctx)); return null; },
+      } };
+    });
+    provider.serve(Goal, ({ goal }, principal, self) => {
+      const owner = ownerOf(principal); const service = current();
+      const opened = self.open(async () => {
+        await service.hold(owner);
+        try { const engine = await service.goals(owner); await engine.snapshot(goal, BACKGROUND_CONTEXT); return engine; }
+        catch (error) { service.release(owner); throw error instanceof ServiceError ? broken(error) : error; }
+      }, () => service.release(owner));
+      const state = self.follow((observer, ctx) => opened.value.store.harness.observeDoc(GoalDoc, goal, observer, ctx));
+      const snapshot = self.derive([state], () => requireSnapshot(state.value));
+      return { variant: "owner", members: { snapshot } };
+    });
+    provider.serve(Vault, (_input, principal, self) => {
+      ownerOf(principal);
+      const locked = projection(self, () => sealed !== undefined && sealed.service === undefined);
+      self.open(async () => {
+        const tell = () => void host.root(async (root) => locked.replace(root, false), BACKGROUND_CONTEXT).catch(() => { });
         unlocked.add(tell);
         return tell;
-      },
-      close: (tell) => void unlocked.delete(tell),
-    });
-    return {
-      variant: "owner",
-      locked,
-      unlock: async ({ key }) => {
-        if (sealed === undefined) throw invalid("not_sealed", "this service keeps nothing sealed, so it takes no key");
-        await sealed.unlock(Buffer.from(key, "base64url")).catch((error: unknown) => {
-          throw error instanceof WrongKey ? invalid("wrong_key", error.message) : invalid("unlock_failed", errorChain(error));
-        });
-        for (const tell of unlocked) tell();
-      },
-    };
-  });
+      }, (tell) => void unlocked.delete(tell));
+      return {
+        variant: "owner", members: {
+          locked: locked.view,
+          unlock: async ({ key }) => {
+            if (sealed === undefined) throw refusal("not_sealed", "this service keeps nothing sealed, so it takes no key");
+            await sealed.unlock(Buffer.from(key, "base64url")).catch((error: unknown) => {
+              throw error instanceof WrongKey ? refusal("wrong_key", error.message) : refusal("unlock_failed", errorChain(error));
+            });
+            for (const tell of unlocked) tell();
 
-  host.serve(Conversations, (_input, principal, self) => {
-    const owner = ownerOf(principal);
-    const service = current();
-    // A conversation made anywhere, such as by a task run, joins the list while it is held.
-    let unhear = () => {};
-    const harness = self.resource("harness", {
-      version: 1,
-      open: async () => {
+            return null;
+          }
+        }
+      };
+    });
+
+    provider.serve(Conversations, (_input, principal, self) => {
+      const owner = ownerOf(principal);
+      const service = current();
+      // A conversation made anywhere, such as by a task run, joins the list while it is held.
+      let unhear = () => { };
+      const harness = self.open(async () => {
         const held = await service.hold(owner);
         unhear = service.onConversation((maker, id) => {
-          if (maker === owner) void host.root((root) => add(root, id)).catch(() => {});
+          if (maker === owner) void host.root(async (root) => add(root, id), BACKGROUND_CONTEXT).catch(() => { });
         });
         return held;
-      },
-      close: () => {
+      }, () => {
         unhear();
         service.release(owner);
-      },
-    });
-    const ids = self.state("ids", Type.Array(Type.Number()), { init: () => service.conversations(owner) });
-    const add = (ctx: Ctx<Principal>, id: number) => ids.change(ctx, (draft) => {
-      if (!draft.includes(id)) draft.push(id);
-    });
-    return {
-      variant: "owner",
-      ids,
-      loaded: (ctx) => service.loaded(owner, durable(ctx)),
-      create: async (ctx) => {
-        const conversation = await service.newConversation(owner, durable(ctx));
-        add(ctx, conversation.id);
-        return conversation.id;
-      },
-      summaries: (ctx) => service.summaries(owner, durable(ctx)),
-      models: () => service.modelChoices(owner),
-      fork: async ({ conversation, at }, ctx) => {
-        const fork = await service.fork(owner, conversation, at, durable(ctx));
-        if (fork === undefined) throw invalid("unknown_conversation", `no conversation ${conversation}`);
-        add(ctx, fork);
-        return fork;
-      },
-    };
-  });
+      });
+      const ids = projection(self, () => service.conversations(owner));
+      const add = (ctx: Ctx<Principal>, id: number) => ids.change(ctx, (draft) => {
+        if (!draft.includes(id)) draft.push(id);
+      });
+      return {
+        variant: "owner", members: {
+          ids: ids.view,
 
-  host.serve(Conversation, ({ conversation: id }, principal, self) => {
-    const owner = ownerOf(principal);
-    const service = current();
-    const opened = self.resource("conversation", {
-      version: 1,
-      open: async () => {
+          loaded: (ctx) => service.loaded(owner, durable(ctx)),
+
+          create: async (ctx) => {
+            if (!await service.directConversation(owner)) throw refusal("goal_command_required", "submit a durable goal command");
+            const conversation = await service.newConversation(owner, durable(ctx));
+            add(ctx, conversation.id);
+            return conversation.id;
+          },
+
+          summaries: (ctx) => service.summaries(owner, durable(ctx)),
+
+          models: () => service.modelChoices(owner),
+
+          fork: async ({ conversation, at }, ctx) => {
+            if (!await service.directConversation(owner, conversation)) throw refusal("goal_command_required", "submit an explicit goal continuation");
+            const fork = await service.fork(owner, conversation, at, durable(ctx));
+            if (fork === undefined) throw refusal("unknown_conversation", `no conversation ${conversation}`);
+            add(ctx, fork);
+            return fork;
+          }
+        }
+      };
+    });
+
+    provider.serve(Conversation, ({ conversation: id }, principal, self) => {
+      const owner = ownerOf(principal);
+      const service = current();
+      const opened = self.open(async () => {
         const harness = await service.hold(owner);
         try {
           // Only a top-level conversation is the owner's to use; the harness's root and a task's own are not.
           const conversation = await service.isTopLevel(owner, id) ? await harness.conversation(id as ConversationId, BACKGROUND_CONTEXT) : undefined;
-          if (conversation === undefined) throw invalid("unknown_conversation", `no conversation ${id}`);
-          return { harness, conversation, view: await conversation.viewState(BACKGROUND_CONTEXT) };
+          if (conversation === undefined) throw broken(refusal("unknown_conversation", `no conversation ${id}`));
+          return { harness, conversation, direct: await service.directConversation(owner, id) };
         } catch (error) {
           service.release(owner);
           throw error;
         }
-      },
-      close: ({ view }) => {
+      }, () => {
         service.release(owner);
         // What was started for this object stops with it: retries, and waits for submissions to end.
         closed = true;
         clearTimeout(retry);
         closing.abort();
-        view.dispose();
-      },
-    });
-    let closed = false;
-    const closing = new AbortController();
-    const alive = withAbortSignal(closing.signal, BACKGROUND_CONTEXT);
-    let retry: ReturnType<typeof setTimeout> | undefined;
-    const view = self.state("view", Type.Unknown(), { init: () => opened.value.view.value });
-    const mode = self.state("mode", ModeSchema, {
-      init: async (ctx) => (await opened.value.harness.snapshot(ModeDoc, id as ConversationId, durable(ctx)))?.mode ?? "full",
-    });
-    const name = self.state("name", Type.String(), {
-      init: async (ctx) => (await opened.value.harness.snapshot(NameDoc, id as ConversationId, durable(ctx)))?.name ?? "",
-    });
-    // How the owner keeps it in the list; the list reads it on its next summaries.
-    const list = async (ctx: Ctx<Principal>, change: (listing: { pinned: boolean; archived: boolean; seen: number }) => void) => {
-      service.touch(owner);
-      await opened.value.conversation.commit(async (tx) => {
-        change(await tx.doc(ListingDoc, opened.value.conversation.id));
-      }, durable(ctx));
-    };
-    // How submissions ended is the store's to say: every one the harness has not settled, the latest few, and any
-    // a client still waits on, however old.
-    const read = async (running: readonly number[]) => {
-      const known: Record<string, Outcome> = {};
-      for (const id of running) known[String(id)] = lost("the store no longer has it");
-      for (const record of await service.submissions(owner, opened.value.conversation.id, RECENT_SUBMISSIONS, running)) {
-        known[String(record.id)] = outcomeOf(record);
-        if (known[String(record.id)]?.status === "pending") awaitEnd(record.id);
-      }
-      return known;
-    };
-    // Submissions end as entries arrive or a run's inputs change; tokens streaming in between change neither.
-    let progress = "";
-    const submissions = self.state("submissions", Type.Record(Type.String(), SubmissionSchema), {
-      // A store that cannot be read yet leaves the list empty for a retry to fill, rather than failing the object.
-      init: async () => {
-        progress = progressOf(opened.value.view.value as ConversationView);
+      });
+      let closed = false;
+      const direct = () => { if (!opened.value.direct) throw refusal("goal_command_required", "execution input and stop must use the original goal command"); };
+      const closing = new AbortController();
+      const alive = withAbortSignal(closing.signal, BACKGROUND_CONTEXT);
+      let retry: ReturnType<typeof setTimeout> | undefined;
+      const view = self.follow((observer, context) => opened.value.harness.observeConversation(opened.value.conversation.id, observer, context));
+      const mode = projection(self, async (ctx) => (await opened.value.harness.snapshot(ModeDoc, id as ConversationId, durable(ctx)))?.mode ?? "full");
+      const name = projection(self, async (ctx) => (await opened.value.harness.snapshot(NameDoc, id as ConversationId, durable(ctx)))?.name ?? "");
+      // How the owner keeps it in the list; the list reads it on its next summaries.
+      const list = async (ctx: Ctx<Principal>, change: (listing: { pinned: boolean; archived: boolean; seen: number }) => void) => {
+        service.touch(owner);
+        await opened.value.conversation.commit(async (tx) => {
+          change(await tx.doc(ListingDoc, opened.value.conversation.id));
+        }, durable(ctx));
+      };
+      // How submissions ended is the store's to say: every one the harness has not settled, the latest few, and any
+      // a client still waits on, however old.
+      const read = async (running: readonly number[]) => {
+        const known: Record<string, Outcome> = {};
+        for (const id of running) known[String(id)] = lost("the store no longer has it");
+        for (const record of await service.submissions(owner, opened.value.conversation.id, RECENT_SUBMISSIONS, running)) {
+          known[String(record.id)] = outcomeOf(record);
+          if (known[String(record.id)]?.status === "pending") awaitEnd(record.id);
+        }
+        return known;
+      };
+      // Submissions end as entries arrive or a run's inputs change; tokens streaming in between change neither.
+      let progress = "";
+      const submissions = projection(self, async () => {
         return read([]).catch((): Record<string, Outcome> => {
           retryRead();
           return {};
         });
-      },
-    });
-    const unsettled = () => Object.keys(submissions.value).filter((id) => submissions.value[id]?.status === "pending").map(Number);
-    let reading = false;
-    let stale = false;
-    const retries = backoff(1_000, 30_000);
-    const reread = (): void => {
-      if (closed) return;
-      if (reading) return void (stale = true);
-      reading = true;
-      void (async () => {
-        do {
-          stale = false;
-          const known = await read(unsettled());
-          await host.root((root) => submissions.change(root, (draft) => merge(draft, known)));
-        } while (stale);
+      });
+      const unsettled = () => Object.keys(submissions.value).filter((id) => submissions.value[id]?.status === "pending").map(Number);
+      let reading = false;
+      let stale = false;
+      const retries = backoff(1_000, 30_000);
+      const reread = (): void => {
+        if (closed) return;
+        if (reading) return void (stale = true);
+        reading = true;
+        void (async () => {
+          do {
+            stale = false;
+            const known = await read(unsettled());
+            await host.root(async (root) => submissions.change(root, (draft) => merge(draft, known)), BACKGROUND_CONTEXT);
+          } while (stale);
+          clearTimeout(retry);
+          retries.reset();
+        })().catch(retryRead).finally(() => void (reading = false));
+      };
+      // A store that cannot be read is tried again, waiting longer each time, for as long as anyone holds this object.
+      function retryRead(): void {
+        if (closed) return;
         clearTimeout(retry);
-        retries.reset();
-      })().catch(retryRead).finally(() => void (reading = false));
-    };
-    // A store that cannot be read is tried again, waiting longer each time, for as long as anyone holds this object.
-    function retryRead(): void {
-      if (closed) return;
-      clearTimeout(retry);
-      retry = setTimeout(reread, retries.next());
-      retry.unref();
-    }
-    self.on("view", opened, ({ view: source }) => source, (value, ctx) => {
-      view.replace(ctx, value);
-      const now = progressOf(value as ConversationView);
-      if (now === progress) return;
-      progress = now;
-      reread();
-    });
-    // One command of the user's runs at a time, until it ends, esc stops it, or this object closes.
-    const running = self.state("running", RunningSchema, { init: () => null });
-    let stopCommand: AbortController | undefined;
-    // Each unsettled submission is waited on once, so its end is read from the store however it comes about, with
-    // or without a new entry; however the wait ends, the store says how it did.
-    const awaited = new Set<number>();
-    function awaitEnd(id: SubmissionId | number, submission?: Submission): void {
-      if (closed || awaited.has(Number(id))) return;
-      awaited.add(Number(id));
-      void Promise.resolve(submission ?? opened.value.harness.submission(id as SubmissionId, alive))
-        .then((found) => found?.wait(alive))
-        // Settled or failed, the wait is over; a read that still finds the submission running starts another.
-        .finally(() => awaited.delete(Number(id)))
-        .then(reread, reread);
-    }
-    // A message taken in, as `submit` and `requeue` both put one, followed to its end like every submission.
-    const admit = async (content: UserInput, steer: boolean, request: string | undefined, ctx: Ctx<Principal>) => {
-      const submission = await opened.value.conversation.submit({
-        type: "input",
-        content,
-        ...(steer && { whenBusy: "steer" as const }),
-        ...(request !== undefined && { requestId: request }),
-      }, durable(ctx));
-      submissions.change(ctx, (draft) => void (draft[String(submission.id)] ??= { status: "pending" }));
-      awaitEnd(submission.id, submission);
-      reread();
-      return submission.id;
-    };
-    return {
-      variant: "owner",
-      view,
-      mode,
-      name,
-      submissions,
-      running,
-      submit: async ({ text, images = [], steer, request }, ctx) => {
-        service.touch(owner);
-        return admit(messageContent(text, images), steer === true, request, ctx);
-      },
-      retry: async ({ text, images = [] }, ctx) => {
-        service.touch(owner);
-        const { conversation } = opened.value;
-        if (isRunning(opened.value.view.value as ConversationView)) throw invalid("busy", "the agent is still at work; stop it first");
-        const { entries } = await conversation.context(durable(ctx));
-        const at = entries.findLastIndex((entry) => entry.kind === "pi.user");
-        const asked = entries[at]?.model?.find((message) => message.role === "user");
-        if (asked?.role !== "user") throw invalid("nothing_to_retry", "no message has been sent yet");
-        const content = text === undefined && images.length === 0 ? asked.content : messageContent(text ?? "", images);
-        await conversation.submit({
-          type: "write",
-          entry: { kind: REWIND_KIND, edits: entries.slice(at).map((entry) => ({ target: entry.id, action: "omit" as const })) },
-        }, durable(ctx));
-        return admit(content, false, undefined, ctx);
-      },
-      reset: async ({ handoff }, ctx) => {
-        service.touch(owner);
-        await opened.value.conversation.reset(handoff, durable(ctx));
-      },
-      requeue: async ({ queue }, ctx) => {
-        service.touch(owner);
-        const { harness, conversation } = opened.value;
-        const queued = ((await harness.snapshot(InboxDoc, conversation.id, durable(ctx)))?.items ?? []).filter((item) => item.mode !== "write");
-        const byId = new Map(queued.map((item) => [Number(item.id), item]));
-        if (new Set(queue.map(({ id }) => id)).size !== queue.length) throw invalid("listed_twice", "the new queue lists each message once");
-        // One no longer queued, as the agent took it up since the client looked, stays sent and is passed over.
-        const wanted = queue.flatMap(({ id, text, steer }) => {
-          const item = byId.get(id);
-          if (item === undefined) return [];
-          const content = item.content as UserInput;
-          return [{ item, content: text === undefined ? content : retext(content, text), steer: steer ?? item.mode === "steer" }];
-        });
-        // What comes before the first change stays queued as it is; from there on, what can still be taken back is, and
-        // is put again as wanted. One the agent took up meanwhile stays sent.
-        let from = 0;
-        while (from < queued.length && wanted[from]?.item === queued[from] && wanted[from]?.content === queued[from]?.content
-          && wanted[from]?.steer === (queued[from]?.mode === "steer")) from++;
-        const taken = new Set<unknown>();
-        for (const item of queued.slice(from)) {
-          if ((await harness.abortSubmission(item.id, durable(ctx), conversation.id).catch(() => undefined)) === "aborted") taken.add(item);
-        }
-        for (const { item, content, steer } of wanted.slice(from)) if (taken.has(item)) await admit(content, steer, undefined, ctx);
-      },
-      abort: async (_args, ctx) => {
-        service.touch(owner);
-        await opened.value.conversation.abort(durable(ctx));
-      },
-      stopCommand: async () => {
-        service.touch(owner);
-        stopCommand?.abort();
-      },
-      transcript: async (_args, ctx) => service.transcript(owner, opened.value.conversation, durable(ctx)),
-      shell: async ({ command, excluded = false }, ctx) => {
-        service.touch(owner);
-        if (stopCommand !== undefined) throw invalid("command_running", "a command is already running; esc stops it");
-        const stop = (stopCommand = new AbortController());
-        const shown = { command, output: "", excluded };
-        running.replace(ctx, shown);
-        try {
-          const run = await service.shell(owner, command, (output) => host.root((root) => running.replace(root, { ...shown, output })),
-            withAbortSignal(AbortSignal.any([stop.signal, closing.signal]), BACKGROUND_CONTEXT));
-          await opened.value.conversation.submit({ type: "write", entry: shellEntry({ command, excluded, ...run }) }, BACKGROUND_CONTEXT);
-        } finally {
-          stopCommand = undefined;
-          await host.root((root) => running.replace(root, null)).catch(() => {});
-        }
-      },
-      withdraw: async (_args, ctx) => {
-        service.touch(owner);
-        const { harness, conversation } = opened.value;
-        const inbox = await harness.snapshot(InboxDoc, conversation.id, durable(ctx));
-        const texts: string[] = [];
-        for (const item of inbox?.items ?? []) {
-          if (item.mode === "write") continue;
-          // One the agent took up meanwhile is no longer queued, and stays sent; one that cannot be withdrawn stays
-          // queued, so what was taken back is still given back.
-          const withdrawn = await harness.abortSubmission(item.id, durable(ctx), conversation.id).catch(() => undefined);
-          if (withdrawn === "aborted") texts.push(userText(item.content as UserInput));
-        }
+        retry = setTimeout(reread, retries.next());
+        retry.unref();
+      }
+      self.on(view, ({ value }) => {
+        const now = progressOf(value as ConversationView);
+        if (now === progress) return;
+        progress = now;
         reread();
-        return texts;
-      },
-      setModel: async ({ provider, modelId }, ctx) => {
-        service.touch(owner);
-        const problem = await service.modelProblem(owner, { provider, modelId });
-        if (problem !== undefined) throw invalid("unusable_model", problem);
-        await opened.value.conversation.commit((tx) => configure(tx, opened.value.conversation.id, { model: { provider, modelId } }), durable(ctx));
-      },
-      setName: async ({ name: next }, ctx) => {
-        service.touch(owner);
-        await opened.value.conversation.commit(async (tx) => {
-          (await tx.doc(NameDoc, opened.value.conversation.id)).name = next;
+      });
+      // One command of the user's runs at a time, until it ends, esc stops it, or this object closes.
+      const running = projection<Running>(self, () => null);
+      let stopCommand: AbortController | undefined;
+      // Each unsettled submission is waited on once, so its end is read from the store however it comes about, with
+      // or without a new entry; however the wait ends, the store says how it did.
+      const awaited = new Set<number>();
+      function awaitEnd(id: SubmissionId | number, submission?: Submission): void {
+        if (closed || awaited.has(Number(id))) return;
+        awaited.add(Number(id));
+        void Promise.resolve(submission ?? opened.value.harness.submission(id as SubmissionId, alive))
+          .then((found) => found?.wait(alive))
+          // Settled or failed, the wait is over; a read that still finds the submission running starts another.
+          .finally(() => awaited.delete(Number(id)))
+          .then(reread, reread);
+      }
+      // A message taken in, as `submit` and `requeue` both put one, followed to its end like every submission.
+      const admit = async (content: UserInput, steer: boolean, request: string | undefined, ctx: Ctx<Principal>) => {
+        direct();
+        const submission = await opened.value.conversation.submit({
+          type: "input",
+          content,
+          ...(steer && { whenBusy: "steer" as const }),
+          ...(request !== undefined && { requestId: request }),
         }, durable(ctx));
-        name.replace(ctx, next);
-      },
-      setPinned: async ({ pinned }, ctx) => {
-        await list(ctx, (listing) => {
-          listing.pinned = pinned;
-        });
-      },
-      setArchived: async ({ archived }, ctx) => {
-        await list(ctx, (listing) => {
-          listing.archived = archived;
-        });
-      },
-      markSeen: async (_args, ctx) => {
-        await list(ctx, (listing) => {
-          listing.seen = Date.now();
-        });
-      },
-      setContext: async ({ text }, ctx) => {
-        await opened.value.conversation.commit(async (tx) => {
-          (await tx.doc(ClientContextDoc, opened.value.conversation.id)).text = text;
-        }, durable(ctx));
-      },
-      setThinking: async ({ level }, ctx) => {
-        service.touch(owner);
-        const model = (view.value as ConversationView).docs["pi.agent"]?.model as ModelRef | undefined;
-        const problem = model === undefined ? "the conversation has no model yet" : service.thinkingProblem(owner, model, level);
-        if (problem !== undefined) throw invalid("unusable_thinking", problem);
-        await opened.value.conversation.commit((tx) => configure(tx, opened.value.conversation.id, { thinkingLevel: level as ModelThinkingLevel }), durable(ctx));
-      },
-      compact: async ({ instructions }, ctx) => {
-        service.touch(owner);
-        await opened.value.conversation.compact(instructions, durable(ctx));
-      },
-      setMode: async ({ mode: next }, ctx) => {
-        service.touch(owner);
-        await opened.value.conversation.commit(async (tx) => {
-          (await tx.doc(ModeDoc, opened.value.conversation.id)).mode = next;
-        }, durable(ctx));
-        mode.replace(ctx, next);
-      },
-    };
-  });
+        submissions.change(ctx, (draft) => void (draft[String(submission.id)] ??= { status: "pending" }));
+        awaitEnd(submission.id, submission);
+        reread();
+        return submission.id;
+      };
+      return {
+        variant: "owner", members: {
+          view,
 
-  host.serve(Credentials, (_input, principal, self) => {
-    const owner = ownerOf(principal);
-    const service = current();
-    const listed = async () => (await service.credentials(owner)).map(({ providerId, type }) => ({ provider: providerId, type }));
-    const providers = self.state("providers", Type.Array(CredentialSchema), { init: listed });
-    const settled = async (problem: string | undefined, ctx: Ctx<Principal>) => {
-      if (problem !== undefined) throw invalid("credential_refused", problem);
-      providers.replace(ctx, await listed());
-    };
-    // A login outlives the call that starts it: it waits on the owner's answers and the provider, until it ends, a
-    // newer one replaces it, the bound passes or this object closes.
-    const login = self.state("login", Type.Union([LoginSchema, Type.Null()]), null);
-    let running: { id: number; stop: AbortController; asked: Map<number, (value: string) => void> } | undefined;
-    let ids = 0;
-    self.resource("logins", { version: 1, open: () => true, close: () => running?.stop.abort() });
-    return {
-      variant: "owner",
-      providers,
-      login,
-      setKey: async ({ provider, key }, ctx) => settled(await service.setKey(owner, provider, key), ctx),
-      remove: async ({ provider }, ctx) => settled(await service.removeKey(owner, provider), ctx),
-      catalog: async () => service.catalog(owner),
-      startLogin: async ({ provider, type }, ctx) => {
-        const problem = service.loginRefusal(owner, provider, type);
-        if (problem !== undefined) throw invalid("credential_refused", problem);
-        running?.stop.abort();
-        const mine = { id: ++ids, stop: new AbortController(), asked: new Map<number, (value: string) => void>() };
-        running = mine;
-        let shown: LoginState = { id: mine.id, provider, type, status: "running", events: [] };
-        login.replace(ctx, shown);
-        const show = (next: LoginState) => {
-          if (running !== mine) return;
-          shown = next;
-          void host.root((root) => login.replace(root, next)).catch(() => {});
-        };
-        let late = false;
-        const bound = setTimeout(() => {
-          late = true;
-          mine.stop.abort();
-        }, LOGIN_LIMIT_MS);
-        const end = (status: LoginState["status"], error?: string) => {
-          const { prompt: _asked, ...rest } = shown;
-          show({ ...rest, status, ...(error === undefined ? {} : { error }) });
-          if (running === mine) running = undefined;
-        };
-        void service.login(owner, provider, type, {
-          signal: mine.stop.signal,
-          notify: (event) => show({ ...shown, events: [...shown.events, loginEvent(event)].slice(-LOGIN_EVENTS) }),
-          prompt: (asking) => new Promise<string>((resolve, reject) => {
-            const id = ++ids;
-            const signals = [mine.stop.signal, ...(asking.signal === undefined ? [] : [asking.signal])];
-            const settle = () => {
-              mine.asked.delete(id);
-              for (const signal of signals) signal.removeEventListener("abort", cancel);
-              if (shown.prompt?.id !== id) return;
-              const { prompt: _done, ...rest } = shown;
-              show(rest);
-            };
-            const cancel = () => {
-              settle();
-              reject(new Error("Login cancelled"));
-            };
-            if (signals.some((signal) => signal.aborted)) return cancel();
-            for (const signal of signals) signal.addEventListener("abort", cancel, { once: true });
-            mine.asked.set(id, (value) => {
-              settle();
-              resolve(value);
+          mode: mode.view,
+
+          name: name.view,
+
+          submissions: submissions.view,
+
+          running: running.view,
+
+          submit: async ({ text, images = [], steer, request }, ctx) => {
+            service.touch(owner);
+            return admit(messageContent(text, images), steer === true, request, ctx);
+          },
+
+          resubmit: async ({ text, images = [] }, ctx) => {
+            direct();
+            service.touch(owner);
+            const { conversation } = opened.value;
+            if (isRunning(view.value as ConversationView)) throw refusal("busy", "the agent is still at work; stop it first");
+            const { entries } = await conversation.context(durable(ctx));
+            const at = entries.findLastIndex((entry) => entry.kind === "pi.user");
+            const asked = entries[at]?.model?.find((message) => message.role === "user");
+            if (asked?.role !== "user") throw refusal("nothing_to_retry", "no message has been sent yet");
+            const content = text === undefined && images.length === 0 ? asked.content : messageContent(text ?? "", images);
+            await conversation.submit({
+              type: "write",
+              entry: { kind: REWIND_KIND, edits: entries.slice(at).map((entry) => ({ target: entry.id, action: "omit" as const })) },
+            }, durable(ctx));
+            return admit(content, false, undefined, ctx);
+          },
+          reset: async ({ handoff }, ctx) => {
+            direct();
+            service.touch(owner);
+            await opened.value.conversation.reset(handoff, durable(ctx));
+
+            return null;
+          },
+          requeue: async ({ queue }, ctx) => {
+            direct();
+            service.touch(owner);
+            const { harness, conversation } = opened.value;
+            const queued = ((await harness.snapshot(InboxDoc, conversation.id, durable(ctx)))?.items ?? []).filter((item) => item.mode !== "write");
+            const byId = new Map(queued.map((item) => [Number(item.id), item]));
+            if (new Set(queue.map(({ id }) => id)).size !== queue.length) throw refusal("listed_twice", "the new queue lists each message once");
+            // One no longer queued, as the agent took it up since the client looked, stays sent and is passed over.
+            const wanted = queue.flatMap(({ id, text, steer }) => {
+              const item = byId.get(id);
+              if (item === undefined) return [];
+              const content = item.content as UserInput;
+              return [{ item, content: text === undefined ? content : retext(content, text), steer: steer ?? item.mode === "steer" }];
             });
-            show({ ...shown, prompt: loginPrompt(id, asking) });
-          }),
-        }).then(
-          async () => {
-            await host.root(async (root) => providers.replace(root, await listed())).catch(() => {});
-            end("done");
+            // What comes before the first change stays queued as it is; from there on, what can still be taken back is, and
+            // is put again as wanted. One the agent took up meanwhile stays sent.
+            let from = 0;
+            while (from < queued.length && wanted[from]?.item === queued[from] && wanted[from]?.content === queued[from]?.content
+              && wanted[from]?.steer === (queued[from]?.mode === "steer")) from++;
+            const taken = new Set<unknown>();
+            for (const item of queued.slice(from)) {
+              if ((await harness.abortSubmission(item.id, durable(ctx), conversation.id).catch(() => undefined)) === "aborted") taken.add(item);
+            }
+            for (const { item, content, steer } of wanted.slice(from)) if (taken.has(item)) await admit(content, steer, undefined, ctx);
+
+            return null;
           },
-          (error: unknown) => {
-            if (late) end("failed", `the login was not finished within ${LOGIN_LIMIT_MS / 60_000} minutes`);
-            else if (mine.stop.signal.aborted) end("cancelled");
-            else end("failed", errorText(error));
+          abort: async (_args, ctx) => {
+            direct();
+            service.touch(owner);
+            await opened.value.conversation.abort(durable(ctx));
+
+            return null;
           },
-        ).finally(() => clearTimeout(bound));
-        return mine.id;
-      },
-      answer: async ({ prompt, value }) => {
-        const reply = running?.asked.get(prompt);
-        if (reply === undefined) throw invalid("no_prompt", `the login asks nothing as ${prompt} now`);
-        reply(value);
-      },
-      cancelLogin: async ({ login: id }) => {
-        if (running?.id === id) running.stop.abort();
-      },
-    };
-  });
+          stopCommand: async () => {
+            direct();
+            service.touch(owner);
+            stopCommand?.abort();
 
-  host.serve(Loop, (_input, principal) => {
-    ownerOf(principal);
-    // The loop's records are the owner's too, kept where the service keeps the rest.
-    current();
-    const control = () => {
-      if (loop === undefined) throw invalid("no_loop", "this service runs no RSI loop");
-      return loop;
-    };
-    const done = (problem: string | undefined) => {
-      if (problem !== undefined) throw invalid("loop_refused", problem);
-    };
-    return {
-      variant: "owner",
-      standing: () => control().standing(),
-      changes: () => control().changes(),
-      undo: async ({ id }) => done(await control().undo(id)),
-      corrections: () => control().corrections(),
-      answer: async ({ key, learn }) => done(await control().answer(key, learn)),
-      held: () => control().held(),
-      decide: async ({ id, approve }) => done(await control().decide(id, approve)),
-      settings: () => control().settings(),
-      setSettings: (change) => control().setSettings(change),
-    };
-  });
+            return null;
+          },
 
-  host.serve(Mcp, (_input, principal, self) => {
-    const owner = ownerOf(principal);
-    const service = current();
-    const servers = self.state("servers", Type.Array(McpServerSchema), { init: () => service.mcpServers(owner) });
-    return {
-      variant: "owner",
-      servers,
-      set: async ({ name, url, headers = {} }, ctx) => {
-        const problem = await service.setMcpServer(owner, name, url, headers);
-        if (problem !== undefined) throw invalid("mcp_refused", problem);
-        servers.replace(ctx, await service.mcpServers(owner));
-      },
-      remove: async ({ name }, ctx) => {
-        await service.removeMcpServer(owner, name);
-        servers.replace(ctx, await service.mcpServers(owner));
-      },
-    };
-  });
+          transcript: async (_args, ctx) => service.transcript(owner, opened.value.conversation, durable(ctx)),
+          entries: async ({ limit, cursor, atOrBefore }, ctx) => {
+            return historyPage(owner, opened.value.conversation, limit, cursor, atOrBefore, durable(ctx));
+          },
+          shell: async ({ command, excluded = false }, ctx) => {
+            direct();
+            service.touch(owner);
+            if (stopCommand !== undefined) throw refusal("command_running", "a command is already running; esc stops it");
+            const stop = (stopCommand = new AbortController());
+            const shown = { command, output: "", excluded };
+            running.replace(ctx, shown);
+            try {
+              const run = await service.shell(owner, command, (output) => host.root(async (root) => running.replace(root, { ...shown, output }), BACKGROUND_CONTEXT),
+                withAbortSignal(AbortSignal.any([stop.signal, closing.signal]), BACKGROUND_CONTEXT));
+              await opened.value.conversation.submit({ type: "write", entry: shellEntry({ command, excluded, ...run }) }, BACKGROUND_CONTEXT);
+            } finally {
+              stopCommand = undefined;
+              await host.root(async (root) => running.replace(root, null), BACKGROUND_CONTEXT).catch(() => { });
+            }
 
-  host.serve(Environment, (_input, principal, self) => {
-    const owner = ownerOf(principal);
-    const service = current();
-    const names = self.state("names", Type.Array(Type.String()), { init: () => service.variableNames(owner) });
-    return {
-      variant: "owner",
-      names,
-      set: async ({ name, value }, ctx) => {
-        service.setVariable(owner, name, value);
-        names.replace(ctx, service.variableNames(owner));
-      },
-      remove: async ({ name }, ctx) => {
-        service.removeVariable(owner, name);
-        names.replace(ctx, service.variableNames(owner));
-      },
-    };
-  });
+            return null;
+          },
 
+          withdraw: async (_args, ctx) => {
+            direct();
+            service.touch(owner);
+            const { harness, conversation } = opened.value;
+            const inbox = await harness.snapshot(InboxDoc, conversation.id, durable(ctx));
+            const texts: string[] = [];
+            for (const item of inbox?.items ?? []) {
+              if (item.mode === "write") continue;
+              // One the agent took up meanwhile is no longer queued, and stays sent; one that cannot be withdrawn stays
+              // queued, so what was taken back is still given back.
+              const withdrawn = await harness.abortSubmission(item.id, durable(ctx), conversation.id).catch(() => undefined);
+              if (withdrawn === "aborted") texts.push(userText(item.content as UserInput));
+            }
+            reread();
+            return texts;
+          },
+          setModel: async ({ provider, modelId }, ctx) => {
+            service.touch(owner);
+            const problem = await service.modelProblem(owner, { provider, modelId });
+            if (problem !== undefined) throw refusal("unusable_model", problem);
+            await opened.value.conversation.commit((tx) => configure(tx, opened.value.conversation.id, { model: { provider, modelId } }), durable(ctx));
+
+            return null;
+          },
+          setName: async ({ name: next }, ctx) => {
+            service.touch(owner);
+            await opened.value.conversation.commit(async (tx) => {
+              (await tx.doc(NameDoc, opened.value.conversation.id)).name = next;
+            }, durable(ctx));
+            name.replace(ctx, next);
+
+            return null;
+          },
+          setPinned: async ({ pinned }, ctx) => {
+            await list(ctx, (listing) => {
+              listing.pinned = pinned;
+            });
+
+            return null;
+          },
+          setArchived: async ({ archived }, ctx) => {
+            await list(ctx, (listing) => {
+              listing.archived = archived;
+            });
+
+            return null;
+          },
+          markSeen: async (_args, ctx) => {
+            await list(ctx, (listing) => {
+              listing.seen = Date.now();
+            });
+
+            return null;
+          },
+          setContext: async ({ text }, ctx) => {
+            await opened.value.conversation.commit(async (tx) => {
+              (await tx.doc(ClientContextDoc, opened.value.conversation.id)).text = text;
+            }, durable(ctx));
+
+            return null;
+          },
+          setThinking: async ({ level }, ctx) => {
+            service.touch(owner);
+            const model = (view.value as ConversationView).docs["pi.agent"]?.model as ModelRef | undefined;
+            const problem = model === undefined ? "the conversation has no model yet" : service.thinkingProblem(owner, model, level);
+            if (problem !== undefined) throw refusal("unusable_thinking", problem);
+            await opened.value.conversation.commit((tx) => configure(tx, opened.value.conversation.id, { thinkingLevel: level as ModelThinkingLevel }), durable(ctx));
+
+            return null;
+          },
+          compact: async ({ instructions }, ctx) => {
+            direct();
+            service.touch(owner);
+            await opened.value.conversation.compact(instructions, durable(ctx));
+
+            return null;
+          },
+          setMode: async ({ mode: next }, ctx) => {
+            direct();
+            service.touch(owner);
+            await opened.value.conversation.commit(async (tx) => {
+              (await tx.doc(ModeDoc, opened.value.conversation.id)).mode = next;
+            }, durable(ctx));
+            mode.replace(ctx, next);
+
+            return null;
+          }
+        }
+      };
+    });
+
+    provider.serve(Credentials, (_input, principal, self) => {
+      const owner = ownerOf(principal);
+      const service = current();
+      const listed = async () => (await service.credentials(owner)).map(({ providerId, type }) => ({ provider: providerId, type }));
+      const providers = projection(self, listed);
+      const settled = async (problem: string | undefined, ctx: Ctx<Principal>) => {
+        if (problem !== undefined) throw refusal("credential_refused", problem);
+        providers.replace(ctx, await listed());
+      };
+      // A login outlives the call that starts it: it waits on the owner's answers and the provider, until it ends, a
+      // newer one replaces it, the bound passes or this object closes.
+      const login = projection<LoginState | null>(self, () => null);
+      let running: { id: number; stop: AbortController; asked: Map<number, (value: string) => void> } | undefined;
+      let ids = 0;
+      self.open(async () => true, () => running?.stop.abort());
+      return {
+        variant: "owner", members: {
+          providers: providers.view,
+
+          login: login.view,
+          setKey: async ({ provider, key }, ctx) => { await (settled(await service.setKey(owner, provider, key), ctx)); return null; },
+          remove: async ({ provider }, ctx) => { await (settled(await service.removeKey(owner, provider), ctx)); return null; },
+
+          catalog: async () => service.catalog(owner),
+
+          startLogin: async ({ provider, type }, ctx) => {
+            const problem = service.loginRefusal(owner, provider, type);
+            if (problem !== undefined) throw refusal("credential_refused", problem);
+            running?.stop.abort();
+            const mine = { id: ++ids, stop: new AbortController(), asked: new Map<number, (value: string) => void>() };
+            running = mine;
+            let shown: LoginState = { id: mine.id, provider, type, status: "running", events: [] };
+            login.replace(ctx, shown);
+            const show = (next: LoginState) => {
+              if (running !== mine) return;
+              shown = next;
+              void host.root(async (root) => login.replace(root, next), BACKGROUND_CONTEXT).catch(() => { });
+            };
+            let late = false;
+            const bound = setTimeout(() => {
+              late = true;
+              mine.stop.abort();
+            }, LOGIN_LIMIT_MS);
+            const end = (status: LoginState["status"], error?: string) => {
+              const { prompt: _asked, ...rest } = shown;
+              show({ ...rest, status, ...(error === undefined ? {} : { error }) });
+              if (running === mine) running = undefined;
+            };
+            void service.login(owner, provider, type, {
+              signal: mine.stop.signal,
+              notify: (event) => show({ ...shown, events: [...shown.events, loginEvent(event)].slice(-LOGIN_EVENTS) }),
+              prompt: (asking) => new Promise<string>((resolve, reject) => {
+                const id = ++ids;
+                const signals = [mine.stop.signal, ...(asking.signal === undefined ? [] : [asking.signal])];
+                const settle = () => {
+                  mine.asked.delete(id);
+                  for (const signal of signals) signal.removeEventListener("abort", cancel);
+                  if (shown.prompt?.id !== id) return;
+                  const { prompt: _done, ...rest } = shown;
+                  show(rest);
+                };
+                const cancel = () => {
+                  settle();
+                  reject(new Error("Login cancelled"));
+                };
+                if (signals.some((signal) => signal.aborted)) return cancel();
+                for (const signal of signals) signal.addEventListener("abort", cancel, { once: true });
+                mine.asked.set(id, (value) => {
+                  settle();
+                  resolve(value);
+                });
+                show({ ...shown, prompt: loginPrompt(id, asking) });
+              }),
+            }).then(
+              async () => {
+                await host.root(async (root) => providers.replace(root, await listed()), BACKGROUND_CONTEXT).catch(() => { });
+                end("done");
+              },
+              (error: unknown) => {
+                if (late) end("failed", `the login was not finished within ${LOGIN_LIMIT_MS / 60_000} minutes`);
+                else if (mine.stop.signal.aborted) end("cancelled");
+                else end("failed", errorText(error));
+              },
+            ).finally(() => clearTimeout(bound));
+            return mine.id;
+          },
+          answer: async ({ prompt, value }) => {
+            const reply = running?.asked.get(prompt);
+            if (reply === undefined) throw refusal("no_prompt", `the login asks nothing as ${prompt} now`);
+            reply(value);
+
+            return null;
+          },
+          cancelLogin: async ({ login: id }) => {
+            if (running?.id === id) running.stop.abort();
+
+            return null;
+          }
+        }
+      };
+    });
+
+    provider.serve(Loop, (_input, principal) => {
+      ownerOf(principal);
+      // The loop's records are the owner's too, kept where the service keeps the rest.
+      current();
+      const control = () => {
+        if (loop === undefined) throw refusal("no_loop", "this service runs no RSI loop");
+        return loop;
+      };
+      const done = (problem: string | undefined) => {
+        if (problem !== undefined) throw refusal("loop_refused", problem);
+      };
+      return {
+        variant: "owner", members: {
+          standing: () => control().standing(),
+
+          changes: () => control().changes(),
+          undo: async ({ id }) => { await (done(await control().undo(id))); return null; },
+
+          corrections: () => control().corrections(),
+          answer: async ({ key, learn }) => { await (done(await control().answer(key, learn))); return null; },
+
+          held: () => control().held(),
+          decide: async ({ id, approve }) => { await (done(await control().decide(id, approve))); return null; },
+
+          settings: () => control().settings(),
+
+          setSettings: (change) => control().setSettings(change)
+        }
+      };
+    });
+
+    provider.serve(Mcp, (_input, principal, self) => {
+      const owner = ownerOf(principal);
+      const service = current();
+      const servers = projection(self, () => service.mcpServers(owner));
+      return {
+        variant: "owner", members: {
+          servers: servers.view,
+          set: async ({ name, url, headers = {} }, ctx) => {
+            const problem = await service.setMcpServer(owner, name, url, headers);
+            if (problem !== undefined) throw refusal("mcp_refused", problem);
+            servers.replace(ctx, await service.mcpServers(owner));
+
+            return null;
+          },
+          remove: async ({ name }, ctx) => {
+            await service.removeMcpServer(owner, name);
+            servers.replace(ctx, await service.mcpServers(owner));
+
+            return null;
+          }
+        }
+      };
+    });
+
+    provider.serve(Environment, (_input, principal, self) => {
+      const owner = ownerOf(principal);
+      const service = current();
+      const names = projection(self, () => service.variableNames(owner));
+      return {
+        variant: "owner", members: {
+          names: names.view,
+          set: async ({ name, value }, ctx) => {
+            service.setVariable(owner, name, value);
+            names.replace(ctx, service.variableNames(owner));
+
+            return null;
+          },
+          remove: async ({ name }, ctx) => {
+            service.removeVariable(owner, name);
+            names.replace(ctx, service.variableNames(owner));
+
+            return null;
+          }
+        }
+      };
+    });
+
+  });
+  const loaded = await host.load([{ name: "agent", facet }], BACKGROUND_CONTEXT);
+  if (loaded.failed.length > 0) {
+    await host.close(BACKGROUND_CONTEXT);
+    throw new AggregateError(loaded.failed.map((failure) => failure.error), "agent protocol could not load");
+  }
   return host;
 }
 
@@ -588,7 +688,7 @@ export interface Listening {
 
 /** Serves the client protocol over WebSocket, and over HTTP only whether it is busy or locked, on one port. */
 export async function listen(source: AgentService | Sealed, options: ListenOptions): Promise<Listening> {
-  const host = createAgentHost(source, options.loop);
+  const host = await createAgentHost(source, options.loop);
   const service = () => (source instanceof AgentService ? source : source.service);
   let reachedAt = Date.now();
   // Only someone who may use the service keeps it from being idle.
@@ -609,8 +709,12 @@ export async function listen(source: AgentService | Sealed, options: ListenOptio
     });
   });
   const sockets = new WebSocketServer({ server: http });
-  acceptWebSockets(sockets, host, {
-    principal: (request) => authenticated(sameOrigin(request) ? credentialOf(request) : undefined),
+  sockets.on("connection", (socket, request) => {
+    const link = webSocketLink(socket);
+    void authenticated(sameOrigin(request) ? credentialOf(request) : undefined).then((principal) => {
+      if (principal === undefined) link.close();
+      else host.accept(link, { principal }, BACKGROUND_CONTEXT);
+    }).catch(() => link.close());
   });
   http.listen(options.port ?? 0, options.hostname ?? "127.0.0.1");
   await once(http, "listening");
@@ -626,7 +730,7 @@ export async function listen(source: AgentService | Sealed, options: ListenOptio
       for (const client of sockets.clients) client.terminate();
       await new Promise<void>((resolve) => sockets.close(() => resolve()));
       await new Promise<void>((resolve) => http.close(() => resolve()));
-      await host.close();
+      await host.close(BACKGROUND_CONTEXT);
     },
   };
 }
@@ -650,18 +754,16 @@ function sameOrigin(request: IncomingMessage): boolean {
 }
 
 /** Durable calls take the call's cancellation, not the call itself. */
-function durable(ctx: Ctx<Principal>): Context {
-  return withAbortSignal(ctx.signal, BACKGROUND_CONTEXT);
-}
+function durable(context: Context): Context { return context; }
 
 function ownerOf(principal: Principal): string {
-  if (principal.kind !== "owner") throw forbidden();
+  if (principal.kind !== "owner") throw forbidden("owner access is required");
   return principal.owner;
 }
 
 /** What a message says and shows, as the model takes it; refused when it does neither. */
 function messageContent(text: string, images: readonly Image[]): UserInput {
-  if (text === "" && images.length === 0) throw invalid("empty_message", "a message says something, shows something, or both");
+  if (text === "" && images.length === 0) throw refusal("empty_message", "a message says something, shows something, or both");
   return images.length === 0 ? text : [...(text === "" ? [] : [{ type: "text" as const, text }]), ...images.map((image) => ({ type: "image" as const, ...image }))];
 }
 

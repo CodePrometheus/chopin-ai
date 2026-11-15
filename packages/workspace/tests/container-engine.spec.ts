@@ -1,4 +1,5 @@
 import { describe, expect, it } from "vitest";
+import { randomUUID } from "node:crypto";
 import { ContainerWorkspaceProvider } from "../src/index.js";
 
 const image = process.env.CHOPIN_TEST_WORKSPACE_IMAGE;
@@ -6,7 +7,7 @@ const image = process.env.CHOPIN_TEST_WORKSPACE_IMAGE;
 /** Runs against the real engine only when an image that keeps running on its own is named. */
 describe.runIf(image)("ContainerWorkspaceProvider on the real engine", () => {
   it("goes through the whole lifecycle and keeps files across a stop", async () => {
-    const provider = new ContainerWorkspaceProvider({ image: image ?? "", prefix: "chopin-test" });
+    const provider = new ContainerWorkspaceProvider({ image: image ?? "", prefix: process.env.CHOPIN_TEST_RESOURCE_PREFIX ?? `chopin-test-${randomUUID()}` });
     const workspace = provider.open(`test-${process.pid}`);
     const run = async (script: string, env?: Record<string, string>) => {
       const { argv: [binary, ...args], env: carried } = workspace.command(["sh", "-c", script], env);

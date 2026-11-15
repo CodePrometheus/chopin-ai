@@ -1,3 +1,5 @@
+import type { NativeWatchable, Watchable } from "@earendil-works/chord/watch";
+import { subscribe } from "@chopin-ai/harness-pi/protocol";
 import { spawn, spawnSync } from "node:child_process";
 import { once } from "node:events";
 import { createServer, type AddressInfo } from "node:net";
@@ -10,7 +12,7 @@ import { builtinModels } from "@earendil-works/pi-ai/providers/all";
 import { localDaemon } from "@earendil-works/pi-env";
 import { createDataKey, unwrapDataKey } from "@chopin-ai/harness-pi/keys";
 import { Conversation, Conversations, Credentials, connect, Loop, Mcp, unlock, Vault } from "@chopin-ai/harness-pi/protocol";
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, onTestFinished } from "vitest";
 
 const bin = fileURLToPath(new URL("../dist/bin.js", import.meta.url));
 // The workspace's listener ships beside the workspace package's `dist/`.
@@ -35,14 +37,15 @@ async function freePort(): Promise<number> {
 }
 
 /** Resolves with the first value `subscribe` hands over that passes `test`. */
-function until<T>(subscribe: (listener: (value: T) => void) => () => void, test: (value: T) => boolean): Promise<T> {
-  return new Promise((resolve) => {
-    const stop = subscribe((value) => {
-      if (test(value)) {
-        queueMicrotask(() => stop());
-        resolve(value);
-      }
-    });
+function until<T, U extends T>(source: Watchable<T> | NativeWatchable<T>, test: (value: T) => value is U): Promise<U>;
+function until<T>(source: Watchable<T> | NativeWatchable<T>, test: (value: T) => boolean): Promise<T>;
+function until<T>(source: Watchable<T> | NativeWatchable<T>, test: (value: T) => boolean): Promise<T> {
+  return new Promise((resolve, reject) => {
+    const current = source.value;
+    if (test(current)) { resolve(current); return; }
+    const stop = subscribe(source, (value) => {
+      if (test(value)) { stop(); resolve(value); }
+    }, (error) => { stop(); reject(error); });
   });
 }
 
@@ -158,23 +161,27 @@ describe("chopin serve", () => {
     expect((await once(child, "exit"))[0]).toBe(0);
   }, 30_000);
 
-  it("refuses a workspace beside it without its root, its credential, a port, or alongside container options", async () => {
-    const refusal = async (args: string[], env: Record<string, string>) => {
-      const child = spawn(process.execPath, [bin, "serve", ...args], {
-        env: { ...process.env, CHOPIN_HOME: await mkdtemp(join(tmpdir(), "chopin-home-")), CHOPIN_TOKEN: "", ...env },
-        stdio: ["ignore", "ignore", "pipe"],
-      });
-      let stderr = "";
-      child.stderr.on("data", (chunk: Buffer) => { stderr += chunk.toString(); });
-      const [code] = await once(child, "exit");
-      return { code, stderr };
-    };
-    expect(await refusal(["--workspace-port", "7070"], { CHOPIN_TOKEN: "t" })).toMatchObject({ code: 2, stderr: expect.stringContaining("--workspace-port and --root go together") });
-    expect(await refusal(["--workspace-port", "/run/w.sock", "--root", "/workspace"], { CHOPIN_TOKEN: "t" })).toMatchObject({ code: 2, stderr: expect.stringContaining("--workspace-port is a port number") });
-    expect(await refusal(["--workspace-port", "7070", "--root", "/workspace", "--prefix", "p"], { CHOPIN_TOKEN: "t" }))
-      .toMatchObject({ code: 2, stderr: expect.stringContaining("--image and --prefix do not apply") });
-    expect(await refusal(["--workspace-port", "7070", "--root", "workspace"], { CHOPIN_TOKEN: "t" })).toMatchObject({ code: 2, stderr: expect.stringContaining("as an absolute path") });
-    expect(await refusal(["--workspace-port", "7070", "--root", "/workspace"], {})).toMatchObject({ code: 2, stderr: expect.stringContaining("CHOPIN_TOKEN, which is not set") });
+  it.each([
+    { name: "missing root", args: ["--workspace-port", "7070"], token: "t", message: "--workspace-port and --root go together" },
+    { name: "invalid port", args: ["--workspace-port", "/run/w.sock", "--root", "/workspace"], token: "t", message: "--workspace-port is a port number" },
+    { name: "container options", args: ["--workspace-port", "7070", "--root", "/workspace", "--prefix", "p"], token: "t", message: "--image and --prefix do not apply" },
+    { name: "relative root", args: ["--workspace-port", "7070", "--root", "workspace"], token: "t", message: "as an absolute path" },
+    { name: "missing credential", args: ["--workspace-port", "7070", "--root", "/workspace"], token: "", message: "CHOPIN_TOKEN, which is not set" },
+  ])("refuses invalid workspace settings: $name", async ({ args, token, message }) => {
+    const child = spawn(process.execPath, [bin, "serve", ...args], {
+      env: { ...process.env, CHOPIN_HOME: await mkdtemp(join(tmpdir(), "chopin-home-")), CHOPIN_TOKEN: token },
+      stdio: ["ignore", "ignore", "pipe"],
+    });
+    let stderr = "";
+    let closed = false;
+    child.stderr.on("data", (chunk: Buffer) => { stderr += chunk.toString(); });
+    const ended = once(child, "close");
+    void ended.then(() => { closed = true; }, () => { closed = true; });
+    onTestFinished(async () => {
+      if (!closed) { child.kill("SIGKILL"); await ended.catch(() => {}); }
+    });
+    const [code] = await ended;
+    expect({ code, stderr }).toMatchObject({ code: 2, stderr: expect.stringContaining(message) });
   });
 
   it.runIf(hasRelay)("serves one owner whose workspace answers on a loopback port, admitting only the credential it was given", async () => {
@@ -208,7 +215,7 @@ describe("chopin serve", () => {
       // A key its client hands over is kept in memory alone.
       const keys = await host.get(Credentials, {});
       await host.root((ctx) => keys.setKey({ provider: "anthropic", key: "sk-handed-over" }, ctx));
-      await until(keys.providers.subscribe.bind(keys.providers), (providers) => providers.some(({ provider }) => provider === "anthropic"));
+      await until(keys.providers, (providers) => providers.some(({ provider }) => provider === "anthropic"));
       expect((await readdir(home, { recursive: true })).filter((name) => name.endsWith("auth.json"))).toEqual([]);
       // The owner's loop answers its client, with no budget set yet.
       const loop = await host.get(Loop, {});

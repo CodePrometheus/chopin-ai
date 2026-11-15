@@ -59,6 +59,14 @@ without running tools, which the daily loop's gate needs. Anything else a harnes
 
 ## Conventions
 
+- Rust follows the [official style guide](https://doc.rust-lang.org/style-guide/),
+  [API guidelines](https://rust-lang.github.io/api-guidelines/), and applicable
+  [Google Rust guidance](https://google.github.io/styleguide/rustguide.html).
+  Use concise, descriptive function and test names; modules and types provide
+  context. Keep complete scenarios in test bodies or assertion context, not
+  sentence-length identifiers. Avoid obscure abbreviations. Review naming in
+  addition to running formatting, lint, documentation, and behavior checks.
+
 - English everywhere: comments, identifiers, logs, errors, docs and commit messages.
 - File and directory names are kebab-case.
 - Named exports only, except a default export a tool requires, such as its config file; an import of types alone

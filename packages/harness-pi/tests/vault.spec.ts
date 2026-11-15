@@ -1,3 +1,5 @@
+import type { NativeWatchable, Watchable } from "@earendil-works/chord/watch";
+import { subscribe } from "../src/protocol.js";
 import { timingSafeEqual } from "node:crypto";
 import { mkdtemp, readdir, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
@@ -30,14 +32,15 @@ async function agentService(dataDir: string, keepClientMcp = false): Promise<Age
   });
 }
 
-function until<T>(subscribe: (listener: (value: T) => void) => () => void, test: (value: T) => boolean): Promise<T> {
-  return new Promise((resolve) => {
-    const stop = subscribe((value) => {
-      if (test(value)) {
-        queueMicrotask(() => stop());
-        resolve(value);
-      }
-    });
+function until<T, U extends T>(source: Watchable<T> | NativeWatchable<T>, test: (value: T) => value is U): Promise<U>;
+function until<T>(source: Watchable<T> | NativeWatchable<T>, test: (value: T) => boolean): Promise<T>;
+function until<T>(source: Watchable<T> | NativeWatchable<T>, test: (value: T) => boolean): Promise<T> {
+  return new Promise((resolve, reject) => {
+    const current = source.value;
+    if (test(current)) { resolve(current); return; }
+    const stop = subscribe(source, (value) => {
+      if (test(value)) { stop(); resolve(value); }
+    }, (error) => { stop(); reject(error); });
   });
 }
 
@@ -74,7 +77,7 @@ describe("a sealed service", () => {
 
       await unlock(client, owner.key);
       // Every client holding the vault learns it is open.
-      await until(theirs.locked.subscribe.bind(theirs.locked), (locked) => !locked);
+      await until(theirs.locked, (locked) => !locked);
       expect(vault.locked.value).toBe(false);
       expect(await status()).toEqual({ busy: false, locked: false });
       const conversations = await client.get(Conversations, {});
@@ -117,7 +120,7 @@ describe("an agent service's store", () => {
     try {
       const mcp = await client.get(Mcp, {});
       await client.root((ctx) => mcp.set({ name: "tools", url: "http://127.0.0.1:9/mcp", headers: { authorization: "Bearer kept" } }, ctx));
-      await until(mcp.servers.subscribe.bind(mcp.servers), (servers) => servers.some(({ name }) => name === "tools"));
+      await until(mcp.servers, (servers) => servers.some(({ name }) => name === "tools"));
     } finally {
       await client.close();
       await server.close();

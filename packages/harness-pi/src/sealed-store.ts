@@ -1,20 +1,12 @@
 import { mkdir, open, readFile, type FileHandle } from "node:fs/promises";
 import { join } from "node:path";
 import { DatabaseSync } from "node:sqlite";
-import type { Context } from "@earendil-works/chord";
+import type { Context } from "@earendil-works/chord/context";
 import { BACKGROUND_CONTEXT } from "@earendil-works/chord/context";
-import type { Seq, Storage, StorageWrite } from "@earendil-works/pi-durable";
+import type { CommitResult, ConversationId, EntryId, Id, Seq, Storage, StorageWrite } from "@earendil-works/pi-durable";
 import { SqliteStorage } from "@earendil-works/pi-durable/storage/sqlite";
 import { NodeSqliteDatabase } from "@earendil-works/pi-durable/storage/sqlite/node";
 import { seal, unseal, Unsealable, writeSealed } from "./seal.js";
-
-// Node 24.16 added these; the type definitions this package builds with predate them.
-declare module "node:sqlite" {
-  interface DatabaseSync {
-    serialize(dbName?: string): Uint8Array;
-    deserialize(buffer: Uint8Array, options?: { dbName?: string }): void;
-  }
-}
 
 const SNAPSHOT = "snapshot";
 const JOURNAL = "journal";
@@ -36,18 +28,18 @@ export interface SealedStoreOptions {
 }
 
 /** A sealed store whose snapshot or journal was changed, reordered or spliced, so it is not opened. */
-export class TamperedStore extends Error {}
+export class TamperedStore extends Error { }
 
 /**
  * An owner's store, held in memory and sealed at rest. Each commit is sealed into a journal and flushed before it takes
  * effect; now and then, and on close, the whole store is sealed into a snapshot that empties the journal. Opening reads
  * the snapshot and replays the journal in order, refusing either when it was changed, reordered or spliced.
  *
- * What the snapshot and journal cannot tell is a journal cut at a record's end, or a whole earlier pair put back: either
- * looks like a stop before the commits it lacks, which only a record kept elsewhere could tell apart.
+ * Truncating an acknowledged tail or restoring an earlier pair requires an external freshness record to detect:
+ * encryption alone cannot distinguish either from a crash before the missing commits were acknowledged.
  */
 export async function openSealedStore(options: SealedStoreOptions): Promise<Storage> {
-  const { dir, key, report = () => {} } = options;
+  const { dir, key, report = () => { } } = options;
   await mkdir(dir, { recursive: true, mode: 0o700 });
   const journalFile = join(dir, JOURNAL);
   const snapshot = await readSnapshot(join(dir, SNAPSHOT), key);
@@ -58,22 +50,33 @@ export async function openSealedStore(options: SealedStoreOptions): Promise<Stor
   // A store's first opening writes its snapshot before any commit, so a journal without one lost it.
   if (snapshot === undefined && journal.length > 0) throw new TamperedStore(`the store in ${dir} has a journal but no snapshot`);
   const database = new DatabaseSync(":memory:");
-  if (typeof database.serialize !== "function") throw new Error(`a sealed store needs Node 24.16 or later, not ${process.version}`);
-  if (snapshot !== undefined) database.deserialize(snapshot.image);
-  const inner = await SqliteStorage.open(new NodeSqliteDatabase(database));
+  let inner: SqliteStorage | undefined;
+  let handle: FileHandle | undefined;
+  let store: SealedStore | undefined;
   try {
+    if (typeof database.serialize !== "function") throw new Error("a sealed store requires SQLite snapshot support in the runtime");
+    if (snapshot !== undefined) database.deserialize(snapshot.image);
+    inner = await SqliteStorage.open(new NodeSqliteDatabase(database));
     const replayed = await replay(journal, snapshot?.next ?? 0, key, inner, report);
-    const handle = await open(journalFile, "a", 0o600);
+    handle = await open(journalFile, "a", 0o600);
     // A record cut short is dropped, so the next one is appended where it belongs.
     if (replayed.end < journal.length) {
       await handle.truncate(replayed.end);
       await handle.sync();
     }
-    const store = new SealedStore(dir, key, database, inner, handle, replayed.next, replayed.end, options, report);
+    store = new SealedStore(dir, key, database, inner, handle, replayed.next, replayed.end, options, report);
     if (snapshot === undefined || replayed.end > 0) await store.snapshot();
     return store.storage();
   } catch (error) {
-    await inner.close(BACKGROUND_CONTEXT).catch(() => {});
+    try {
+      if (store !== undefined) await store.fail(error);
+      else {
+        try { await handle?.close(); }
+        finally { if (inner !== undefined) await inner.close(BACKGROUND_CONTEXT); else if (database.isOpen) database.close(); }
+      }
+    } catch (closing) {
+      throw new AggregateError([error, closing], "the store failed to open and close");
+    }
     throw error;
   }
 }
@@ -94,6 +97,7 @@ class SealedStore {
   #line: Promise<unknown> = Promise.resolve();
   /** Why the journal can take no more: a record half written would have the next one appended after it. */
   #broken: unknown;
+  #closing: Promise<void> | undefined;
 
   constructor(
     dir: string, key: Uint8Array, database: DatabaseSync, inner: SqliteStorage, journal: FileHandle, next: number, journalBytes: number,
@@ -118,66 +122,94 @@ class SealedStore {
   storage(): Storage {
     const inner = this.#inner;
     return {
-      commit: (writes, context) => this.#commit(writes, context),
-      mintId: inner.mintId.bind(inner),
-      conversation: inner.conversation.bind(inner),
-      scanConversations: inner.scanConversations.bind(inner),
-      entry: inner.entry.bind(inner),
-      findLatestHeadMarker: inner.findLatestHeadMarker.bind(inner),
-      scanEntries: inner.scanEntries.bind(inner),
-      task: inner.task.bind(inner),
-      scanTasks: inner.scanTasks.bind(inner),
-      submission: inner.submission.bind(inner),
-      scanSubmissions: inner.scanSubmissions.bind(inner),
-      submissionByRequest: inner.submissionByRequest.bind(inner),
-      findDocument: inner.findDocument.bind(inner),
-      document: inner.document.bind(inner),
-      scanDocuments: inner.scanDocuments.bind(inner),
+      commit: (batches, receive, context) => this.#commit(batches, receive, context),
+      mintId: <I extends Id<string>>() => this.#read(() => inner.mintId<I>()),
+      conversation: (...args) => this.#read(() => inner.conversation(...args)),
+      scanConversations: (...args) => this.#read(() => inner.scanConversations(...args)),
+      entry: (...args: [EntryId, Context] | [ConversationId, EntryId, Context]) => this.#read(() =>
+        args.length === 2 ? inner.entry(args[0], args[1]) : inner.entry(args[0], args[1], args[2])),
+      findLatestHeadMarker: (...args) => this.#read(() => inner.findLatestHeadMarker(...args)),
+      scanEntries: (...args) => this.#read(() => inner.scanEntries(...args)),
+      task: (...args) => this.#read(() => inner.task(...args)),
+      scanTasks: (...args) => this.#read(() => inner.scanTasks(...args)),
+      submission: (...args) => this.#read(() => inner.submission(...args)),
+      scanSubmissions: (...args) => this.#read(() => inner.scanSubmissions(...args)),
+      submissionByRequest: (...args) => this.#read(() => inner.submissionByRequest(...args)),
+      findDocument: (...args) => this.#read(() => inner.findDocument(...args)),
+      document: (...args) => this.#read(() => inner.document(...args)),
+      scanDocuments: (...args) => this.#read(() => inner.scanDocuments(...args)),
       close: (context) => this.#close(context),
     };
   }
 
+  /** Ends an unsuccessful initialization without persisting its in-memory image. */
+  fail(error: unknown): Promise<void> {
+    this.#broken = error ?? new Error("the store failed to initialize");
+    return this.#close(BACKGROUND_CONTEXT);
+  }
+
   /** Seals the whole store into a snapshot, then empties the journal it now holds. */
   async snapshot(): Promise<void> {
+    if (this.#broken !== undefined) throw this.#broken;
     await writeSealed(join(this.#dir, SNAPSHOT), this.#key, snapshotContext(this.#next), this.#database.serialize(), number64(this.#next));
     await this.#journal.truncate(0);
     await this.#journal.sync();
     this.#journalBytes = 0;
   }
 
-  #commit(writes: readonly StorageWrite[], context: Context): Promise<Seq> {
+  #commit(batches: readonly (readonly StorageWrite[])[], receive: (index: number, seq: Seq) => void, context: Context): Promise<CommitResult> {
     return this.#serially(async () => {
-      if (this.#broken !== undefined) throw new Error("the store's journal cannot be written", { cause: this.#broken });
-      const record = seal(this.#key, journalContext(this.#next), Buffer.from(JSON.stringify(writes)));
-      const header = Buffer.alloc(HEADER_BYTES);
-      header.writeUInt32BE(record.length, 0);
-      header.writeBigUInt64BE(BigInt(this.#next), 4);
+      if (this.#broken !== undefined) throw this.#broken;
       try {
+        const detached = structuredClone(batches);
+        const receipts: { index: number; seq: Seq }[] = [];
+        const result = await this.#inner.commit(detached, (index, seq) => receipts.push({ index, seq }), context);
+        if (result.stored === 0) return result;
+        const payload = { version: 1, batches: detached.slice(0, result.stored) };
+        const record = seal(this.#key, journalContext(this.#next), Buffer.from(JSON.stringify(payload)));
+        const header = Buffer.alloc(HEADER_BYTES);
+        header.writeUInt32BE(record.length, 0);
+        header.writeBigUInt64BE(BigInt(this.#next), 4);
         await this.#journal.appendFile(Buffer.concat([header, record]));
         await this.#journal.datasync();
+        this.#next += 1;
+        this.#journalBytes += HEADER_BYTES + record.length;
+        for (const receipt of receipts) receive(receipt.index, receipt.seq);
+        if (this.#journalBytes >= this.#snapshotAfterBytes) await this.#snapshotQuietly();
+        return result;
       } catch (error) {
-        this.#broken = error;
+        this.#broken = error ?? new Error("the store failed to commit");
+        clearInterval(this.#folding);
         throw error;
       }
-      this.#next += 1;
-      this.#journalBytes += HEADER_BYTES + record.length;
-      // Durable now: what it changes may be seen.
-      const seq = await this.#inner.commit(writes, context);
-      if (this.#journalBytes >= this.#snapshotAfterBytes) await this.#snapshotQuietly();
-      return seq;
     });
   }
 
-  async #close(context: Context): Promise<void> {
+  #read<T>(read: () => Promise<T>): Promise<T> {
+    return this.#serially(() => {
+      if (this.#broken !== undefined) throw this.#broken;
+      return read();
+    });
+  }
+
+  #close(context: Context): Promise<void> {
+    return this.#closing ??= this.#finish(context);
+  }
+
+  async #finish(context: Context): Promise<void> {
     clearInterval(this.#folding);
     try {
       await this.#serially(async () => {
-        if (this.#journalBytes > 0) await this.snapshot();
-        this.#broken ??= new Error("the store is closed");
+        try {
+          if (this.#broken === undefined && this.#journalBytes > 0) await this.snapshot();
+        } finally {
+          this.#broken ??= new Error("the store is closed");
+        }
       });
     } finally {
-      await this.#journal.close();
-      await this.#inner.close(context);
+      const closed = await Promise.allSettled([this.#journal.close(), this.#inner.close(context)]);
+      const errors = closed.flatMap((result) => result.status === "rejected" ? [result.reason] : []);
+      if (errors.length > 0) throw new AggregateError(errors, "the store failed to close");
     }
   }
 
@@ -188,7 +220,7 @@ class SealedStore {
 
   #serially<T>(work: () => Promise<T>): Promise<T> {
     const next = this.#line.then(work);
-    this.#line = next.catch(() => {});
+    this.#line = next.catch(() => { });
     return next;
   }
 }
@@ -228,16 +260,22 @@ async function replay(journal: Buffer, next: number, key: Uint8Array, inner: Sql
     at += HEADER_BYTES + length;
     if (seq < next && expected === next) continue;
     if (seq !== expected) throw new TamperedStore(`the store's journal holds record ${seq} where record ${expected} belongs: records were removed, reordered or added`);
-    let writes: StorageWrite[];
+    let payload: unknown;
     try {
-      writes = JSON.parse(unseal(key, journalContext(seq), record).toString("utf8")) as StorageWrite[];
+      payload = JSON.parse(unseal(key, journalContext(seq), record).toString("utf8"));
     } catch (error) {
       if (!(error instanceof Unsealable)) throw error;
       throw new TamperedStore(`record ${seq} of the store's journal does not open with this key: it was changed`);
     }
-    await inner.commit(writes, BACKGROUND_CONTEXT).catch((error: unknown) => {
-      report(new Error(`record ${seq} of the store's journal did not apply, as it did not when it was made, and is passed over`, { cause: error }));
-    });
+    const legacy = Array.isArray(payload);
+    const group = payload as { version?: unknown; batches?: unknown } | null;
+    if (!legacy && (group?.version !== 1 || !Array.isArray(group.batches))) throw new TamperedStore(`record ${seq} has an unsupported journal format`);
+    const batches = (legacy ? [payload] : group!.batches) as StorageWrite[][];
+    const result = await inner.commit(batches, () => { }, BACKGROUND_CONTEXT);
+    if (result.stored !== batches.length) {
+      if (!legacy) throw new TamperedStore(`record ${seq} contains a batch that cannot be restored`, { cause: result.refused });
+      report(new Error(`record ${seq} contains a legacy write that was refused`, { cause: result.refused }));
+    }
     expected += 1;
   }
   return { next: expected, end: at };

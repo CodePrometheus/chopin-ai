@@ -1,4 +1,5 @@
 import { ContainerWorkspaceProvider } from "@chopin-ai/workspace";
+import { randomUUID } from "node:crypto";
 import { describe, expect, it } from "vitest";
 import { runTask } from "../src/run.js";
 
@@ -7,7 +8,7 @@ const image = process.env.CHOPIN_TEST_DSH_IMAGE;
 /** Runs the harness for real inside the workspace image, without model credentials: the run fails, the record does not. */
 describe.runIf(image)("runTask in the dsh workspace image", () => {
   it("returns what the plugin recorded, even for a run the model never answered", async () => {
-    const workspace = new ContainerWorkspaceProvider({ image: image ?? "", prefix: "chopin-test" }).open(`dsh-${process.pid}`);
+    const workspace = new ContainerWorkspaceProvider({ image: image ?? "", prefix: process.env.CHOPIN_TEST_RESOURCE_PREFIX ?? `chopin-test-${randomUUID()}` }).open(`dsh-${process.pid}`);
     try {
       const { transcript, diff } = await runTask(workspace, "Say hi.", { profile: "chopin", transcripts: "/tmp/chopin-transcripts" });
       const updates = transcript.flatMap((entry) => ("notification" in entry ? [entry.notification.update] : []));

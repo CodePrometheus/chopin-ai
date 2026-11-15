@@ -7,9 +7,44 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.7.0-rc1] - 2026-11-15
+
+### Added
+
+- Execution-owned durable goals with immutable command receipts, questions,
+  delegated authority checks, completion evidence, and reconciled stop.
+- A private durable reviewer with frozen source history, verified proposal and
+  history receipts, and recovery of the original review after a process restart.
+- Rust client and command-broker libraries, including authenticated operation
+  reconciliation, encrypted output, and a Linux worker with persistent admission
+  and original-process recovery. Hosts supply resource policy and supervision.
+
+### Changed
+
+- The durable service and command-line application require Node.js 26.1 or later.
+  The durable adapter uses the stable `1.5.2` execution packages.
+- ACP integration uses the SDK's app API and stable v1 entrypoint. `serveAcp`
+  returns `AgentConnection`, with cleanup included in its `closed` promise.
+  Stored transcript token totals retain their existing shape independently of
+  unstable ACP fields.
+- Service and native clients use the producer's version 2 object contracts over
+  the version 1 binary link. Upgrade servers and clients together.
+- The optional plugin adapter targets `0.2.2-rc.3` and awaits actual projection
+  registration before exposing its gates. Its upstream dependencies remain
+  prereleases.
+
 ### Fixed
 
 - A sealed service opens a fresh volume whose root holds what its file system put there, such as `lost+found`.
+- Failed or uncertain encrypted-file commits reconcile the durable manifest
+  before retrying. Directory read failures do not become empty snapshots.
+- History and goal cursors retain their original query scope. Direct execution
+  methods cannot bypass a goal-controlled conversation.
+- Missing goal observations return a definitive refusal instead of repeatedly
+  failing activation, and authority recovery cannot strand an otherwise complete
+  review after a display revision changes.
+- Local service handover preserves semantic prerelease ordering rather than
+  treating a release candidate as the corresponding stable version.
 
 ## [0.6.0] - 2026-11-09
 

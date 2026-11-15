@@ -1,7 +1,8 @@
-import type { ContentBlock, StopReason, ToolCallContent, ToolKind, SessionUpdate, Usage as AcpUsage } from "@agentclientprotocol/sdk";
+import type { ContentBlock, StopReason, ToolCallContent, ToolKind, SessionUpdate } from "@agentclientprotocol/sdk";
 import type { AssistantMessage, ImageContent, Message, TextContent, Usage, UserMessage } from "@earendil-works/pi-ai";
 import type { ConversationView, EntryRecord } from "@earendil-works/pi-durable";
-import { withChopinMeta, type TranscriptEntry } from "@chopin-ai/core";
+import { withChopinMeta, type TranscriptEntry, type TokenUsage } from "@chopin-ai/core";
+import { GOAL_CONTROL_KIND } from "./goals/contracts.js";
 
 /** A tool call's input as clients show it: its JSON, or nothing when it has none or no JSON says it. */
 export function inputText(rawInput: unknown): string {
@@ -30,6 +31,7 @@ export function entryTranscript(sessionId: string, entries: readonly EntryRecord
 
 /** What a committed entry says, in ACP. Entries without a model-facing message say nothing. */
 export function entryUpdates(entry: EntryRecord): SessionUpdate[] {
+  if (entry.kind === GOAL_CONTROL_KIND) return [];
   const codes = diagnosticCodes(entry);
   return (entry.model ?? []).flatMap(messageUpdates).map((update) =>
     codes.length > 0 && update.sessionUpdate === "tool_call_update" ? withChopinMeta(update, { diagnostics: codes }) : update);
@@ -113,8 +115,8 @@ export function stopReason(message: AssistantMessage | undefined): StopReason {
   return "end_turn";
 }
 
-/** Token totals over the given assistant messages, in ACP's usage shape. */
-export function totalUsage(messages: readonly AssistantMessage[]): { usage: AcpUsage; cost: number } {
+/** Token totals over the given assistant messages, preserving the recorded transcript format. */
+export function totalUsage(messages: readonly AssistantMessage[]): { usage: TokenUsage; cost: number } {
   const sum = (pick: (usage: Usage) => number | undefined) => messages.reduce((total, m) => total + (pick(m.usage) ?? 0), 0);
   const cacheRead = sum((u) => u.cacheRead);
   const cacheWrite = sum((u) => u.cacheWrite);

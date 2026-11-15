@@ -1,8 +1,14 @@
 packages:
   - apps/*
   - packages/*
+# Verified by the service, fault-injection and native interoperability suites.
+peerDependencyRules:
+  allowedVersions:
+    '@earendil-works/chord@1.5.2>ws': '8.23.0'
 # Install scripts of transitive dependencies; none of them is needed at runtime
 allowBuilds:
   '@google/genai': false
   esbuild: false
   protobufjs: false
+minimumReleaseAgeExclude:
+  - '@agentclientprotocol/sdk@2.7.0'

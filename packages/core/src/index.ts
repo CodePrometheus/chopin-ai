@@ -16,6 +16,7 @@ export { signals } from "./evidence/signals.js";
 export type { Signal } from "./evidence/signals.js";
 export { layerUsage } from "./evidence/usage.js";
 export type { LayerUsage } from "./evidence/usage.js";
+export type { TokenUsage } from "./transcript.js";
 export type { Certificate } from "./gate/admission.js";
 export { admitDaily, MENDED_POINTS, RECURRENCE, recurringPoints, recursOften, SCREEN_PAIRS } from "./gate/daily.js";
 export type { Arm, Continued, DailyAdmission, FixPoint, ProtectPoint } from "./gate/daily.js";

@@ -44,6 +44,7 @@ export class Vault {
   #line: Promise<unknown> = Promise.resolve();
   #syncing: NodeJS.Timeout | undefined;
   #watching: FSWatcher | undefined;
+  #uncertain = false;
 
   private constructor(volume: string, home: string, key: Uint8Array) {
     this.#volume = volume;
@@ -72,7 +73,7 @@ export class Vault {
 
   /** Seals what changed in the home since the last sync: new and changed files, and which are gone. */
   sync(): Promise<void> {
-    const next = this.#line.then(() => this.#sync());
+    const next = this.#line.then(() => this.#sync()).catch((error) => { this.#uncertain = true; throw error; });
     this.#line = next.catch(() => {});
     return next;
   }
@@ -144,6 +145,13 @@ export class Vault {
   }
 
   async #sync(): Promise<void> {
+    if (this.#uncertain) {
+      const manifest = await this.#manifest();
+      if (manifest === undefined && this.#generation !== 0 || manifest !== undefined && manifest.generation < this.#generation) throw new TamperedHome("the home's committed manifest is missing or older than its observed state");
+      this.#generation = manifest?.generation ?? 0;
+      this.#sealed = new Map(Object.entries(manifest?.files ?? {}).map(([path, file]) => [path, { ...file, size: -1, mtimeMs: -1 }]));
+      this.#uncertain = false;
+    }
     const objects = join(this.#volume, HOME, OBJECTS);
     await mkdir(objects, { recursive: true, mode: 0o700 });
     const now = new Map<string, Sealed>();
@@ -151,7 +159,7 @@ export class Vault {
     for (const path of await homeFiles(this.#home)) {
       const at = join(this.#home, path);
       // A file gone between listing and reading, such as a draft renamed into place, is passed over.
-      const info = await stat(at).catch(() => undefined);
+      const info = await stat(at).catch(missing);
       if (info === undefined || !info.isFile()) continue;
       const mode = info.mode & 0o777;
       const known = this.#sealed.get(path);
@@ -159,7 +167,7 @@ export class Vault {
         now.set(path, known);
         continue;
       }
-      const content = await readFile(at).catch(() => undefined);
+      const content = await readFile(at).catch(missing);
       if (content === undefined) continue;
       const sha256 = createHash("sha256").update(content).digest("hex");
       changed ||= known?.sha256 !== sha256 || known.mode !== mode;
@@ -172,14 +180,16 @@ export class Vault {
       now.set(path, { object, sha256, mode, size: info.size, mtimeMs: info.mtimeMs });
     }
     changed ||= [...this.#sealed.keys()].some((path) => !now.has(path));
-    this.#sealed = now;
-    if (!changed) return;
-    this.#generation += 1;
+    if (!changed) { this.#sealed = now; return; }
+    const generation = this.#generation + 1;
+    if (!Number.isSafeInteger(generation)) throw new TamperedHome("the home's generation cannot be represented");
     const manifest: Manifest = {
-      generation: this.#generation,
+      generation,
       files: Object.fromEntries([...now].map(([path, { object, sha256, mode }]) => [path, { object, sha256, mode }])),
     };
     await writeSealed(join(this.#volume, HOME, MANIFEST), this.#homeKey, MANIFEST_CONTEXT, Buffer.from(JSON.stringify(manifest)));
+    this.#sealed = now;
+    this.#generation = generation;
     // Sealed copies the manifest no longer names, and drafts a stop left behind.
     const named = new Set([...now.values()].map(({ object }) => object));
     for (const name of await readdir(objects)) if (!named.has(name)) await unlink(join(objects, name)).catch(() => {});
@@ -221,7 +231,12 @@ async function checkKey(volume: string, key: Uint8Array): Promise<void> {
 
 /** Every regular file under `home`, as a path relative to it. */
 async function homeFiles(home: string): Promise<string[]> {
-  const entries = await readdir(home, { recursive: true, withFileTypes: true }).catch(() => []);
+  const entries = await readdir(home, { recursive: true, withFileTypes: true });
   return entries.filter((entry) => entry.isFile()).map((entry) => relative(home, join(entry.parentPath, entry.name)));
+}
+
+function missing(error: NodeJS.ErrnoException): undefined {
+  if (error.code === "ENOENT") return undefined;
+  throw error;
 }
 

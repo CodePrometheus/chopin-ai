@@ -1,10 +1,11 @@
 import { randomBytes } from "node:crypto";
+import { execFile } from "node:child_process";
 import { chmod, cp, mkdir, mkdtemp, readdir, readFile, rename, stat, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { setTimeout as sleep } from "node:timers/promises";
+import { promisify } from "node:util";
 import { join } from "node:path";
 import { WrongKey } from "@chopin-ai/harness-pi";
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import { TamperedHome, Vault } from "../src/vault.js";
 
 async function temporary(name: string): Promise<string> {
@@ -82,22 +83,22 @@ describe("a vault", () => {
     const key = randomBytes(32);
     const home = await temporary("home");
     const vault = await Vault.open(volume, home, key);
-    vault.keepSynced(60 * 60_000, (error) => { throw error; });
+    const committed = Promise.withResolvers<void>();
+    const synchronize = vault.sync.bind(vault);
+    const tracked = vi.spyOn(vault, "sync").mockImplementation(async () => {
+      await synchronize();
+      const restored = await temporary("home");
+      await Vault.open(volume, restored, key);
+      const content = await readFile(join(restored, "auth.json"), "utf8").catch((error: NodeJS.ErrnoException) => { if (error.code === "ENOENT") return ""; throw error; });
+      if (content.includes("a-refreshed-token")) committed.resolve();
+    });
+    vault.keepSynced(60 * 60_000, committed.reject);
     try {
       // Written as every writer of the home writes, a draft renamed into place.
-      await writeFile(join(home, "auth.json.draft"), '{"provider":{"refresh":"a-refreshed-token"}}');
-      await rename(join(home, "auth.json.draft"), join(home, "auth.json"));
-      // What a new pod would restore, asked until it holds the token, for no longer than a second.
-      const restored = async () => {
-        const elsewhere = await temporary("home");
-        await Vault.open(volume, elsewhere, key);
-        return readFile(join(elsewhere, "auth.json"), "utf8").catch(() => "");
-      };
-      for (let tries = 0; !(await restored()).includes("a-refreshed-token"); tries++) {
-        expect(tries).toBeLessThan(50);
-        await sleep(20);
-      }
+      await promisify(execFile)(process.execPath, ["--input-type=module", "-e", "import {writeFile,rename} from 'node:fs/promises';import {join} from 'node:path';const home=process.argv[1];await writeFile(join(home,'auth.json.draft'),JSON.stringify({provider:{refresh:'a-refreshed-token'}}));await rename(join(home,'auth.json.draft'),join(home,'auth.json'));", home]);
+      await committed.promise;
     } finally {
+      tracked.mockRestore();
       await vault.close();
     }
   });

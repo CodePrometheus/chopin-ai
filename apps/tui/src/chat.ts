@@ -1,6 +1,6 @@
 import { readFile, writeFile } from "node:fs/promises";
 import { join, resolve } from "node:path";
-import type { Ctx, Host } from "@earendil-works/chord";
+import type { Ctx } from "@earendil-works/chord";
 import { getSupportedThinkingLevels, type AssistantMessage } from "@earendil-works/pi-ai";
 import {
   copyToClipboard,
@@ -28,6 +28,8 @@ import type { Command } from "@chopin-ai/core";
 import { compactionFailure, isCompacting, isRunning, userText } from "@chopin-ai/harness-pi";
 import {
   call,
+  subscribe,
+  type Client,
   connect,
   endText,
   errorText,
@@ -129,7 +131,7 @@ export const chatCommand: Command = {
 };
 
 /** Runs the conversation on `terminal` until the user quits; `options` bound every call to the service. */
-export async function chat(host: Host, terminal: Terminal, options: ChatOptions = {}): Promise<void> {
+export async function chat(host: Client, terminal: Terminal, options: ChatOptions = {}): Promise<void> {
   const settings = await readSettings();
   initTheme(settings.theme);
   const list = heldList(host, options);
@@ -178,7 +180,7 @@ export async function chat(host: Host, terminal: Terminal, options: ChatOptions 
   const target = (): ConversationRef | string => {
     if (starting !== undefined) return STARTING;
     if (conversation === undefined) return "no conversation; /new starts one";
-    if (conversation.status === "live" || conversation.status === "loading") return conversation;
+    if (conversation.state.value.kind !== "ended") return conversation;
     return `the conversation ended (${endText(conversation)}); /new starts another`;
   };
 
@@ -273,9 +275,11 @@ export async function chat(host: Host, terminal: Terminal, options: ChatOptions 
     transcript.setExpanded(expanded);
     transcript.setHideThinking(hideThinking);
     body.addChild(transcript);
+    const failed = (error: unknown) => { failure = errorText(error); showErrors([failure]); tui.requestRender(); };
     stops = [
-      next.view.subscribe(render), next.mode.subscribe(render), next.name.subscribe(render), next.submissions.subscribe(render),
-      next.running.subscribe(render), next.onStatus(render),
+      subscribe(next.view, render, failed), subscribe(next.mode, render, failed),
+      subscribe(next.name, render, failed), subscribe(next.submissions, render, failed),
+      subscribe(next.running, render, failed), subscribe(next.state, render, failed),
     ];
     if (draft !== undefined) editor.setText(draft);
   };
@@ -372,7 +376,7 @@ export async function chat(host: Host, terminal: Terminal, options: ChatOptions 
   const live = (): { conversation: ConversationRef; view: ConversationView } | string => {
     const current = target();
     if (typeof current === "string") return current;
-    return current.status === "live" ? { conversation: current, view: current.view.value as ConversationView } : "the conversation is reconnecting";
+    return current.state.value.kind === "live" ? { conversation: current, view: current.view.value as ConversationView } : "the conversation is reconnecting";
   };
   /** The conversation here with its view, for a command that needs it; otherwise why not, as the error. */
   const here = () => {

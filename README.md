@@ -14,10 +14,10 @@
 
 </div>
 
-> **Status:** `v0.6.0` lets a cloud agent's owner hand its commands credentials without a conversation and see how each
-> conversation stands, `v0.5.0` signs them in to any model provider from their clients, and `v0.4.0` keeps what they
-> have sealed at rest; the loop that improves the agent from your sessions came in `v0.3.0`, see
-> [How it improves itself](#how-it-improves-itself).
+> **Release candidate:** `0.7.0-rc1` adds durable goals, private completion review,
+> native integration libraries, and recovery checks. Embedded hosts supply real
+> authority, resource reconciliation, isolation, and supervision. It is an execution
+> component release, not a complete cloud deployment. The latest stable line remains `0.6.x`.
 
 ## Install
 
@@ -25,7 +25,9 @@
 npm install -g chopin-ai
 ```
 
-Requires Node.js 24.8 or later.
+For the release candidate, use `npm install -g chopin-ai@0.7.0-rc1`.
+
+Requires Node.js 26.1 or later.
 
 ## Quick start
 
@@ -104,6 +106,12 @@ can reach, since a container can mount any directory.
 
 ## For integrators
 
+Embedded services can enable [durable goals](packages/harness-pi/goals.md) through
+`AgentServiceOptions.goals`. The host must supply authorization and external-operation
+reconciliation, and explicitly select a model for the built-in durable reviewer or
+provide a custom review callback. The command-line service does not configure these
+adapters automatically.
+
 `chopin serve --jwks <url>` runs agents for many users, each in a container workspace; build the image from a
 checkout with `pnpm --filter @chopin-ai/harness-pi image`. Clients reach it through the client protocol or ACP.
 
@@ -115,7 +123,7 @@ it their model API key, or signs them in to a provider, through the client proto
 memory alone. Variables a client sets with `chopin.environment` reach every command the agent runs, such as a credential
 for a git remote, without passing through a conversation.
 
-With `--sealed <dir>` (Node 24.16 or later) it keeps that user's conversations, settings, loop records, and the
+With `--sealed <dir>` (Node 26.1 or later) it keeps that user's conversations, settings, loop records, and the
 credentials and MCP servers clients hand over only sealed on `<dir>`, and starts locked, reading nothing until a client
 unlocks it. Conversations are then held in memory, each commit journaled to `<dir>` before it takes effect, and
 `CHOPIN_HOME`, which must be memory-backed, is restored from `<dir>` and synced back to it, credentials, settings and

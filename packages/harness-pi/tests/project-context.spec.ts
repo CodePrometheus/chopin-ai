@@ -14,7 +14,8 @@ import { AgentService, contextFiles, launchToken, listen, projectContext } from 
 import { connect, Conversation, Conversations } from "../src/protocol.js";
 import { localWorkspace } from "./local-workspace.js";
 
-const git = (args: string[]) => promisify(execFile)("git", args);
+// Fixture commits test worktree discovery independently of the developer's signing setup.
+const git = (args: string[]) => promisify(execFile)("git", ["-c", "commit.gpgsign=false", ...args]);
 
 /** A fresh directory, by its real path, as the environment reports paths. */
 const fresh = async () => realpath(await mkdtemp(join(tmpdir(), "chopin-context-")));

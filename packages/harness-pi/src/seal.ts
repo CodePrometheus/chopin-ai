@@ -49,9 +49,9 @@ export async function writeSealed(file: string, key: Uint8Array, context: string
   try {
     const nonce = randomBytes(NONCE_BYTES);
     const cipher = createCipheriv("aes-256-gcm", key, nonce).setAAD(Buffer.from(context));
-    await handle.write(Buffer.concat([header, nonce]));
-    for (let at = 0; at < data.length; at += CHUNK_BYTES) await handle.write(cipher.update(data.subarray(at, at + CHUNK_BYTES)));
-    await handle.write(Buffer.concat([cipher.final(), cipher.getAuthTag()]));
+    await handle.writeFile(Buffer.concat([header, nonce]));
+    for (let at = 0; at < data.length; at += CHUNK_BYTES) await handle.writeFile(cipher.update(data.subarray(at, at + CHUNK_BYTES)));
+    await handle.writeFile(Buffer.concat([cipher.final(), cipher.getAuthTag()]));
     await handle.sync();
   } finally {
     await handle.close();

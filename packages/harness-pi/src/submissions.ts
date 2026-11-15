@@ -1,5 +1,5 @@
 import type { ConversationView } from "@earendil-works/pi-durable";
-import type { Static } from "typebox";
+import type { Static } from "@earendil-works/chord";
 import { runInputs } from "./acp.js";
 import { detailText, type SubmissionSchema } from "./protocol.js";
 

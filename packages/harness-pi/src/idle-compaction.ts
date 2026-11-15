@@ -1,4 +1,4 @@
-import type { Draft } from "@earendil-works/chord";
+import type { Draft } from "@earendil-works/chord/delta";
 import { BACKGROUND_CONTEXT, withAbortSignal } from "@earendil-works/chord/context";
 import type { AssistantMessage, Models, UserMessage } from "@earendil-works/pi-ai";
 import { calculateContextTokens } from "@earendil-works/pi-ai/utils/estimate";

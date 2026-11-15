@@ -1,6 +1,8 @@
-import { AgentSideConnection, PROTOCOL_VERSION, RequestError, type Agent, type PromptRequest, type PromptResponse, type Stream } from "@agentclientprotocol/sdk";
+import { agent, methods, PROTOCOL_VERSION, RequestError, type AgentConnection, type AgentContext, type PromptRequest, type PromptResponse, type Stream } from "@agentclientprotocol/sdk";
 import { setTimeout as sleep } from "node:timers/promises";
-import type { Ctx, Host } from "@earendil-works/chord";
+import type { Ctx } from "@earendil-works/chord";
+import { BACKGROUND_CONTEXT, withAbortSignal } from "@earendil-works/chord/context";
+import { subscribe, type Client } from "./client.js";
 import type { AssistantMessage } from "@earendil-works/pi-ai";
 import type { ConversationView } from "@earendil-works/pi-durable";
 import { entryUpdates, runInputs, stopReason } from "./acp.js";
@@ -8,6 +10,7 @@ import {
   call,
   CALL_TIMEOUT_MS,
   CallTimeout,
+  errorText,
   heldList,
   randomId,
   startConversation,
@@ -39,25 +42,28 @@ export interface BridgeOptions {
  * Speaks ACP on `stream` for the agent behind `client`, a host connected to the agent service, so any ACP client
  * can drive it. One ACP session is one conversation.
  */
-export function serveAcp(stream: Stream, client: Host, options: BridgeOptions = {}): AgentSideConnection {
-  let bridge: Bridge | undefined;
+export function serveAcp(stream: Stream, client: Client, options: BridgeOptions = {}): AgentConnection {
   const lostAfterMs = options.lostAfterMs ?? CALL_TIMEOUT_MS;
-  const connection = new AgentSideConnection((opened) => (bridge = new Bridge(opened, client, lostAfterMs)), stream);
-  void connection.closed.finally(() => bridge?.release());
-  return connection;
+  const bridge = new Bridge(client, lostAfterMs);
+  const connection = agent({ name: "chopin" })
+    .onRequest(methods.agent.initialize, () => bridge.initialize())
+    .onRequest(methods.agent.authenticate, () => bridge.authenticate())
+    .onRequest(methods.agent.session.new, () => bridge.newSession())
+    .onRequest(methods.agent.session.prompt, ({ params, client }) => bridge.prompt(params, client))
+    .onNotification(methods.agent.session.cancel, ({ params }) => bridge.cancel(params))
+    .connect(stream);
+  return { client: connection.client, signal: connection.signal, close: (error) => connection.close(error), closed: connection.closed.finally(() => bridge.release()) };
 }
 
-class Bridge implements Agent {
-  readonly #connection: AgentSideConnection;
-  readonly #client: Host;
+class Bridge {
+  readonly #client: Client;
   readonly #lostAfterMs: number;
   readonly #sessions = new Map<string, Promise<ConversationRef>>();
   /** Aborted once the client is gone. */
   readonly #gone = new AbortController();
   readonly #list: HeldList;
 
-  constructor(connection: AgentSideConnection, client: Host, lostAfterMs: number) {
-    this.#connection = connection;
+  constructor(client: Client, lostAfterMs: number) {
     this.#client = client;
     this.#lostAfterMs = lostAfterMs;
     this.#list = heldList(client, { timeoutMs: lostAfterMs, signal: this.#gone.signal });
@@ -90,7 +96,7 @@ class Bridge implements Agent {
     return { sessionId: String(id) };
   }
 
-  async prompt({ sessionId, prompt }: PromptRequest): Promise<PromptResponse> {
+  async prompt({ sessionId, prompt }: PromptRequest, client: AgentContext): Promise<PromptResponse> {
     const conversation = await this.#session(sessionId);
     // Text and resource links are what every ACP agent takes; a link reaches the model as its name and its address.
     const text = prompt.flatMap((block) => {
@@ -107,12 +113,12 @@ class Bridge implements Agent {
     // Committed entries go out in order, each once; the client already has its own prompt.
     const forward = () => {
       forwarding = forwarding.then(async () => {
-        if (conversation.status !== "live") return;
+        if (conversation.state.value.kind !== "live") return;
         for (const entry of view(conversation).entries.filter((e) => !sent.has(e.id))) {
           sent.add(entry.id);
           answers.push(...(entry.model ?? []).filter((m): m is AssistantMessage => m.role === "assistant"));
           for (const update of entryUpdates(entry)) {
-            if (update.sessionUpdate !== "user_message_chunk") await this.#connection.sessionUpdate({ sessionId, update });
+            if (update.sessionUpdate !== "user_message_chunk") await client.notify(methods.client.session.update, { sessionId, update });
           }
         }
       }).catch((error: unknown) => {
@@ -147,20 +153,22 @@ class Bridge implements Agent {
       for (;;) {
         // Only a call whose link wavered while it ran is sent again; one on a steady link failed for what it is.
         let wavered = false;
-        const stop = conversation.onStatus(() => void (wavered = true));
+        const watch = await conversation.state.watch(withAbortSignal(signal, BACKGROUND_CONTEXT));
+        const initial = watch.value;
+        watch.start(async (change) => { if (change.kind === "failed" || change.value !== initial) wavered = true; });
         try {
-          return await this.#client.root((ctx) => conversation.submit({ text, request }, ctx), { signal });
+          return await this.#client.root((ctx) => conversation.submit({ text, request }, ctx), { signal, timeoutMs: Infinity });
         } catch (error) {
           // The link's own news may trail the call's failure by a turn of the event loop.
           await sleep(0);
-          if (conversation.status === "gone" || conversation.status === "released") {
+          if (conversation.state.value.kind === "ended") {
             this.#forget(sessionId, conversation);
             throw RequestError.resourceNotFound(sessionId);
           }
-          if (!wavered && conversation.status === "live") throw error;
+          if (!wavered && conversation.state.value.kind === "live") throw error;
           await sleep(RESEND_WAIT_MS, undefined, { signal });
         } finally {
-          stop();
+          await watch.stop();
         }
       }
     }));
@@ -187,7 +195,7 @@ class Bridge implements Agent {
       };
       const lost = (detail: string) => settle(lostOutcome(detail));
       const check = () => {
-        if (ended || conversation.status !== "live") return;
+        if (ended || conversation.state.value.kind !== "live") return;
         changed();
         const current = conversation.submissions.value[String(submission)];
         if (current !== undefined && current.status !== "pending" && !runInputs(view(conversation)).includes(submission)) settle(current);
@@ -198,7 +206,7 @@ class Bridge implements Agent {
         clearTimeout(away);
         if (status === "live") {
           check();
-        } else if (status === "loading") {
+        } else if (status === "loading" || status === "failed") {
           away = setTimeout(() => {
             lost(AWAY);
             this.#forget(sessionId, conversation);
@@ -212,10 +220,14 @@ class Bridge implements Agent {
       const gone = () => settle({ status: "gone" });
       this.#gone.signal.addEventListener("abort", gone, { once: true });
       stops.push(() => clearTimeout(away), () => this.#gone.signal.removeEventListener("abort", gone));
-      // Subscribing delivers the current value at once, so the outcome may already be known here.
-      stops.push(conversation.view.subscribe(check), conversation.submissions.subscribe(check), conversation.onStatus(followed));
-      // Status listeners hear only of changes; one that already happened is taken as it stands.
-      if (conversation.status !== "live") followed(conversation.status);
+      // Watches deliver the acquisition value before subsequent changes.
+      stops.push(
+        subscribe(conversation.view, check, (error) => lost(errorText(error))),
+        subscribe(conversation.submissions, check, (error) => lost(errorText(error))),
+        subscribe(conversation.state, (state) => followed(state.kind), (error) => lost(errorText(error))),
+      );
+      // Check the current lifecycle while asynchronous watch acquisition starts.
+      if (conversation.state.value.kind !== "live") followed(conversation.state.value.kind);
       if (this.#gone.signal.aborted) gone();
     }).finally(() => stops.forEach((stop) => stop()));
   }
@@ -233,7 +245,7 @@ class Bridge implements Agent {
   #live(sessionId: string, conversation: ConversationRef, signal: AbortSignal): Promise<void> {
     return new Promise<void>((resolve, reject) => {
       const settled = (status: string) => {
-        if (status === "loading") return;
+        if (status === "loading" || status === "failed") return;
         stop();
         signal.removeEventListener("abort", aborted);
         if (status === "live") return resolve();
@@ -244,10 +256,10 @@ class Bridge implements Agent {
         stop();
         reject(signal.reason);
       };
-      const stop = conversation.onStatus(settled);
+      const stop = subscribe(conversation.state, (state) => settled(state.kind), reject);
       if (signal.aborted) return aborted();
       signal.addEventListener("abort", aborted, { once: true });
-      settled(conversation.status);
+      settled(conversation.state.value.kind);
     });
   }
 

@@ -1,9 +1,8 @@
 import { appendFile, mkdir, readFile } from "node:fs/promises";
 import { join, resolve } from "node:path";
-import { gateRefusal, loadLayer, skillBody, unmetGates, withChopinMeta, type GateRule, type McpServer, type Skill, type TranscriptEntry } from "@chopin-ai/core";
+import { gateRefusal, loadLayer, skillBody, unmetGates, withChopinMeta, type GateRule, type McpServer, type Skill, type TranscriptEntry, type TokenUsage } from "@chopin-ai/core";
 import type { Context } from "@deepseek-ai/cordis";
 import * as McpClient from "@deepseek-ai/dsh-mcp-client";
-import type { Usage as AcpUsage } from "@agentclientprotocol/sdk";
 import type { SessionEvent, TurnEndReason } from "@deepseek-ai/dsh-session";
 import type {} from "@deepseek-ai/dsh-session-projection";
 import type { SkillCandidate, SkillProvider } from "@deepseek-ai/dsh-skill";
@@ -11,11 +10,7 @@ import Schema from "@deepseek-ai/schemastery";
 import { z } from "zod";
 import { eventUpdates, stopReason } from "./acp.js";
 
-declare module "@deepseek-ai/dsh-session-projection/types" {
-  interface SessionProjectionStateMap {
-    "chopin.succeeded": { calls: Record<string, string>; tools: string[] };
-  }
-}
+type Succeeded = { calls: Record<string, string>; tools: string[] };
 
 export const name = "@chopin-ai/harness-dsh";
 export const inject = ["tools", "systemPrompt", "skills", "sessionProjections"];
@@ -42,7 +37,7 @@ export async function apply(ctx: Context, config: Config): Promise<void> {
   }
   if (skills.length > 0) ctx.skills.registerProvider(() => skillProvider(skills));
   for (const [serverName, server] of Object.entries(mcpServers)) ctx.plugin(McpClient, mcpConfig(serverName, server));
-  if (gates.length > 0) enforceGates(ctx, gates);
+  if (gates.length > 0) await enforceGates(ctx, gates);
   if (config.transcripts !== undefined) recordTranscripts(ctx, resolve(config.transcripts));
 }
 
@@ -77,8 +72,8 @@ function mcpConfig(serverName: string, server: McpServer) {
  * Gates read which tools have succeeded from the session log, through a projection that resume and fork replay,
  * and refuse through the monotonic guard, which no later listener can relax.
  */
-function enforceGates(ctx: Context, gates: readonly GateRule[]): void {
-  ctx.sessionProjections.register({
+async function enforceGates(ctx: Context, gates: readonly GateRule[]): Promise<void> {
+  const projection = await ctx.sessionProjections.register<"chopin.succeeded", Succeeded>({
     key: "chopin.succeeded",
     stateVersion: 1,
     stateSchema: z.object({ calls: z.record(z.string(), z.string()), tools: z.array(z.string()) }),
@@ -94,7 +89,7 @@ function enforceGates(ctx: Context, gates: readonly GateRule[]): void {
   ctx.tools.guard((execution) => {
     const session = execution.agent?.session;
     if (session === undefined) return undefined;
-    const succeeded = new Set(ctx.sessionProjections.stateOf(session, "chopin.succeeded")?.tools ?? []);
+    const succeeded = new Set(projection.stateOf(session).tools);
     const unmet = unmetGates(gates, execution.name, succeeded);
     if (unmet.length === 0) return undefined;
     const registered = new Set(unmet.flatMap((rule) => [rule.tool, ...rule.requires]).filter((tool) => ctx.tools.get(tool) !== undefined));
@@ -170,8 +165,8 @@ function turnError(reason: TurnEndReason): string | undefined {
   return undefined;
 }
 
-/** Every ACP usage counter, as a number to add to. */
-type Usage = { [K in keyof Omit<AcpUsage, "_meta">]-?: number };
+/** Every recorded usage counter, as a number to add to. */
+type Usage = Required<TokenUsage>;
 
 function emptyUsage(): Usage {
   return { totalTokens: 0, inputTokens: 0, outputTokens: 0, thoughtTokens: 0, cachedReadTokens: 0, cachedWriteTokens: 0 };

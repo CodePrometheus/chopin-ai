@@ -1,7 +1,10 @@
-import { createHost, hostNamed, isChordError, method, remote, webSocketLink, type Ctx, type Host, type Ref } from "@earendil-works/chord";
-import { Type, type Static, type TArray, type TNumber, type TObject, type TSchema, type TUnknown } from "typebox";
-import { backoff } from "./backoff.js";
+import { arr, bool, hostKind, int, lit, map, method, nul, num, obj, opt, remote, str, union, unknown, type Ctx, type RefState, type NullSchema, type NumberSchema, type Reference, type Schema, type Static } from "@earendil-works/chord";
+import { CALL_TIMEOUT_MS, within, type CallOptions, type Client } from "./client.js";
+export { CALL_TIMEOUT_MS, CallTimeout, connect, subscribe, within } from "./client.js";
+export type { CallOptions, Client, ConnectOptions } from "./client.js";
 import { serviceKey, type DataKey } from "./keys.js";
+import { EngineCommandSchema, EngineReceiptSchema, GoalPageSchema, GoalSnapshotSchema } from "./goals/contracts.js";
+export * from "./goals/contracts.js";
 
 /**
  * The client protocol: remote objects over a WebSocket. A client sees each object's state as a snapshot followed by
@@ -13,17 +16,43 @@ import { serviceKey, type DataKey } from "./keys.js";
 export type Principal = { kind: "owner"; owner: string } | { kind: "host" };
 
 export const HOST = "chopin";
+export const AgentHost = hostKind(HOST, {});
+
+const GoalRequestArgs = obj({ requestId: str({ min: 1 }) });
+const GoalPageArgs = obj({ limit: int({ min: 1, max: Number.MAX_SAFE_INTEGER }), cursor: opt(map(unknown())) });
+const GoalConversationArgs = obj({ conversation: int({ min: 1, max: Number.MAX_SAFE_INTEGER }) });
+const GoalReceiptResult = union([EngineReceiptSchema, nul()]);
+const GoalLookupResult = union([GoalSnapshotSchema, nul()]);
+export const WakeSchema = obj({ active: bool(), at: opt(int({ min: -Number.MAX_SAFE_INTEGER, max: Number.MAX_SAFE_INTEGER })) });
+const GoalsSpec = {
+  version: 2, params: {}, hostAddress: () => AgentHost({}), variants: { owner: { state: {}, methods: {
+    execute: method(EngineCommandSchema, EngineReceiptSchema) as Query<typeof EngineCommandSchema, typeof EngineReceiptSchema>,
+    request: method(GoalRequestArgs, GoalReceiptResult) as Query<typeof GoalRequestArgs, typeof GoalReceiptResult>,
+    page: method(GoalPageArgs, GoalPageSchema) as Query<typeof GoalPageArgs, typeof GoalPageSchema>,
+    forConversation: method(GoalConversationArgs, GoalLookupResult) as Query<typeof GoalConversationArgs, typeof GoalLookupResult>,
+    wake: method(undefined, WakeSchema) as Query<undefined, typeof WakeSchema>,
+    resume: method() as Query<undefined, NullSchema>,
+  } } },
+} as const;
+/** Durable command admission and source-owned goal queries. */
+export const Goals = remote("chopin.goals", GoalsSpec);
+const GoalSpec = {
+  version: 2, params: { goal: str({ min: 1 }) }, hostAddress: () => AgentHost({}),
+  variants: { owner: { state: { snapshot: GoalSnapshotSchema }, methods: {} } },
+} as const;
+/** One goal's persisted authoritative state, independent of the observing connection. */
+export const Goal = remote("chopin.goal", GoalSpec);
 
 /** What a conversation may do: `read` admits only tools that change nothing; `full` admits every tool. */
-export const ModeSchema = Type.Union([Type.Literal("read"), Type.Literal("full")]);
+export const MODES = ["read", "full"] as const;
+export const ModeSchema = union([lit("read"), lit("full")]);
 export type Mode = Static<typeof ModeSchema>;
-export const MODES: readonly Mode[] = ModeSchema.anyOf.map((literal) => literal.const);
 
 /** How a submission made through this object ended, or that it has not yet. */
-export const SubmissionSchema = Type.Union([
-  Type.Object({ status: Type.Literal("pending") }),
-  Type.Object({ status: Type.Literal("done") }),
-  Type.Object({ status: Type.Literal("unanswered"), reason: Type.String(), detail: Type.Optional(Type.String()) }),
+export const SubmissionSchema = union([
+  obj({ status: lit("pending") }),
+  obj({ status: lit("done") }),
+  obj({ status: lit("unanswered"), reason: str(), detail: opt(str()) }),
 ]);
 
 /**
@@ -48,56 +77,59 @@ export function detailText(detail: unknown): string | undefined {
 }
 
 // Method specs named through the exported `method`, so declaration files can refer to them.
-type Call<A extends TSchema> = ReturnType<typeof method<A>> & {};
-type Query<A extends TSchema | undefined, R extends TSchema> = ReturnType<typeof method<A, R>> & {};
-const ForkArgs = Type.Object({ conversation: Type.Number(), at: Type.Number() });
+type Call<A extends Schema> = ReturnType<typeof method<A, NullSchema>> & {};
+type Query<A extends Schema | undefined, R extends Schema> = ReturnType<typeof method<A extends Schema ? A : NullSchema, R>> & {};
+const ForkArgs = obj({ conversation: num(), at: num() });
 /** The largest image a message may carry, before it is encoded. */
 export const IMAGE_MAX_BYTES = 5 * 1024 * 1024;
 /** An image a message carries, in a format models take, as base64. */
-export const ImageSchema = Type.Object({
-  data: Type.String({ minLength: 1, maxLength: 4 * Math.ceil(IMAGE_MAX_BYTES / 3) }),
-  mimeType: Type.Union([Type.Literal("image/png"), Type.Literal("image/jpeg"), Type.Literal("image/gif"), Type.Literal("image/webp")]),
+export const ImageSchema = obj({
+  data: str({ min: 1, max: 4 * Math.ceil(IMAGE_MAX_BYTES / 3) }),
+  mimeType: union([lit("image/png"), lit("image/jpeg"), lit("image/gif"), lit("image/webp")]),
 });
 export type Image = Static<typeof ImageSchema>;
 /** The most images one message may carry. */
 export const IMAGES_MAX = 20;
-const Images = Type.Array(ImageSchema, { maxItems: IMAGES_MAX });
+const Images = arr(ImageSchema, { max: IMAGES_MAX });
 /**
  * A message says something, shows something, or both. `request`, chosen by the client, makes sending the same message
  * again harmless: it is admitted once.
  */
-const SubmitArgs = Type.Object({
-  text: Type.String(),
-  images: Type.Optional(Images),
-  steer: Type.Optional(Type.Boolean()),
-  request: Type.Optional(Type.String({ minLength: 1 })),
+const SubmitArgs = obj({
+  text: str(),
+  images: opt(Images),
+  steer: opt(bool()),
+  request: opt(str({ min: 1 })),
 });
-const ModeArgs = Type.Object({ mode: ModeSchema });
+const ModeArgs = obj({ mode: ModeSchema });
 /** A model as the model library names it: its provider and its id there. */
-const ModelArgs = Type.Object({ provider: Type.String({ minLength: 1 }), modelId: Type.String({ minLength: 1 }) });
-const NoArgs = Type.Object({});
-const NameArgs = Type.Object({ name: Type.String({ maxLength: 200 }) });
-const PinnedArgs = Type.Object({ pinned: Type.Boolean() });
-const ArchivedArgs = Type.Object({ archived: Type.Boolean() });
-const ContextArgs = Type.Object({ text: Type.String({ maxLength: 4_000 }) });
-const RetryArgs = Type.Object({ text: Type.Optional(Type.String()), images: Type.Optional(Images) });
-const ResetArgs = Type.Object({ handoff: Type.Optional(Type.String({ minLength: 1 })) });
+const ModelArgs = obj({ provider: str({ min: 1 }), modelId: str({ min: 1 }) });
+const NoArgs = obj({});
+const NameArgs = obj({ name: str({ max: 200 }) });
+const PinnedArgs = obj({ pinned: bool() });
+const ArchivedArgs = obj({ archived: bool() });
+const ContextArgs = obj({ text: str({ max: 4_000 }) });
+const ResubmitArgs = obj({ text: opt(str()), images: opt(Images) });
+const ResetArgs = obj({ handoff: opt(str({ min: 1 })) });
 /** The kind of entry `retry` writes, which leaves the entries it names out of what the model sees; they stay in the transcript. */
 export const REWIND_KIND = "chopin.rewind";
-const QueueArgs = Type.Object({
-  queue: Type.Array(Type.Object({ id: Type.Number(), text: Type.Optional(Type.String({ minLength: 1 })), steer: Type.Optional(Type.Boolean()) })),
+const QueueArgs = obj({
+  queue: arr(obj({ id: num(), text: opt(str({ min: 1 })), steer: opt(bool()) })),
 });
 /** A thinking level as the model library names them; the service takes only those the conversation's model has. */
-const ThinkingArgs = Type.Object({ level: Type.String({ minLength: 1 }) });
-const CompactArgs = Type.Object({ instructions: Type.Optional(Type.String()) });
+const ThinkingArgs = obj({ level: str({ min: 1 }) });
+const CompactArgs = obj({ instructions: opt(str()) });
 /** A command of the user's, run in the workspace; an excluded one the model never sees. */
-const ShellArgs = Type.Object({ command: Type.String({ minLength: 1 }), excluded: Type.Optional(Type.Boolean()) });
-const Texts = Type.Array(Type.String());
+const ShellArgs = obj({ command: str({ min: 1 }), excluded: opt(bool()) });
+const Texts = arr(str());
+/** Source-owned history pagination; cursors are passed back unchanged. */
+const EntriesArgs = obj({ limit: int({ min: 1, max: Number.MAX_SAFE_INTEGER }), cursor: opt(map(unknown())), atOrBefore: opt(int({ min: 0, max: Number.MAX_SAFE_INTEGER })) });
+export const EntriesPageSchema = obj({ entries: arr(unknown()), cursor: opt(map(unknown())) });
 
 /** The command the user is running in a conversation and its output so far; null while none runs. */
-export const RunningSchema = Type.Union([
-  Type.Null(),
-  Type.Object({ command: Type.String(), output: Type.String(), excluded: Type.Boolean() }),
+export const RunningSchema = union([
+  nul(),
+  obj({ command: str(), output: str(), excluded: bool() }),
 ]);
 export type Running = Static<typeof RunningSchema>;
 
@@ -105,11 +137,11 @@ export type Running = Static<typeof RunningSchema>;
  * What an owner's agent loads besides its tools: whether the layer has instructions, the paths of the project's
  * instruction files in the workspace, the skills, the MCP servers.
  */
-export const LoadedSchema = Type.Object({
-  instructions: Type.Boolean(),
-  projectInstructions: Type.Array(Type.String()),
-  skills: Type.Array(Type.String()),
-  mcpServers: Type.Array(Type.String()),
+export const LoadedSchema = obj({
+  instructions: bool(),
+  projectInstructions: arr(str()),
+  skills: arr(str()),
+  mcpServers: arr(str()),
 });
 export type Loaded = Static<typeof LoadedSchema>;
 
@@ -118,82 +150,85 @@ export type Loaded = Static<typeof LoadedSchema>;
  * agent answers, `failed` when its latest answer stopped on an error, `seen` when its owner last saw it (0 for never),
  * so one modified since is unread.
  */
-export const SummarySchema = Type.Object({
-  id: Type.Number(),
-  name: Type.String(),
-  first: Type.String(),
-  messages: Type.Number(),
-  created: Type.Number(),
-  modified: Type.Number(),
-  running: Type.Boolean(),
-  failed: Type.Boolean(),
-  pinned: Type.Boolean(),
-  archived: Type.Boolean(),
-  seen: Type.Number(),
+export const SummarySchema = obj({
+  id: num(),
+  name: str(),
+  first: str(),
+  messages: num(),
+  created: num(),
+  modified: num(),
+  running: bool(),
+  failed: bool(),
+  pinned: bool(),
+  archived: bool(),
+  seen: num(),
 });
 export type Summary = Static<typeof SummarySchema>;
-const Summaries = Type.Array(SummarySchema);
+const Summaries = arr(SummarySchema);
 
 /** A model the owner's agent can use now, with what a client shows to pick it. */
-export const ModelChoiceSchema = Type.Object({
-  provider: Type.String(),
-  modelId: Type.String(),
-  name: Type.String(),
-  contextWindow: Type.Number(),
-  images: Type.Boolean(),
-  thinkingLevels: Type.Array(Type.String()),
+export const ModelChoiceSchema = obj({
+  provider: str(),
+  modelId: str(),
+  name: str(),
+  contextWindow: num(),
+  images: bool(),
+  thinkingLevels: arr(str()),
 });
 /** The models the owner can use now, those whose providers have credentials, and the one a new conversation takes. */
-export const ModelChoicesSchema = Type.Object({ models: Type.Array(ModelChoiceSchema), current: Type.Union([ModelArgs, Type.Null()]) });
+export const ModelChoicesSchema = obj({ models: arr(ModelChoiceSchema), current: union([ModelArgs, nul()]) });
 export type ModelChoices = Static<typeof ModelChoicesSchema>;
 
 /** An owner's conversations. */
-export const Conversations = remote("chopin.conversations", {
-  version: 1,
-  input: Type.Object({}),
-  host: hostNamed(HOST),
+const ConversationsSpec = {
+  version: 2,
+  params: {},
+  hostAddress: () => AgentHost({}),
   variants: {
     owner: {
-      state: { ids: Type.Array(Type.Number()) },
+      state: { ids: arr(num()) },
       methods: {
-        create: method(undefined, Type.Number()) as Query<undefined, TNumber>,
+        create: method(undefined, num()) as Query<undefined, NumberSchema>,
         /** Asks the workspace, so it is not part of the list's state, which would start a workspace just to list. */
         loaded: method(undefined, LoadedSchema) as Query<undefined, typeof LoadedSchema>,
-        fork: method(ForkArgs, Type.Number()) as Query<typeof ForkArgs, TNumber>,
+        fork: method(ForkArgs, num()) as Query<typeof ForkArgs, NumberSchema>,
         summaries: method(undefined, Summaries) as Query<undefined, typeof Summaries>,
         /** Asked anew each time, so a credential set a moment ago shows its provider's models. */
         models: method(undefined, ModelChoicesSchema) as Query<undefined, typeof ModelChoicesSchema>,
       },
     },
   },
-});
+} as const;
+export const Conversations = remote("chopin.conversations", ConversationsSpec);
 
 /**
  * One conversation: its durable view (transcript, live generation, inbox, usage), what it may do, and how the
  * submissions made through it ended, keyed by the id `submit` returned.
  */
-export const Conversation = remote("chopin.conversation", {
-  version: 1,
-  input: Type.Object({ conversation: Type.Number() }),
-  host: hostNamed(HOST),
+const ConversationSpec = {
+  version: 2,
+  params: { conversation: int() },
+  hostAddress: () => AgentHost({}),
   variants: {
     owner: {
       state: {
-        view: Type.Unknown(),
+        view: unknown(),
         mode: ModeSchema,
-        name: Type.String(),
-        submissions: Type.Record(Type.String(), SubmissionSchema),
+        name: str(),
+        submissions: map(SubmissionSchema),
         running: RunningSchema,
       },
       methods: {
-        submit: method(SubmitArgs, Type.Number()) as Query<typeof SubmitArgs, TNumber>,
+        submit: method(SubmitArgs, num()) as Query<typeof SubmitArgs, NumberSchema>,
         /** Runs to the command's end, which may take long; `stopCommand` ends it sooner. */
         shell: method(ShellArgs) as Call<typeof ShellArgs>,
-        stopCommand: method(NoArgs) as Call<TObject<{}>>,
+        stopCommand: method(NoArgs) as Call<typeof NoArgs>,
         /** The whole conversation as transcript lines, what compaction took from the view included. */
-        transcript: method(NoArgs, Type.Array(Type.Unknown())) as Query<TObject<{}>, TArray<TUnknown>>,
+        transcript: method(NoArgs, arr(unknown())) as Query<typeof NoArgs, Schema<unknown[]>>,
+        /** Raw durable history, including ancestors and entries outside the live window. */
+        entries: method(EntriesArgs, EntriesPageSchema) as Query<typeof EntriesArgs, typeof EntriesPageSchema>,
         /** Takes back every message still queued, answering with their texts in the order they were sent. */
-        withdraw: method(NoArgs, Texts) as Query<TObject<{}>, typeof Texts>,
+        withdraw: method(NoArgs, Texts) as Query<typeof NoArgs, typeof Texts>,
         /**
          * Arranges the messages still queued as listed, by their submission ids: in that order, each as it was, with new
          * text, or to steer the turn under way; one left out is taken back. One the agent took up meanwhile stays sent,
@@ -204,17 +239,17 @@ export const Conversation = remote("chopin.conversation", {
          * Asks the latest message again, once the agent has stopped: as it was, or as what is given, which replaces it
          * whole, its images included. The model no longer sees that message or anything after it.
          */
-        retry: method(RetryArgs, Type.Number()) as Query<typeof RetryArgs, TNumber>,
+        resubmit: method(ResubmitArgs, num()) as Query<typeof ResubmitArgs, NumberSchema>,
         /** Starts the model on a fresh context, with a note to carry over if given; the transcript keeps everything. */
         reset: method(ResetArgs) as Call<typeof ResetArgs>,
-        abort: method(NoArgs) as Call<TObject<{}>>,
+        abort: method(NoArgs) as Call<typeof NoArgs>,
         setMode: method(ModeArgs) as Call<typeof ModeArgs>,
         setModel: method(ModelArgs) as Call<typeof ModelArgs>,
         setName: method(NameArgs) as Call<typeof NameArgs>,
         setPinned: method(PinnedArgs) as Call<typeof PinnedArgs>,
         setArchived: method(ArchivedArgs) as Call<typeof ArchivedArgs>,
         /** Marks the conversation seen as it stands now. */
-        markSeen: method(NoArgs) as Call<TObject<{}>>,
+        markSeen: method(NoArgs) as Call<typeof NoArgs>,
         /** What the client shows its user now, such as the page they are on; the model reads it before each request. */
         setContext: method(ContextArgs) as Call<typeof ContextArgs>,
         setThinking: method(ThinkingArgs) as Call<typeof ThinkingArgs>,
@@ -222,77 +257,78 @@ export const Conversation = remote("chopin.conversation", {
       },
     },
   },
-});
+} as const;
+export const Conversation = remote("chopin.conversation", ConversationSpec);
 
-const AuthTypeSchema = Type.Union([Type.Literal("api_key"), Type.Literal("oauth")]);
+const AuthTypeSchema = union([lit("api_key"), lit("oauth")]);
 /** A provider the owner holds a credential for, and its kind; never the secret. */
-export const CredentialSchema = Type.Object({ provider: Type.String(), type: AuthTypeSchema });
+export const CredentialSchema = obj({ provider: str(), type: AuthTypeSchema });
 export type CredentialInfo = Static<typeof CredentialSchema>;
-const CredentialList = Type.Array(CredentialSchema);
-const KeyArgs = Type.Object({ provider: Type.String({ minLength: 1 }), key: Type.String({ minLength: 1 }) });
-const ProviderArgs = Type.Object({ provider: Type.String({ minLength: 1 }) });
+const CredentialList = arr(CredentialSchema);
+const KeyArgs = obj({ provider: str({ min: 1 }), key: str({ min: 1 }) });
+const ProviderArgs = obj({ provider: str({ min: 1 }) });
 
 /** A way to sign in to a provider: its own sign-in, which a subscription may back, or an API key entered once. */
-export const LoginWaySchema = Type.Object({ type: AuthTypeSchema, name: Type.String(), subscription: Type.Boolean() });
+export const LoginWaySchema = obj({ type: AuthTypeSchema, name: str(), subscription: bool() });
 /**
  * A provider the owner's models know, each way a client can sign in to it, and the hosts its models are reached at,
  * so an integrator that limits where the service connects can admit them.
  */
-export const ProviderEntrySchema = Type.Object({ id: Type.String(), name: Type.String(), ways: Type.Array(LoginWaySchema), hosts: Type.Array(Type.String()) });
+export const ProviderEntrySchema = obj({ id: str(), name: str(), ways: arr(LoginWaySchema), hosts: arr(str()) });
 export type ProviderEntry = Static<typeof ProviderEntrySchema>;
-const ProviderList = Type.Array(ProviderEntrySchema);
+const ProviderList = arr(ProviderEntrySchema);
 
 /** News from a login as the provider gives it: a page to open, a code to enter on any device, a note, or progress. */
-export const LoginEventSchema = Type.Union([
-  Type.Object({ type: Type.Literal("auth_url"), url: Type.String(), instructions: Type.Optional(Type.String()) }),
-  Type.Object({ type: Type.Literal("device_code"), userCode: Type.String(), verificationUri: Type.String(), expiresInSeconds: Type.Optional(Type.Number()) }),
-  Type.Object({ type: Type.Literal("info"), message: Type.String(), links: Type.Optional(Type.Array(Type.Object({ url: Type.String(), label: Type.Optional(Type.String()) }))) }),
-  Type.Object({ type: Type.Literal("progress"), message: Type.String() }),
+export const LoginEventSchema = union([
+  obj({ type: lit("auth_url"), url: str(), instructions: opt(str()) }),
+  obj({ type: lit("device_code"), userCode: str(), verificationUri: str(), expiresInSeconds: opt(num()) }),
+  obj({ type: lit("info"), message: str(), links: opt(arr(obj({ url: str(), label: opt(str()) }))) }),
+  obj({ type: lit("progress"), message: str() }),
 ]);
 export type LoginEvent = Static<typeof LoginEventSchema>;
 /** What a login asks the owner now, answered by its `id`: a `select` with an option's id, the others with text. */
-export const LoginPromptSchema = Type.Object({
-  id: Type.Number(),
-  type: Type.Union([Type.Literal("text"), Type.Literal("secret"), Type.Literal("select"), Type.Literal("manual_code")]),
-  message: Type.String(),
-  placeholder: Type.Optional(Type.String()),
-  options: Type.Optional(Type.Array(Type.Object({ id: Type.String(), label: Type.String(), description: Type.Optional(Type.String()) }))),
+export const LoginPromptSchema = obj({
+  id: num(),
+  type: union([lit("text"), lit("secret"), lit("select"), lit("manual_code")]),
+  message: str(),
+  placeholder: opt(str()),
+  options: opt(arr(obj({ id: str(), label: str(), description: opt(str()) }))),
 });
 export type LoginPrompt = Static<typeof LoginPromptSchema>;
 /** The owner's latest login: running, with what it said and what it asks now, or how it ended. */
-export const LoginSchema = Type.Object({
-  id: Type.Number(),
-  provider: Type.String(),
+export const LoginSchema = obj({
+  id: num(),
+  provider: str(),
   type: AuthTypeSchema,
-  status: Type.Union([Type.Literal("running"), Type.Literal("done"), Type.Literal("failed"), Type.Literal("cancelled")]),
-  events: Type.Array(LoginEventSchema),
-  prompt: Type.Optional(LoginPromptSchema),
-  error: Type.Optional(Type.String()),
+  status: union([lit("running"), lit("done"), lit("failed"), lit("cancelled")]),
+  events: arr(LoginEventSchema),
+  prompt: opt(LoginPromptSchema),
+  error: opt(str()),
 });
 export type LoginState = Static<typeof LoginSchema>;
-const LoginArgs = Type.Object({ provider: Type.String({ minLength: 1 }), type: AuthTypeSchema });
-const LoginAnswerArgs = Type.Object({ prompt: Type.Number(), value: Type.String() });
-const LoginIdArgs = Type.Object({ login: Type.Number() });
+const LoginArgs = obj({ provider: str({ min: 1 }), type: AuthTypeSchema });
+const LoginAnswerArgs = obj({ prompt: num(), value: str() });
+const LoginIdArgs = obj({ login: num() });
 
 /**
  * The credentials an owner's agent reaches models with, where clients may set them, by a key or by a provider's own
  * login, which the service runs and every client of the owner follows. Secrets only ever travel to the service, which
  * keeps each where it keeps that owner's credentials.
  */
-export const Credentials = remote("chopin.credentials", {
-  version: 1,
-  input: Type.Object({}),
-  host: hostNamed(HOST),
+const CredentialsSpec = {
+  version: 2,
+  params: {},
+  hostAddress: () => AgentHost({}),
   variants: {
     owner: {
-      state: { providers: CredentialList, login: Type.Union([LoginSchema, Type.Null()]) },
+      state: { providers: CredentialList, login: union([LoginSchema, nul()]) },
       methods: {
         setKey: method(KeyArgs) as Call<typeof KeyArgs>,
         remove: method(ProviderArgs) as Call<typeof ProviderArgs>,
         /** Every provider the owner's models know, and how a client signs in to each. */
         catalog: method(undefined, ProviderList) as Query<undefined, typeof ProviderList>,
         /** Starts signing in to `provider` the `type` way, ending a login still running; resolves the new login's id. */
-        startLogin: method(LoginArgs, Type.Number()) as Query<typeof LoginArgs, TNumber>,
+        startLogin: method(LoginArgs, num()) as Query<typeof LoginArgs, NumberSchema>,
         /** Answers what the running login asks, by the prompt's id. */
         answer: method(LoginAnswerArgs) as Call<typeof LoginAnswerArgs>,
         /** Ends the login `login` while it runs, keeping nothing it got. */
@@ -300,89 +336,93 @@ export const Credentials = remote("chopin.credentials", {
       },
     },
   },
-});
+} as const;
+export const Credentials = remote("chopin.credentials", CredentialsSpec);
 
 /** An MCP server a client set, and how many tools it offers, or why it offers none yet; never its headers. */
-export const McpServerSchema = Type.Object({ name: Type.String(), url: Type.String(), tools: Type.Number(), error: Type.Optional(Type.String()) });
+export const McpServerSchema = obj({ name: str(), url: str(), tools: num(), error: opt(str()) });
 export type McpServerState = Static<typeof McpServerSchema>;
-const McpServerName = Type.String({ pattern: "^[A-Za-z0-9_-]{1,32}$" });
-const McpArgs = Type.Object({ name: McpServerName, url: Type.String({ minLength: 1 }), headers: Type.Optional(Type.Record(Type.String(), Type.String())) });
-const McpNameArgs = Type.Object({ name: McpServerName });
+const McpServerName = str({ pattern: "^[A-Za-z0-9_-]{1,32}$" });
+const McpArgs = obj({ name: McpServerName, url: str({ min: 1 }), headers: opt(map(str())) });
+const McpNameArgs = obj({ name: McpServerName });
 
 /**
  * The MCP servers an owner's clients set, on top of the layer's: kept in memory alone, headers and all, so a client
  * sets them again once the service restarts, except that a sealed service keeps them, encrypted at rest. Setting one
  * by a name already set replaces it, its headers included.
  */
-export const Mcp = remote("chopin.mcp", {
-  version: 1,
-  input: Type.Object({}),
-  host: hostNamed(HOST),
+const McpSpec = {
+  version: 2,
+  params: {},
+  hostAddress: () => AgentHost({}),
   variants: {
     owner: {
-      state: { servers: Type.Array(McpServerSchema) },
+      state: { servers: arr(McpServerSchema) },
       methods: {
         set: method(McpArgs) as Call<typeof McpArgs>,
         remove: method(McpNameArgs) as Call<typeof McpNameArgs>,
       },
     },
   },
-});
+} as const;
+export const Mcp = remote("chopin.mcp", McpSpec);
 
-const VariableName = Type.String({ pattern: "^[A-Za-z_][A-Za-z0-9_]*$" });
-const VariableArgs = Type.Object({ name: VariableName, value: Type.String() });
-const VariableNameArgs = Type.Object({ name: VariableName });
+const VariableName = str({ pattern: "^[A-Za-z_][A-Za-z0-9_]*$" });
+const VariableArgs = obj({ name: VariableName, value: str() });
+const VariableNameArgs = obj({ name: VariableName });
 
 /**
  * Variables every command the owner's agent runs gets, such as a credential for a host its tools reach, which so reaches
  * the commands without passing through a conversation: kept in memory alone, so a client sets them again once the
  * service restarts. Setting one by a name already set replaces it; the state names them, never their values.
  */
-export const Environment = remote("chopin.environment", {
-  version: 1,
-  input: Type.Object({}),
-  host: hostNamed(HOST),
+const EnvironmentSpec = {
+  version: 2,
+  params: {},
+  hostAddress: () => AgentHost({}),
   variants: {
     owner: {
-      state: { names: Type.Array(Type.String()) },
+      state: { names: arr(str()) },
       methods: {
         set: method(VariableArgs) as Call<typeof VariableArgs>,
         remove: method(VariableNameArgs) as Call<typeof VariableNameArgs>,
       },
     },
   },
-});
+} as const;
+export const Environment = remote("chopin.environment", EnvironmentSpec);
 
 /** The key a sealed service opens with, as `serviceKey` derives it from the owner's data key: 32 bytes in base64url. */
-const UnlockArgs = Type.Object({ key: Type.String({ pattern: "^[A-Za-z0-9_-]{43}$" }) });
+const UnlockArgs = obj({ key: str({ pattern: "^[A-Za-z0-9_-]{43}$" }) });
 
 /**
  * Whether the service waits for its key. A sealed service keeps everything of its owner's encrypted at rest and opens
  * none of it before a client unlocks it, serving nothing else until then; any other service is never locked.
  */
-export const Vault = remote("chopin.vault", {
-  version: 1,
-  input: Type.Object({}),
-  host: hostNamed(HOST),
+const VaultSpec = {
+  version: 2,
+  params: {},
+  hostAddress: () => AgentHost({}),
   variants: {
     owner: {
-      state: { locked: Type.Boolean() },
+      state: { locked: bool() },
       methods: {
         /** Refused with `wrong_key` for any key but the one the service was first unlocked with; harmless once open. */
         unlock: method(UnlockArgs) as Call<typeof UnlockArgs>,
       },
     },
   },
-});
+} as const;
+export const Vault = remote("chopin.vault", VaultSpec);
 
 /** Opens a sealed service with the owner's data key unless it is open already, waiting no longer than one call. */
-export function unlock(host: Host, key: DataKey, options: CallOptions = {}): Promise<void> {
+export function unlock(host: Client, key: DataKey, options: CallOptions = {}): Promise<void> {
   return within(options, async (signal) => {
-    const vault = await host.get(Vault, {}, { signal });
+    const vault = await host.get(Vault, {}, { signal, timeoutMs: Infinity });
     try {
       if (!vault.locked.value) return;
       const derived = await serviceKey(key);
-      await host.root((ctx) => vault.unlock({ key: derived }, ctx), { signal });
+      await host.root((ctx) => vault.unlock({ key: derived }, ctx), { signal, timeoutMs: Infinity });
     } finally {
       vault.release();
     }
@@ -390,60 +430,65 @@ export function unlock(host: Host, key: DataKey, options: CallOptions = {}): Pro
 }
 
 /** Where the RSI loop stands: the layer version in use, the failures it knows, what waits for the owner, what it spent. */
-export const LoopStandingSchema = Type.Object({
-  version: Type.Number(),
-  inUse: Type.Number(),
-  archived: Type.Number(),
-  kinds: Type.Number(),
-  recurring: Type.Number(),
-  shelved: Type.Number(),
-  corrections: Type.Number(),
-  held: Type.Number(),
-  spentUsd: Type.Number(),
-  weeklyBudgetUsd: Type.Union([Type.Number(), Type.Null()]),
+export const LoopStandingSchema = obj({
+  version: num(),
+  inUse: num(),
+  archived: num(),
+  kinds: num(),
+  recurring: num(),
+  shelved: num(),
+  corrections: num(),
+  held: num(),
+  spentUsd: num(),
+  weeklyBudgetUsd: union([num(), nul()]),
 });
 /** A change the loop kept, archived or in use. */
-export const LoopChangeSchema = Type.Object({ id: Type.String(), added: Type.String(), kind: Type.String(), archived: Type.Boolean(), text: Type.String() });
+export const LoopChangeSchema = obj({ id: str(), added: str(), kind: str(), archived: bool(), text: str() });
 /** A kind of correction the owner made in enough sessions to be asked whether the loop learns from it. */
-export const CorrectionKindSchema = Type.Object({ key: Type.String(), sessions: Type.Number(), examples: Type.Array(Type.String()) });
+export const CorrectionKindSchema = obj({ key: str(), sessions: num(), examples: arr(str()) });
 /** A change the audit held for the owner to approve, which is still tested before it is kept, or refuse. */
-export const HeldChangeSchema = Type.Object({
-  id: Type.String(),
-  failure: Type.String(),
-  kind: Type.String(),
-  skill: Type.Optional(Type.String()),
-  text: Type.String(),
-  prediction: Type.String(),
-  reasons: Type.Array(Type.String()),
+export const HeldChangeSchema = obj({
+  id: str(),
+  failure: str(),
+  kind: str(),
+  skill: opt(str()),
+  text: str(),
+  prediction: str(),
+  reasons: arr(str()),
 });
 /** How the loop runs: none runs without a weekly budget; models as `provider/model`. */
-export const LoopSettingsSchema = Type.Object({
-  weeklyBudgetUsd: Type.Union([Type.Number({ minimum: 0 }), Type.Null()]),
-  regularModel: Type.Union([Type.String({ minLength: 1 }), Type.Null()]),
-  strongModel: Type.Union([Type.String({ minLength: 1 }), Type.Null()]),
-  holdForReview: Type.Boolean(),
+export const LoopSettingsSchema = obj({
+  weeklyBudgetUsd: union([num({ min: 0 }), nul()]),
+  regularModel: union([str({ min: 1 }), nul()]),
+  strongModel: union([str({ min: 1 }), nul()]),
+  holdForReview: bool(),
 });
 export type LoopStanding = Static<typeof LoopStandingSchema>;
 export type LoopChange = Static<typeof LoopChangeSchema>;
 export type CorrectionKind = Static<typeof CorrectionKindSchema>;
 export type HeldChange = Static<typeof HeldChangeSchema>;
 export type LoopSettings = Static<typeof LoopSettingsSchema>;
-const LoopChanges = Type.Array(LoopChangeSchema);
-const CorrectionKinds = Type.Array(CorrectionKindSchema);
-const HeldChanges = Type.Array(HeldChangeSchema);
-const SettingsChange = Type.Partial(LoopSettingsSchema);
-const UndoArgs = Type.Object({ id: Type.String({ minLength: 1 }) });
-const AnswerArgs = Type.Object({ key: Type.String({ minLength: 1 }), learn: Type.Boolean() });
-const DecideArgs = Type.Object({ id: Type.String({ minLength: 1 }), approve: Type.Boolean() });
+const LoopChanges = arr(LoopChangeSchema);
+const CorrectionKinds = arr(CorrectionKindSchema);
+const HeldChanges = arr(HeldChangeSchema);
+const SettingsChange = obj({
+  weeklyBudgetUsd: opt(union([num({ min: 0 }), nul()])),
+  regularModel: opt(union([str({ min: 1 }), nul()])),
+  strongModel: opt(union([str({ min: 1 }), nul()])),
+  holdForReview: opt(bool()),
+});
+const UndoArgs = obj({ id: str({ min: 1 }) });
+const AnswerArgs = obj({ key: str({ min: 1 }), learn: bool() });
+const DecideArgs = obj({ id: str({ min: 1 }), approve: bool() });
 
 /**
  * The owner's RSI loop: what it learned and spent, and the decisions it waits on. Only clients reach it; the agent
  * has no tool for it, so it never approves its own changes.
  */
-export const Loop = remote("chopin.loop", {
-  version: 1,
-  input: Type.Object({}),
-  host: hostNamed(HOST),
+const LoopSpec = {
+  version: 2,
+  params: {},
+  hostAddress: () => AgentHost({}),
   variants: {
     owner: {
       state: {},
@@ -463,7 +508,8 @@ export const Loop = remote("chopin.loop", {
       },
     },
   },
-});
+} as const;
+export const Loop = remote("chopin.loop", LoopSpec);
 
 /** The loop a service's owner is answered from; an action refused says why, and nothing else of it fails that way. */
 export interface LoopControl {
@@ -478,82 +524,16 @@ export interface LoopControl {
   setSettings(change: Partial<LoopSettings>): Promise<LoopSettings>;
 }
 
-export interface ConnectOptions {
-  /** A credential sent as a bearer header, kept out of the address and so out of any proxy's logs; not in browsers. */
-  token?: string;
-  /** Finds the service again before each redial: where it is and the credential it takes, either may have changed. */
-  find?: () => Promise<{ url: string | URL; token?: string }>;
-}
-
-/**
- * A client host connected to the agent service at `url`, which carries the client's credential. A link that drops
- * is dialled again, waiting longer each time, until the host is closed; references come back live once the service
- * answers. Only a link that held for a while resets the wait, so a refused one is not dialled ever faster.
- */
-export function connect(url: string | URL, options: ConnectOptions = {}): Host {
-  const host = createHost({ name: `client:${randomId()}`, self: { kind: "host" }, kind: "client" });
-  let open = true;
-  const waits = backoff(250, 10_000);
-  let redial: ReturnType<typeof setTimeout> | undefined;
-  const again = () => {
-    if (!open) return;
-    redial = setTimeout(() => {
-      (options.find?.() ?? Promise.resolve({ url, token: options.token })).then(dial).catch(again);
-    }, waits.next());
-  };
-  const dial = ({ url: at, token }: { url: string | URL; token?: string | undefined }) => {
-    if (!open) return;
-    // Node's WebSocket takes headers; a browser has its cookie instead.
-    const socket = token === undefined ? new WebSocket(at) : new WebSocket(at, { headers: { authorization: `Bearer ${token}` } });
-    let opened: number | undefined;
-    socket.addEventListener("open", () => void (opened = Date.now()));
-    const link = webSocketLink(socket);
-    link.onClose(() => {
-      if (opened !== undefined && Date.now() - opened >= HELD_MS) waits.reset();
-      again();
-    });
-    host.connect(link, { principal: { kind: "host" } });
-  };
-  dial({ url, token: options.token });
-  const close = host.close.bind(host);
-  host.close = async () => {
-    open = false;
-    clearTimeout(redial);
-    await close();
-  };
-  return host;
-}
-
-/** How long a link must hold to count as a working one, which dials again without waiting long. */
-const HELD_MS = 5_000;
-
-/** How long a call waits for the service, through any reconnect, before it fails. */
-export const CALL_TIMEOUT_MS = 30_000;
-
-/** A call that waited longer than its bound for the service. */
-export class CallTimeout extends Error {
-  constructor(options?: ErrorOptions) {
-    super("the agent service did not answer in time", options);
-  }
-}
-
-export interface CallOptions {
-  /** `CALL_TIMEOUT_MS` by default; `Infinity` waits for as long as the work takes. */
-  timeoutMs?: number;
-  /** Gives up the call. */
-  signal?: AbortSignal;
-}
-
 /** Runs `work` against the service, failing with `CallTimeout` once it has waited too long for an answer. */
-export function call<T>(host: Host, work: (ctx: Ctx) => Promise<T>, options: CallOptions = {}): Promise<T> {
-  return within(options, (signal) => host.root(work, { signal }));
+export function call<T>(host: Client, work: (ctx: Ctx) => Promise<T>, options: CallOptions = {}): Promise<T> {
+  return host.root(work, options);
 }
 
-export type ConversationRef = Ref<typeof Conversation>;
+export type ConversationRef = Reference<typeof Conversation>;
 
 /** One conversation of the service, held until released, waited for as long as a call. */
-export function openConversation(host: Host, conversation: number, options: CallOptions = {}): Promise<ConversationRef> {
-  return within(options, (signal) => host.get(Conversation, { conversation }, { signal }));
+export function openConversation(host: Client, conversation: number, options: CallOptions = {}): Promise<ConversationRef> {
+  return host.get(Conversation, { conversation }, options);
 }
 
 /**
@@ -562,18 +542,18 @@ export function openConversation(host: Host, conversation: number, options: Call
  */
 export interface HeldList {
   /** The list, waited for no longer than `signal` allows; an open under way goes on for whoever asks next. */
-  get(signal?: AbortSignal): Promise<Ref<typeof Conversations>>;
+  get(signal?: AbortSignal): Promise<Reference<typeof Conversations>>;
   release(): void;
 }
 
-export function heldList(host: Host, options: CallOptions = {}): HeldList {
-  let held: Ref<typeof Conversations> | undefined;
-  let opening: Promise<Ref<typeof Conversations>> | undefined;
+export function heldList(host: Client, options: CallOptions = {}): HeldList {
+  let held: Reference<typeof Conversations> | undefined;
+  let opening: Promise<Reference<typeof Conversations>> | undefined;
   let released = false;
   return {
     get: (signal) => {
       if (released) return Promise.reject(new Error("the list was released"));
-      if (held !== undefined && (held.status === "live" || held.status === "loading")) return Promise.resolve(held);
+      if (held !== undefined && held.state.value.kind !== "ended") return Promise.resolve(held);
       held?.release();
       held = undefined;
       opening ??= openConversations(host, options).then(
@@ -613,8 +593,8 @@ function abandonable<T>(promise: Promise<T>, signal: AbortSignal): Promise<T> {
 
 /** Starts a new conversation in the owner's list and opens it, waiting no longer than any one call. */
 export async function startConversation(
-  host: Host,
-  list: (signal: AbortSignal) => Promise<Ref<typeof Conversations>>,
+  host: Client,
+  list: (signal: AbortSignal) => Promise<Reference<typeof Conversations>>,
   options: CallOptions = {},
 ): Promise<{ id: number; conversation: ConversationRef }> {
   // Two calls, so a link lost after the conversation was made opens it rather than making another; together they
@@ -622,15 +602,15 @@ export async function startConversation(
   const started = Date.now();
   const id = await within(options, async (signal) => {
     const conversations = await list(signal);
-    return host.root((ctx) => conversations.create(ctx), { signal });
+    return host.root((ctx) => conversations.create(ctx), { signal, timeoutMs: Infinity });
   });
   const left = Math.max(0, (options.timeoutMs ?? CALL_TIMEOUT_MS) - (Date.now() - started));
   return { id, conversation: await openConversation(host, id, { ...options, timeoutMs: left }) };
 }
 
 /** The owner's list of conversations, held until released, waited for as long as a call. */
-export function openConversations(host: Host, options: CallOptions = {}): Promise<Ref<typeof Conversations>> {
-  return within(options, (signal) => host.get(Conversations, {}, { signal }));
+export function openConversations(host: Client, options: CallOptions = {}): Promise<Reference<typeof Conversations>> {
+  return host.get(Conversations, {}, options);
 }
 
 /** An error's text as every client shows it. */
@@ -661,8 +641,9 @@ export function errorChain(error: unknown): string {
 }
 
 /** Why a reference ended: its error, or else its status. */
-export function endText(ref: { readonly status: string; readonly error?: unknown }): string {
-  return errorText(ref.error ?? ref.status);
+export function endText(ref: { readonly state: { readonly value: RefState } }): string {
+  const state = ref.state.value;
+  return state.kind === "ended" ? errorText(state.error) : state.kind === "failed" ? errorText(state.cause.error) : state.kind;
 }
 
 /** A random id; a page served over plain HTTP has no `crypto.randomUUID`, but every page has random values. */
@@ -686,40 +667,15 @@ export function resender(): (text: string, submit: (request: string) => Promise<
   };
 }
 
-/** Runs `work` with a signal that aborts once `options` say to stop waiting, failing then with `CallTimeout`. */
-export async function within<T>(options: CallOptions, work: (signal: AbortSignal) => Promise<T>): Promise<T> {
-  const bound = options.timeoutMs ?? CALL_TIMEOUT_MS;
-  const timeout = Number.isFinite(bound) ? AbortSignal.timeout(bound) : undefined;
-  const signal = AbortSignal.any([timeout, options.signal].filter((each) => each !== undefined));
-  try {
-    for (;;) {
-      try {
-        return await work(signal);
-      } catch (error) {
-        // Between dials there is no link, so nothing was sent: the work waits for the next one rather than failing.
-        if (!(isChordError(error) && error.code === "unavailable" && error.message.includes("no route to"))) throw error;
-        await pause(UNROUTED_RETRY_MS, signal);
-      }
-    }
-  } catch (error) {
-    throw timeout?.aborted === true ? new CallTimeout({ cause: error }) : error;
-  }
-}
-
-const UNROUTED_RETRY_MS = 100;
-
-/** Resolves after `ms`, or rejects once `signal` aborts. */
-function pause(ms: number, signal: AbortSignal): Promise<void> {
-  return new Promise((resolve, reject) => {
-    const done = () => {
-      clearTimeout(timer);
-      reject(signal.reason);
-    };
-    const timer = setTimeout(() => {
-      signal.removeEventListener("abort", done);
-      resolve();
-    }, ms);
-    if (signal.aborted) return done();
-    signal.addEventListener("abort", done, { once: true });
-  });
-}
+/** Application-owned declarations used by native clients and compatibility checks. */
+export const contracts = [
+  { type: Goals, spec: GoalsSpec },
+  { type: Goal, spec: GoalSpec },
+  { type: Conversations, spec: ConversationsSpec },
+  { type: Conversation, spec: ConversationSpec },
+  { type: Credentials, spec: CredentialsSpec },
+  { type: Mcp, spec: McpSpec },
+  { type: Environment, spec: EnvironmentSpec },
+  { type: Vault, spec: VaultSpec },
+  { type: Loop, spec: LoopSpec },
+] as const;

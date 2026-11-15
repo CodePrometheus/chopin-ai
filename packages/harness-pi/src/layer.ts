@@ -1,6 +1,6 @@
 import { readFile } from "node:fs/promises";
 import { relative, resolve, sep } from "node:path";
-import { Type } from "@earendil-works/pi-ai";
+import { Type } from "typebox";
 import {
   defineDoc,
   defineExtension,
@@ -15,7 +15,7 @@ import {
 import {
   effectiveLayer, gateRefusal, skillBody, unmetGates, type Layer, type LayerVersions, type Skill,
 } from "@chopin-ai/core";
-import type { Context } from "@earendil-works/chord";
+import type { Context } from "@earendil-works/chord/context";
 import type { ConversationId, ConversationRecord, DocumentReader, ModelRef, ToolExecutionApi, Tx } from "@earendil-works/pi-durable";
 
 /** The loop's versions a session layers over the hand-written layer: those for every project, and this project's. */

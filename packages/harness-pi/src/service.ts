@@ -1,7 +1,7 @@
 import { createHash } from "node:crypto";
 import { chmod, mkdir, rename, writeFile } from "node:fs/promises";
 import { join } from "node:path";
-import type { Context } from "@earendil-works/chord";
+import type { Context } from "@earendil-works/chord/context";
 import type { ExecutionError, Result, ShellExecOptions, ShellExecResult } from "@earendil-works/pi-durable/env";
 import { BACKGROUND_CONTEXT } from "@earendil-works/chord/context";
 import { getSupportedThinkingLevels, type AssistantMessage, type AuthInteraction, type AuthType, type CredentialInfo, type CredentialStore, type Models } from "@earendil-works/pi-ai";
@@ -40,14 +40,14 @@ import { unansweredText, type Loaded, type McpServerState, type ModelChoices, ty
 import { clientContext } from "./client-context.js";
 import { contextFiles, projectContext } from "./project-context.js";
 import { runShell, ShellEntry, type ShellRun } from "./shell.js";
+import { GoalEngine, type GoalOptions } from "./goals/engine.js";
+import type { EngineCommand, EngineReceipt } from "./goals/contracts.js";
+import { refusal } from "./service-error.js";
 
 /** Built-in tools that change nothing, so a read-only conversation may still use them. */
 const READ_ONLY = new Set(["read", "skill"]);
 
 const EMPTY_LAYER: Layer = { instructions: undefined, skills: [], mcpServers: {}, gates: [] };
-
-/** How long an open under way counts as an agent at work. */
-const OPEN_PATIENCE_MS = 10 * 60_000;
 
 /** How often an owner's unreachable MCP servers are tried again. */
 const MCP_RETRY_MS = 30_000;
@@ -58,6 +58,8 @@ const FIXED_CREDENTIALS = "this service takes its credentials from where it runs
 export const DAEMON_PATH = "/usr/local/bin/pi-env";
 
 export interface AgentServiceOptions {
+  /** Explicit goal authorization, verification and effect-reconciliation adapters for each owner. */
+  goals?: (owner: string) => GoalOptions;
   /** Holds one store per owner. It must not be reachable from any workspace. */
   dataDir: string;
   workspaces: WorkspaceProvider;
@@ -104,6 +106,7 @@ interface Opened {
   harness: Harness;
   storage: Storage;
   idle: IdleCompaction;
+  goals?: GoalEngine;
   /** The owner's workspace as the agent's tools reach it. */
   env(): RemoteExecutionEnv;
   mcp: McpServers;
@@ -162,6 +165,29 @@ export class AgentService {
    */
   async harness(owner: string): Promise<Harness> {
     return (await this.#openedFor(owner)).harness;
+  }
+  /** Execution-owned goal coordinator; absence is an explicit unsupported capability. */
+  async goals(owner: string): Promise<GoalEngine> {
+    const goals = (await this.#openedFor(owner)).goals;
+    if (goals === undefined) throw refusal("goals_unavailable", "this service has no goal execution adapters");
+    return goals;
+  }
+  /** Whether a conversation may accept legacy direct execution commands. */
+  async directConversation(owner: string, conversation?: number): Promise<boolean> {
+    const goals = (await this.#openedFor(owner)).goals;
+    if (goals === undefined) return true;
+    if (!goals.allowDirectConversations) return false;
+    return conversation === undefined || await goals.store.forConversation(conversation as ConversationId, BACKGROUND_CONTEXT) === undefined;
+  }
+  /** Admit through execution and publish the new visible conversation only after its receipt is durable. */
+  async executeGoal(owner: string, envelope: EngineCommand, context: Context): Promise<EngineReceipt> {
+    const goals = await this.goals(owner);
+    const receipt = await goals.execute(envelope, await this.#agent(owner), context);
+    if (envelope.command.kind === "goal.submit") {
+      const goal = await goals.store.snapshot(receipt.goalId, context);
+      for (const listener of this.#made) listener(owner, goal.conversationId);
+    }
+    return receipt;
   }
 
   /** A new top-level conversation of the owner's agent, running with the configured agent choices. */
@@ -522,13 +548,11 @@ export class AgentService {
   async working(): Promise<string[]> {
     const owners = await Promise.all([...this.#agents].map(async ([owner, agent]) => {
       if (this.#commands.has(owner)) return [owner];
-      // One still opening is working, for a while: it is not waited on, so a slow open holds up nobody else, and
-      // one that never finishes does not keep its workspace from being reclaimed.
-      if (agent.ready === undefined) return Date.now() - agent.since < OPEN_PATIENCE_MS ? [owner] : [];
+      if (agent.ready === undefined) return [owner];
       try {
         const inspection = await agent.ready.harness.inspect(BACKGROUND_CONTEXT);
         agent.unclear = false;
-        return inspection.tasks.length > 0 || inspection.submissions.length > 0 ? [owner] : [];
+        return inspection.tasks.length > 0 || inspection.submissions.length > 0 || await agent.ready.goals?.store.active(BACKGROUND_CONTEXT) ? [owner] : [];
       } catch (error) {
         // One whose state cannot be told counts as working, so nothing is stopped under it; it is told once.
         if (!agent.unclear) this.#options.report?.(error);
@@ -544,19 +568,19 @@ export class AgentService {
    * belongs to the task that made it.
    */
   async conversations(owner: string): Promise<number[]> {
-    const { storage } = await this.#openedFor(owner);
+    const { storage, goals } = await this.#openedFor(owner);
     const records = await drain(
       (cursor: Cursor | undefined) => storage.scanConversations({ order: "ascending" }, 256, cursor, BACKGROUND_CONTEXT),
-      topLevel,
     );
-    return records.map((record) => Number(record.id));
+    const visible = await Promise.all(records.map(async (record) => topLevel(record) || goals !== undefined && await goals.store.forConversation(record.id, BACKGROUND_CONTEXT) !== undefined));
+    return records.filter((_record, index) => visible[index]).map((record) => Number(record.id));
   }
 
   /** Whether `conversation` is one of the owner's top-level conversations, the only ones clients may use. */
   async isTopLevel(owner: string, conversation: number): Promise<boolean> {
-    const { storage } = await this.#openedFor(owner);
+    const { storage, goals } = await this.#openedFor(owner);
     const record = await storage.conversation(conversation as ConversationId, BACKGROUND_CONTEXT);
-    return record !== undefined && topLevel(record);
+    return record !== undefined && (topLevel(record) || goals !== undefined && await goals.store.forConversation(record.id, BACKGROUND_CONTEXT) !== undefined);
   }
 
   /** The owner's harness for a client object, which gives it back with `release` once done with it. */
@@ -627,6 +651,7 @@ export class AgentService {
     const connection = new Connection({ command: () => this.#daemon(workspace) });
     let storage: Storage | undefined;
     let harness: Harness | undefined;
+    let goals: GoalEngine | undefined;
     const idle = new IdleCompaction({
       models: this.#options.models(owner),
       eligible: async (id) => {
@@ -673,13 +698,17 @@ export class AgentService {
       await mkdir(this.#options.dataDir, { recursive: true });
       await chmod(this.#options.dataDir, 0o700);
       storage = await (this.#options.store?.(owner) ?? openNodeSqliteStorage(join(this.#options.dataDir, `${fingerprint(owner)}.sqlite`)));
+      const goalOptions = this.#options.goals?.(owner);
+      if (goalOptions !== undefined) { goals = new GoalEngine(goalOptions); for (const extension of goals.extensions) registry.install(extension); }
       harness = await Harness.open(storage, {
         models: this.#options.models(owner),
         registry,
-        env: ({ cwd }) => env(cwd),
+        settings: () => goals?.settings(registry),
+        env: async ({ conversationId, cwd }, context) => await goals?.isReview(conversationId, context) ? undefined : env(cwd),
         onReport: report,
         ...(this.#options.layerVersions && { conversationCreated: pinLayerVersions(this.#options.layerVersions) }),
       }, context);
+      goals?.attach(harness, storage);
       idle.attach(harness);
       const agent = await this.#agent(owner);
       if (agent !== undefined) await harness.root(context, { agent });
@@ -709,6 +738,7 @@ export class AgentService {
         harness: opened,
         storage,
         idle,
+        ...(goals === undefined ? {} : { goals }),
         env,
         mcp,
         serve: async (name, server) => {
@@ -724,6 +754,7 @@ export class AgentService {
           try {
             await opened.close(closing);
           } finally {
+            await goals?.close();
             await mcp.close();
             connection.close();
           }
