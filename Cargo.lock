@@ -327,7 +327,7 @@ dependencies = [
 
 [[package]]
 name = "chopin-job-broker"
-version = "0.7.0-rc1"
+version = "0.7.0-rc2"
 dependencies = [
  "async-io",
  "async-trait",
@@ -359,7 +359,7 @@ dependencies = [
 
 [[package]]
 name = "chopin-protocol"
-version = "0.7.0-rc1"
+version = "0.7.0-rc2"
 dependencies = [
  "flate2",
  "futures-util",

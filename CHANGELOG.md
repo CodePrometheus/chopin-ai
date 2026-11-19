@@ -7,6 +7,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.7.0-rc2] - 2026-11-19
+
+### Added
+
+- The `chopin initialize` command creates an encrypted store under host authorization.
+  The `chopin cloud --supervise` command restores it and starts a replacement service
+  in the same allocation after an unexpected exit.
+- The Linux `chopin-job-worker` service runs protected commands, retains their output,
+  and reconciles accepted work after a controller restart. An authorized client can
+  resume output from its saved cursor. Read-only observers can inspect a job without
+  taking a write lock.
+- The hosted runtime is available as `chopin-ai/cloud`. Its container build includes
+  the native storage binding. Hosts using the npm package directly can build the
+  binding from the matching Git tag and configure its location.
+
+### Changed
+
+- Rust components require Rust 1.100. The JavaScript CLI and durable adapter require
+  Node.js 26.1 or later.
+
 ## [0.7.0-rc1] - 2026-11-15
 
 ### Added
@@ -292,7 +312,9 @@ the agent loop, sessions, UI, skills and model access.
 - Model endpoint proxy through `CHOPIN_LLM_PROXY`, and opt-in hot reload while developing with
   `CHOPIN_HMR=1`.
 
-[unreleased]: https://github.com/CodePrometheus/chopin-ai/compare/v0.6.0...HEAD
+[unreleased]: https://github.com/CodePrometheus/chopin-ai/compare/v0.7.0-rc2...HEAD
+[0.7.0-rc2]: https://github.com/CodePrometheus/chopin-ai/compare/v0.7.0-rc1...v0.7.0-rc2
+[0.7.0-rc1]: https://github.com/CodePrometheus/chopin-ai/compare/v0.6.0...v0.7.0-rc1
 [0.6.0]: https://github.com/CodePrometheus/chopin-ai/compare/v0.5.0...v0.6.0
 [0.5.0]: https://github.com/CodePrometheus/chopin-ai/compare/v0.4.1...v0.5.0
 [0.4.1]: https://github.com/CodePrometheus/chopin-ai/compare/v0.4.0...v0.4.1

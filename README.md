@@ -14,10 +14,10 @@
 
 </div>
 
-> **Release candidate:** `0.7.0-rc1` adds durable goals, private completion review,
-> native integration libraries, and recovery checks. Embedded hosts supply real
-> authority, resource reconciliation, isolation, and supervision. It is an execution
-> component release, not a complete cloud deployment. The latest stable line remains `0.6.x`.
+> **Release candidate** — `0.7.0-rc2` adds supervised hosted execution, encrypted
+> storage initialization, and a durable command worker. Applications embedding Chopin
+> supply identity, authorization, persistent volumes, and process isolation.
+> See the [host integration guide](apps/tui/cloud.md) for the runtime and native build requirements.
 
 ## Install
 
@@ -25,7 +25,7 @@
 npm install -g chopin-ai
 ```
 
-For the release candidate, use `npm install -g chopin-ai@0.7.0-rc1`.
+For the release candidate, use `npm install -g chopin-ai@0.7.0-rc2`.
 
 Requires Node.js 26.1 or later.
 

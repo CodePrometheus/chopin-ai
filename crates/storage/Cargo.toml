@@ -1,7 +1,7 @@
 [package]
 name = "chopin-storage"
 description = "Encrypted execution storage with authenticated transactional content"
-version = "0.7.0-rc1"
+version = "0.7.0-rc2"
 edition = "2024"
 rust-version = "1.100"
 license = "Apache-2.0"

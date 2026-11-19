@@ -58,10 +58,39 @@ Goal completion uses the configured private reviewer and actual external-operati
 reconciliation. A normal process shutdown drains local activity and seals updated
 home metadata; it does not invent a successful result or restart an accepted command.
 
-Embedding hosts can call `openCloudRuntime()` with their model library and trusted
-verifier. This execution entry does not itself implement cloud provisioning, a
-standalone identity service, the command worker's physical isolation, or persistent
-volume handoff. Those host services remain required for a complete deployment.
+## Embedding the hosted runtime
+
+Install matching versions of the CLI and adapter. An embedding application can
+import the hosted runtime by its public package path.
+
+```ts
+import { openCloudRuntime, type CloudConfiguration } from "chopin-ai/cloud";
+```
+
+The host supplies model access, current authorization, workspace and worker
+provisioning, separate protected mounts, and a recovery supervisor. The CLI
+accepts the same configuration through `chopin cloud --config`.
+
+The npm packages contain JavaScript and type declarations. Encrypted hosted
+storage requires a native module for the target operating system and architecture.
+The service image below builds it automatically. For a direct npm installation,
+build it on the target platform from the same source tag:
+
+```sh
+git clone --depth 1 --branch v0.7.0-rc2 https://github.com/CodePrometheus/chopin-ai.git
+cd chopin-ai
+node scripts/build-storage.mjs
+```
+
+Install the resulting `packages/harness-pi/native/chopin-storage.node` alongside
+the trusted host. Set `storage.nativeModule` to its absolute installed path in
+both the initialization and execution configurations. The build needs the pinned
+Rust toolchain, a C toolchain, make, Perl and a discoverable libclang. Embedders
+can consume the Rust `chopin-protocol` and `chopin-job-broker` crates from the
+same Git tag. Build the worker on Linux with
+`cargo build --release --locked -p chopin-job-broker --features worker-service --bin chopin-job-worker`.
+The worker's additional supervisor, launcher and isolation requirements are in
+the [worker guide](https://github.com/CodePrometheus/chopin-ai/blob/v0.7.0-rc2/crates/job-broker/worker.md).
 
 ## Service image
 
