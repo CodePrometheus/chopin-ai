@@ -13,6 +13,15 @@ of 16 MiB per wire part and 64 MiB per decoded part.
 The caller supplies operation deadlines and owns reconnection and reconciliation.
 Unknown outcomes must be queried with the original application request identifier.
 
+Enable the optional `schema` feature when a host needs JSON Schema for public
+request and response types. Command schemas reuse the producer's exported
+contracts, including exact integer bounds and unknown-field rules. This feature
+does not change serialization or enable execution authority.
+
+The read-only vault verifier types describe the separate HTTP reader contract
+used to verify existing sealed data. They bind each receipt to the original
+reader allocation. The durable WebSocket client does not transfer custody keys.
+
 The replica applies ordered updates without cloning unchanged history. Each
 member has its own path dictionary. Invalid paths, dictionary references, Unicode
 transformations, or incomplete state units invalidate the observation instead of

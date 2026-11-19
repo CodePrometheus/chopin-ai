@@ -1,6 +1,7 @@
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
 use super::*;
+use crate::runtime::NetworkMode;
 use crate::{Callback, Credential, GrantReference, Request, Settings, Source};
 use std::{collections::BTreeMap, process::Stdio};
 use tokio::time::{sleep, timeout};
@@ -44,6 +45,7 @@ impl Fixture {
     }
     fn profile(&self) -> NamespaceConfig {
         NamespaceConfig {
+            network: NetworkMode::Isolated,
             launcher: "/usr/bin/true".into(),
             gate: "/usr/bin/true".into(),
             capture: "/usr/bin/true".into(),

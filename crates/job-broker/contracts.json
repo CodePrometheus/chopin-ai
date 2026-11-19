@@ -1,0 +1,203 @@
+{
+  "output": [
+    {
+      "complete": false,
+      "cursor": "original-cursor",
+      "data": "AP8K",
+      "stream": "stdout"
+    },
+    {
+      "complete": true,
+      "cursor": "stderr-cursor",
+      "data": "ZGlhZ25vc3RpYw",
+      "stream": "stderr"
+    },
+    {
+      "complete": true,
+      "cursor": "end-cursor",
+      "data": "",
+      "stream": null
+    }
+  ],
+  "requests": [
+    {
+      "argv": [
+        "sh",
+        "-c",
+        "printf '%s' \"$MESSAGE\""
+      ],
+      "cwd": "/workspace",
+      "domain": "00000000-0000-0000-0000-000000000001",
+      "env": {
+        "MESSAGE": "hello 世界"
+      },
+      "grant": {
+        "id": "00000000-0000-0000-0000-000000000004",
+        "version": 1
+      },
+      "inheritEnv": false,
+      "policyRevision": "fixture-policy",
+      "source": {
+        "callId": "original-call",
+        "conversationId": 1,
+        "goalId": "original-goal",
+        "kind": "tool",
+        "taskId": 2
+      },
+      "timeoutMs": null,
+      "version": 1
+    },
+    {
+      "argv": [
+        "sh",
+        "-c",
+        "printf '%s' \"$MESSAGE\""
+      ],
+      "cwd": "/workspace",
+      "domain": "00000000-0000-0000-0000-000000000001",
+      "env": {
+        "MESSAGE": "hello 世界"
+      },
+      "grant": {
+        "id": "00000000-0000-0000-0000-000000000004",
+        "version": 1
+      },
+      "inheritEnv": false,
+      "policyRevision": "fixture-policy",
+      "source": {
+        "kind": "learning",
+        "runId": "00000000-0000-0000-0000-000000000005"
+      },
+      "timeoutMs": 1,
+      "version": 1
+    }
+  ],
+  "snapshots": [
+    {
+      "operationId": "00000000-0000-0000-0000-000000000002",
+      "scopeId": "00000000-0000-0000-0000-000000000003",
+      "state": {
+        "lastSequence": 0,
+        "outputComplete": false,
+        "phase": "pending",
+        "primaryExit": null,
+        "process": null,
+        "released": false,
+        "started": false,
+        "stopRequested": false,
+        "version": 1,
+        "worker": null
+      }
+    },
+    {
+      "operationId": "00000000-0000-0000-0000-000000000002",
+      "scopeId": "00000000-0000-0000-0000-000000000003",
+      "state": {
+        "lastSequence": 0,
+        "outputComplete": false,
+        "phase": "reserved",
+        "primaryExit": null,
+        "process": null,
+        "released": false,
+        "started": false,
+        "stopRequested": false,
+        "version": 1,
+        "worker": "00000000-0000-0000-0000-000000000006"
+      }
+    },
+    {
+      "operationId": "00000000-0000-0000-0000-000000000002",
+      "scopeId": "00000000-0000-0000-0000-000000000003",
+      "state": {
+        "lastSequence": 0,
+        "outputComplete": false,
+        "phase": "attached",
+        "primaryExit": null,
+        "process": {
+          "boot": "00000000-0000-0000-0000-000000000007",
+          "domain": "00000000-0000-0000-0000-000000000001",
+          "initPid": 1,
+          "namespaceInode": 3,
+          "startTicks": 2
+        },
+        "released": false,
+        "started": false,
+        "stopRequested": false,
+        "version": 1,
+        "worker": "00000000-0000-0000-0000-000000000006"
+      }
+    },
+    {
+      "operationId": "00000000-0000-0000-0000-000000000002",
+      "scopeId": "00000000-0000-0000-0000-000000000003",
+      "state": {
+        "lastSequence": 1,
+        "outputComplete": false,
+        "phase": "running",
+        "primaryExit": null,
+        "process": {
+          "boot": "00000000-0000-0000-0000-000000000007",
+          "domain": "00000000-0000-0000-0000-000000000001",
+          "initPid": 1,
+          "namespaceInode": 3,
+          "startTicks": 2
+        },
+        "released": true,
+        "started": true,
+        "stopRequested": false,
+        "version": 1,
+        "worker": "00000000-0000-0000-0000-000000000006"
+      }
+    },
+    {
+      "operationId": "00000000-0000-0000-0000-000000000002",
+      "scopeId": "00000000-0000-0000-0000-000000000003",
+      "state": {
+        "lastSequence": 1,
+        "outputComplete": false,
+        "phase": "exited",
+        "primaryExit": {
+          "kind": "code",
+          "value": 0
+        },
+        "process": {
+          "boot": "00000000-0000-0000-0000-000000000007",
+          "domain": "00000000-0000-0000-0000-000000000001",
+          "initPid": 1,
+          "namespaceInode": 3,
+          "startTicks": 2
+        },
+        "released": true,
+        "started": true,
+        "stopRequested": false,
+        "version": 1,
+        "worker": "00000000-0000-0000-0000-000000000006"
+      }
+    },
+    {
+      "operationId": "00000000-0000-0000-0000-000000000002",
+      "scopeId": "00000000-0000-0000-0000-000000000003",
+      "state": {
+        "lastSequence": 1,
+        "outputComplete": true,
+        "phase": "drained",
+        "primaryExit": {
+          "kind": "signal",
+          "value": 15
+        },
+        "process": {
+          "boot": "00000000-0000-0000-0000-000000000007",
+          "domain": "00000000-0000-0000-0000-000000000001",
+          "initPid": 1,
+          "namespaceInode": 3,
+          "startTicks": 2
+        },
+        "released": true,
+        "started": true,
+        "stopRequested": true,
+        "version": 1,
+        "worker": "00000000-0000-0000-0000-000000000006"
+      }
+    }
+  ]
+}

@@ -21,6 +21,17 @@ use super::{
 };
 use crate::{Error, Result};
 
+/// Host-selected network boundary, independent of command-supplied arguments.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum NetworkMode {
+    /// A new command network namespace with no external interfaces.
+    #[default]
+    Isolated,
+    /// The provider's already isolated network; its local services must authenticate every call.
+    Inherited,
+}
+
 /// Trusted execution profile. User requests cannot change mounts or namespace options.
 #[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
@@ -37,6 +48,9 @@ pub struct NamespaceConfig {
     pub workspace: PathBuf,
     /// Immutable system paths, mounted read-only at the same absolute location.
     pub read_only: Vec<PathBuf>,
+    /// Explicit provider networking; omitted historical profiles retain their isolated network.
+    #[serde(default)]
+    pub network: NetworkMode,
     /// Explicit published environment inherited only when the request allows it; never the controller's environment.
     pub environment: BTreeMap<String, String>,
 }
@@ -179,12 +193,14 @@ impl Namespace {
             "--unshare-pid",
             "--unshare-ipc",
             "--unshare-uts",
-            "--unshare-net",
             "--new-session",
             "--cap-drop",
             "ALL",
             "--clearenv",
         ]);
+        if config.network == NetworkMode::Isolated {
+            command.arg("--unshare-net");
+        }
         let mut mappings = vec![
             FdMapping {
                 parent_fd: launcher.into(),

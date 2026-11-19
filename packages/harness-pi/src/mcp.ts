@@ -44,7 +44,7 @@ export function mcpExtensionName(server: string): string {
  */
 export class McpServers {
   #servers: Readonly<Record<string, McpServer>>;
-  readonly #workspace: Workspace;
+  readonly #workspace: Workspace | undefined;
   readonly #clients = new Map<string, Promise<McpClient>>();
   /** The tools each server offered when last reached. */
   readonly #tools = new Map<string, string[]>();
@@ -56,7 +56,7 @@ export class McpServers {
   /** Servers that could not be reached when their tools were offered. */
   readonly unavailable = new Set<string>();
 
-  constructor(servers: Readonly<Record<string, McpServer>>, workspace: Workspace) {
+  constructor(servers: Readonly<Record<string, McpServer>>, workspace?: Workspace) {
     this.#servers = servers;
     this.#workspace = workspace;
   }
@@ -112,7 +112,7 @@ export class McpServers {
       return known !== undefined && "command" in known;
     };
     const unavailable = [...this.unavailable];
-    const running = unavailable.some(inWorkspace) && (await this.#workspace.state().catch(() => undefined)) === "running";
+    const running = unavailable.some(inWorkspace) && (await this.#workspace?.state().catch(() => undefined)) === "running";
     return this.#offer(unavailable.filter((server) => running || !inWorkspace(server)), report, false);
   }
 
@@ -192,13 +192,15 @@ export class McpServers {
 
   async #transport(server: McpServer, wake: boolean): Promise<McpTransport> {
     if (!("command" in server)) return new StreamableHttpTransport({ url: server.url, ...(server.headers && { headers: server.headers }) });
+    const workspace = this.#workspace;
+    if (workspace === undefined) throw new Refused("this service has no workspace for a command MCP server");
     let launch: ReturnType<Workspace["command"]>;
     try {
-      launch = this.#workspace.command([server.command, ...(server.args ?? [])], server.env);
+      launch = workspace.command([server.command, ...(server.args ?? [])], server.env);
     } catch (error) {
       throw new Refused((error as Error).message, { cause: error });
     }
-    if (wake) await this.#workspace.start();
+    if (wake) await workspace.start();
     const { argv: [command, ...args], env } = launch;
     return new StdioTransport({ command: command as string, args, env });
   }

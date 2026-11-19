@@ -5,7 +5,7 @@ import { join } from "node:path";
 import { awaitWithContext, BACKGROUND_CONTEXT as context, withAbortSignal } from "@earendil-works/chord/context";
 import { createModels } from "@earendil-works/pi-ai";
 import { fauxAssistantMessage, fauxProvider, fauxToolCall } from "@earendil-works/pi-ai/providers/faux";
-import { AssistantEntry, createRegistry, defineExtension, defineTask, defineTool, GenerationTask, Harness, hook, runEndTask, ToolResultEntry, type Extension } from "@earendil-works/pi-durable";
+import { AssistantEntry, createRegistry, defineExtension, defineTask, defineTool, GenerationTask, Harness, hook, runEndTask, ToolResultEntry, type ConversationId, type Extension } from "@earendil-works/pi-durable";
 import { openNodeSqliteStorage } from "@earendil-works/pi-durable/storage/sqlite/node";
 import { Type } from "typebox";
 import { expect, it } from "vitest";
@@ -56,9 +56,32 @@ it("advances an admitted goal and verifies its actual committed answer", async (
     const goal = await until(f, receipt.goalId, (goal) => goal.status === "completed");
     expect(goal.objective).toBe("Return the exact answer Hello");
     expect(goal.result?.evidence).toHaveLength(1);
+    expect(await f.engine.allowsModel(goal.conversationId as ConversationId, context)).toBe(false);
     expect(await f.engine.execute(request, undefined, context)).toEqual(receipt);
     expect(f.errors).toEqual([]);
   } finally { await f.close(); }
+});
+
+it("rechecks an adopted grant before admitting background model dispatch", async () => {
+  const entered = Promise.withResolvers<void>(); const release = Promise.withResolvers<void>();
+  const grants: string[] = [];
+  const f = await fixture({ authorize: async (request) => {
+    if (request.action !== "model") return { allowed: true };
+    grants.push(request.grant!.id);
+    if (request.grant!.id === "original") { entered.resolve(); await release.promise; return { allowed: true }; }
+    return { allowed: false };
+  } });
+  try {
+    const original = await f.engine.store.execute(command(), undefined, context);
+    const goal = await f.engine.store.snapshot(original.goalId, context);
+    const admission = f.engine.allowsModel(goal.conversationId as ConversationId, context);
+    await entered.promise;
+    await f.engine.store.execute({ version: 1, requestId: randomUUID(), command: { kind: "goal.input", goalId: goal.goalId, expectedVersion: goal.version, text: "Use the replacement authority", grant: { id: "replacement", version: 2 } } }, undefined, context);
+    release.resolve();
+    expect(await admission).toBe(false);
+    expect(grants).toEqual(["original", "replacement"]);
+    expect(f.provider.state.callCount).toBe(0);
+  } finally { release.resolve(); await f.close(); }
 });
 
 it("does not finish while after-run child work remains active", async () => {

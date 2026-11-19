@@ -1,13 +1,16 @@
 import { mkdtemp } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { setImmediate } from "node:timers/promises";
 import { BACKGROUND_CONTEXT as context } from "@earendil-works/chord/context";
 import { createModels } from "@earendil-works/pi-ai";
 import { fauxAssistantMessage, fauxProvider } from "@earendil-works/pi-ai/providers/faux";
-import { CompactionEntry, UsageDoc, type Conversation } from "@earendil-works/pi-durable";
+import { CompactionEntry, createRegistry, Harness, UsageDoc, type Conversation } from "@earendil-works/pi-durable";
+import { openNodeSqliteStorage } from "@earendil-works/pi-durable/storage/sqlite/node";
 import { describe, expect, it, vi } from "vitest";
 import { AgentService, IdleCompactionEntry } from "../src/index.js";
 import { localWorkspace } from "./local-workspace.js";
+import { IdleCompaction, type IdleCompactionOptions } from "../src/idle-compaction.js";
 
 /** A service whose one model keeps its prompt cache for a second. */
 async function cached() {
@@ -28,7 +31,57 @@ const say = async (conversation: Conversation, text: string) =>
 
 const answer = (text: string) => () => fauxAssistantMessage(text);
 
+async function authorized(authorize: NonNullable<IdleCompactionOptions["authorize"]>) {
+  const provider = fauxProvider({ models: [{ id: "cached", contextWindow: 1_000_000 }] });
+  const model = Object.assign(provider.getModel(), { promptCache: { short: 1 } });
+  const models = createModels(); models.setProvider(provider.provider);
+  const directory = await mkdtemp(join(tmpdir(), "chopin-idle-authority-"));
+  const idle = new IdleCompaction({ models, eligible: async () => true, authorize });
+  const registry = createRegistry(); registry.install(idle.extension);
+  const harness = await Harness.open(await openNodeSqliteStorage(join(directory, "storage.sqlite")), { registry, models }, context);
+  idle.attach(harness);
+  const conversation = await harness.root(context, { agent: { model: { provider: model.provider, modelId: model.id } } });
+  harness.resume();
+  let closing: Promise<void> | undefined;
+  return { provider, harness, conversation, idle, close: () => closing ??= (async () => { await idle.close(); await harness.close(context); })() };
+}
+
 describe("IdleCompaction", () => {
+  it("checks current permission before dispatching an optional summary", async () => {
+    const entered = Promise.withResolvers<void>();
+    const f = await authorized(async () => { entered.resolve(); return false; });
+    f.provider.setResponses([answer("Read it."), answer("Read that too.")]);
+    try {
+      await say(f.conversation, `Read this: ${"a".repeat(200_000)}`);
+      await say(f.conversation, `And this: ${"b".repeat(100_000)}`);
+      await entered.promise;
+      await setImmediate();
+      expect(f.provider.state.callCount).toBe(2);
+      expect((await f.conversation.context(context)).head).toBeUndefined();
+      expect(f.idle.active).toBe(false);
+    } finally { await f.close(); }
+  });
+
+  it("drains an outstanding permission check before closing its store", async () => {
+    const entered = Promise.withResolvers<void>(); const release = Promise.withResolvers<void>();
+    const f = await authorized(async () => { entered.resolve(); await release.promise; return true; });
+    f.provider.setResponses([answer("Read it."), answer("Read that too.")]);
+    let closed = false;
+    try {
+      await say(f.conversation, `Read this: ${"a".repeat(200_000)}`);
+      await say(f.conversation, `And this: ${"b".repeat(100_000)}`);
+      await entered.promise;
+      const closing = f.close().then(() => { closed = true; });
+      await setImmediate();
+      expect(closed).toBe(false);
+      expect(f.idle.active).toBe(true);
+      release.resolve();
+      await closing;
+      expect(f.provider.state.callCount).toBe(2);
+      expect(f.idle.active).toBe(false);
+    } finally { release.resolve(); await f.close(); }
+  });
+
   it("compacts a conversation left idle before its cache expires, reading the summary request from that cache", async () => {
     const { faux, service, key } = await cached();
     let asked = "";

@@ -2,10 +2,16 @@
 
 #[cfg(target_os = "linux")]
 fn main() {
-    if start().is_err() {
-        eprintln!("command gate refused execution");
-        std::process::exit(1);
+    let Err(error) = start();
+    eprintln!("command gate refused execution: {error}");
+    if let chopin_job_broker::Error::Io(local) = error {
+        eprintln!(
+            "command gate I/O kind={:?} errno={:?}",
+            local.kind(),
+            local.raw_os_error()
+        );
     }
+    std::process::exit(1);
 }
 #[cfg(target_os = "linux")]
 fn start() -> chopin_job_broker::Result<std::convert::Infallible> {

@@ -1,0 +1,37 @@
+[package]
+name = "chopin-storage-node"
+description = "Asynchronous native bindings for protected execution storage"
+version = "0.7.0-rc1"
+edition = "2024"
+rust-version = "1.100"
+license = "Apache-2.0"
+repository = "https://github.com/CodePrometheus/chopin-ai"
+
+[lib]
+crate-type = ["cdylib"]
+test = false
+doctest = false
+
+[dependencies]
+chopin-storage = { path = ".." }
+napi = { version = "3.16.2", default-features = false, features = ["napi8", "tokio_rt"] }
+napi-derive = "3.7.1"
+rusqlite = { version = "0.43.0", default-features = false }
+tokio = { version = "1.54.1", features = ["sync"] }
+zeroize = "1.9.1"
+
+[build-dependencies]
+napi-build = "2.6.0"
+
+[lints.rust]
+unsafe_code = "deny"
+missing_docs = "warn"
+
+[lints.clippy]
+all = { level = "warn", priority = -1 }
+await_holding_lock = "deny"
+dbg_macro = "deny"
+expect_used = "warn"
+todo = "deny"
+unimplemented = "deny"
+unwrap_used = "warn"

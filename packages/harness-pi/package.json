@@ -32,7 +32,8 @@
   },
   "files": [
     "dist",
-    "goals.md"
+    "goals.md",
+    "commands.md"
   ],
   "scripts": {
     "image": "node scripts/build-image.mjs"

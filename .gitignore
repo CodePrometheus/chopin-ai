@@ -1,6 +1,8 @@
 node_modules/
 dist/
 /target/
+/crates/storage/target/
+/packages/harness-pi/native/*.node
 *.tsbuildinfo
 .DS_Store
 .idea

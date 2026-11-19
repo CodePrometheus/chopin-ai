@@ -1,4 +1,4 @@
-import { defineDoc, defineExtension, hook, ToolTask, type Extension } from "@earendil-works/pi-durable";
+import { defineDoc, defineExtension, hook, ToolTask, type AgentChange, type Extension } from "@earendil-works/pi-durable";
 import type { Mode } from "./protocol.js";
 
 /** A conversation's mode, as the store keeps it. */
@@ -48,4 +48,17 @@ export function modeExtension(readOnly: (tool: string) => boolean): Extension {
       },
     })],
   });
+}
+
+/** An explicit tool selection must retain the service's current conversation policy. */
+export function withMode(agent: AgentChange, mode: Extension): AgentChange {
+  const selection = agent.extensions;
+  if (selection == null) return agent;
+  if (Array.isArray(selection)) {
+    const selected: readonly Extension[] = selection;
+    return { ...agent, extensions: [...selected.filter((extension) => extension.name !== mode.name), mode] };
+  }
+  const added = "add" in selection ? selection.add ?? [] : [];
+  const removed = "remove" in selection ? selection.remove ?? [] : [];
+  return { ...agent, extensions: { add: [...added.filter((extension) => extension.name !== mode.name), mode], remove: removed.filter((extension) => extension.name !== mode.name) } };
 }

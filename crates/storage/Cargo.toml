@@ -1,0 +1,40 @@
+[package]
+name = "chopin-storage"
+description = "Encrypted execution storage with authenticated transactional content"
+version = "0.7.0-rc1"
+edition = "2024"
+rust-version = "1.100"
+license = "Apache-2.0"
+repository = "https://github.com/CodePrometheus/chopin-ai"
+
+[workspace]
+members = ["node"]
+default-members = ["."]
+
+[dependencies]
+anyhow = "1.0.104"
+borsh = "1.8.1"
+getrandom = "0.4.3"
+jmt = { version = "0.12.0", default-features = false }
+rusqlite = { version = "0.43.0", default-features = false, features = ["bundled-sqlcipher-vendored-openssl", "session", "cache"] }
+sha2 = "0.11.1"
+thiserror = "2.0.21"
+zeroize = "1.9.1"
+
+[dev-dependencies]
+uuid = { version = "1.29.2", features = ["v4"] }
+
+[lints.rust]
+unsafe_code = "forbid"
+missing_docs = "warn"
+missing_debug_implementations = "warn"
+unreachable_pub = "warn"
+
+[lints.clippy]
+all = { level = "warn", priority = -1 }
+await_holding_lock = "deny"
+dbg_macro = "deny"
+expect_used = "warn"
+todo = "deny"
+unimplemented = "deny"
+unwrap_used = "warn"

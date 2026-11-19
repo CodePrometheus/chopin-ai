@@ -105,6 +105,28 @@ export class GoalEngine {
     return this.#store;
   }
   get allowDirectConversations(): boolean { return this.#options.allowDirectConversations === true; }
+  /** Trusted effect adapters resolve the execution-owned goal through conversation ancestry. */
+  async forExecution(conversation: ConversationId, context: Context): Promise<GoalSnapshot> {
+    const id = await this.#goal(conversation, context);
+    if (id === undefined) throw refusal("goal_command_required", "an execution-owned goal is required");
+    return this.store.snapshot(id, context);
+  }
+  /** Checks current authority for optional background model work without changing goal state. */
+  async allowsModel(conversation: ConversationId, context: Context): Promise<boolean> {
+    const goalId = await this.#goal(conversation, context);
+    if (goalId === undefined) return this.allowDirectConversations && (await this.#options.authorize({ action: "model" }, context)).allowed;
+    while (true) {
+      context.abortSignal?.throwIfAborted();
+      const before = await this.store.harness.snapshot(GoalDoc, goalId, context);
+      const goal = requireSnapshot(before);
+      if (before?.stop || terminal(goal.status)) return false;
+      if (!(await this.#options.authorize({ action: "model", goalId, grant: goal.grant }, context)).allowed) return false;
+      const after = await this.store.harness.snapshot(GoalDoc, goalId, context);
+      const current = requireSnapshot(after);
+      if (after?.stop || terminal(current.status)) return false;
+      if (isDeepStrictEqual(current.grant, goal.grant)) return true;
+    }
+  }
   async execute(envelope: EngineCommand, agent: AgentChange | undefined, context: Context): Promise<EngineReceipt> {
     validateCommand(envelope);
     await this.#authorize({ action: "owner" }, context);
@@ -352,7 +374,10 @@ export class GoalEngine {
   async #guard(api: Pick<HookApi, "conversationId" | "taskId">, action: "model" | "tool", context: Context, tool?: string): Promise<void> {
     try {
       const goalId = await this.#goal(api.conversationId, context);
-      if (goalId === undefined) return;
+      if (goalId === undefined) {
+        if (!this.allowDirectConversations) throw refusal("goal_command_required", "unbound execution is disabled by goal policy");
+        return;
+      }
       const key = String(api.taskId);
       while (true) {
         context.abortSignal?.throwIfAborted();

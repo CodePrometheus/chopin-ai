@@ -27,6 +27,19 @@ const local: WorkspaceProvider = {
 };
 
 describe("MCP servers from the layer", () => {
+  it("refuses a command server without a workspace", async () => {
+    const manager = new McpServers({ echo: { command: process.execPath, args: [server] } });
+    const reports: Error[] = [];
+    try {
+      expect(await manager.connect((error) => reports.push(error))).toEqual([]);
+      expect(manager.status("echo")).toEqual({ tools: 0, error: "this service has no workspace for a command MCP server" });
+      expect(await manager.retry((error) => reports.push(error))).toEqual([]);
+      expect(reports).toHaveLength(1);
+    } finally {
+      await manager.close();
+    }
+  });
+
   it("runs command servers through the workspace and offers their tools", async () => {
     const faux = fauxProvider();
     const models = createModels();

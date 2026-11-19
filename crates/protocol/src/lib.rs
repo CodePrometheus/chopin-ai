@@ -9,7 +9,10 @@ mod delta;
 mod error;
 mod goals;
 mod learning;
+mod legacy_vault;
 mod observation;
+#[cfg(feature = "schema")]
+mod schema;
 mod wire;
 
 pub use client::{ChordClient, ConnectionOptions};
@@ -24,6 +27,10 @@ pub use goals::{
 };
 pub use learning::{
     CorrectionKind, HeldChange, LoopChange, LoopSettings, LoopSettingsPatch, LoopStanding,
+};
+pub use legacy_vault::{
+    KEY_VERIFICATION_PURPOSE, KeyVerificationBindings, KeyVerificationCapability,
+    KeyVerificationRequest, KeyVerificationResponse, SealedKeyVerification,
 };
 pub use observation::{StateObserver, StateUpdate};
 pub use tokio_tungstenite::Connector as TlsConnector;

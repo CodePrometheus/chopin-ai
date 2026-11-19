@@ -4,6 +4,7 @@ use serde_json::json;
 use crate::{ChordClient, ProtocolError, Result};
 
 /// Source improvement summary; spending and acceptance remain execution-owned.
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct LoopStanding {
@@ -29,6 +30,7 @@ pub struct LoopStanding {
     pub weekly_budget_usd: Option<f64>,
 }
 /// An actual evaluated change in the source layer.
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct LoopChange {
     /// Immutable source identity.
@@ -43,6 +45,7 @@ pub struct LoopChange {
     pub text: String,
 }
 /// A recurring correction requiring the owner's policy.
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CorrectionKind {
     /// Source policy key.
@@ -53,6 +56,7 @@ pub struct CorrectionKind {
     pub examples: Vec<String>,
 }
 /// A candidate waiting for permission to evaluate, not an adopted change.
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct HeldChange {
     /// Source candidate identity.
@@ -71,6 +75,7 @@ pub struct HeldChange {
     pub reasons: Vec<String>,
 }
 /// Actual improvement policy read from the service.
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct LoopSettings {
@@ -84,6 +89,7 @@ pub struct LoopSettings {
     pub hold_for_review: bool,
 }
 /// Explicit policy edit: outer `None` preserves a field, inner `None` clears it.
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[derive(Clone, Debug, Default, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct LoopSettingsPatch {

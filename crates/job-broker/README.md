@@ -70,6 +70,10 @@ running; a deployment supervisor must preserve the enclosing process namespace
 if it expects process-level recovery. Changing the kernel context requires separate
 fencing and registration rather than silently opening another worker's journal.
 
+The Linux `worker-service` feature includes `chopin-job-worker` and a host-owned
+`serve_worker` lifetime. See [worker hosting](worker.md) for configuration,
+explicit initialization, recovery boundaries and the executable checks.
+
 The Linux `worker` feature provides the native gate, namespace process handles and
 protected output capture. `NamespaceConfig` supplies trusted executables and
 mounts. `CaptureOptions` retains the original operation, worker, frame policy and

@@ -4,6 +4,7 @@ use serde_json::{Value, json};
 use crate::{ChordClient, ProtocolError, Result, StateObserver};
 
 /// Exact host delegation adopted by an execution goal.
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct GoalGrant {
@@ -13,6 +14,7 @@ pub struct GoalGrant {
     pub version: u64,
 }
 /// Original terminal goal whose context an explicit new goal continues.
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct GoalContinuation {
@@ -151,6 +153,7 @@ impl EngineCommand {
     }
 }
 /// Durable admission only; completion remains in the goal's authoritative snapshot.
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct EngineReceipt {
@@ -164,6 +167,7 @@ pub struct EngineReceipt {
     pub accepted_version: u64,
 }
 /// Execution-owned goal status; transport receipts do not determine it.
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum GoalStatus {
@@ -189,6 +193,7 @@ pub enum GoalStatus {
     Failed,
 }
 /// Persisted waiting condition belonging to the original goal.
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct GoalWaiting {
@@ -202,6 +207,7 @@ pub struct GoalWaiting {
     pub until: Option<f64>,
 }
 /// A verified workspace artifact, not an unauthenticated download URL.
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct GoalArtifact {
     /// Original resource-relative path, interpreted by the host's artifact service.
@@ -210,6 +216,7 @@ pub struct GoalArtifact {
     pub sha256: String,
 }
 /// Source evidence associated with an explicit completion criterion.
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(
     tag = "kind",
@@ -257,6 +264,7 @@ impl GoalEvidence {
     }
 }
 /// Verified result, absent before the engine commits completion.
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct GoalResult {
@@ -268,6 +276,7 @@ pub struct GoalResult {
     pub verified_at: f64,
 }
 /// Original goal state from execution, never a platform projection of another state machine.
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct GoalSnapshot {
@@ -297,6 +306,7 @@ pub struct GoalSnapshot {
     pub result: Option<GoalResult>,
 }
 /// One authoritative source page.
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct GoalPage {
     /// Goals from this page alone.
@@ -306,6 +316,7 @@ pub struct GoalPage {
     pub cursor: Option<Value>,
 }
 /// Actual source scheduling needs, separate from client connectivity.
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct EngineWake {
     /// Work needs an active execution process now.

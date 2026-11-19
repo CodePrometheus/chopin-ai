@@ -214,6 +214,9 @@ importers:
       semver:
         specifier: 7.8.6
         version: 7.8.6
+      typebox:
+        specifier: 1.4.7
+        version: 1.4.7
       undici:
         specifier: ^8.12.4
         version: 8.12.4

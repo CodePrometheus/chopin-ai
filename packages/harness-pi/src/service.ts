@@ -24,6 +24,7 @@ import {
   type SubmissionId,
   type SubmissionQuery,
   type SubmissionRecord,
+  type Wake,
 } from "@earendil-works/pi-durable";
 import { openNodeSqliteStorage } from "@earendil-works/pi-durable/storage/sqlite/node";
 import { CodingTools } from "@earendil-works/pi-durable/tools";
@@ -35,17 +36,19 @@ import { IdleCompaction } from "./idle-compaction.js";
 import { layerExtension, pinLayerVersions, type LayerSource } from "./layer.js";
 import { mcpExtensionName, McpServers } from "./mcp.js";
 import { drain } from "./pages.js";
-import { ListingDoc, modeExtension, NameDoc } from "./mode.js";
+import { ListingDoc, modeExtension, NameDoc, withMode } from "./mode.js";
 import { unansweredText, type Loaded, type McpServerState, type ModelChoices, type ProviderEntry, type Summary } from "./protocol.js";
 import { clientContext } from "./client-context.js";
 import { contextFiles, projectContext } from "./project-context.js";
 import { runShell, ShellEntry, type ShellRun } from "./shell.js";
 import { GoalEngine, type GoalOptions } from "./goals/engine.js";
 import type { EngineCommand, EngineReceipt } from "./goals/contracts.js";
+import { ActiveGoals } from "./goals/store.js";
+import { WakePublisher } from "./wake.js";
 import { refusal } from "./service-error.js";
 
 /** Built-in tools that change nothing, so a read-only conversation may still use them. */
-const READ_ONLY = new Set(["read", "skill"]);
+const READ_ONLY = new Set(["read", "skill", "command_output"]);
 
 const EMPTY_LAYER: Layer = { instructions: undefined, skills: [], mcpServers: {}, gates: [] };
 
@@ -60,9 +63,14 @@ export const DAEMON_PATH = "/usr/local/bin/pi-env";
 export interface AgentServiceOptions {
   /** Explicit goal authorization, verification and effect-reconciliation adapters for each owner. */
   goals?: (owner: string) => GoalOptions;
+  /** Restore pending work without scheduling it until an admitted command or explicit resume. */
+  startPaused?: boolean;
+  /** Durable wake sink. The host arms a recovery fallback before enabling work and resumes sleeping tasks itself. */
+  onWake?: (owner: string, wake: Wake) => void | Promise<void>;
   /** Holds one store per owner. It must not be reachable from any workspace. */
   dataDir: string;
-  workspaces: WorkspaceProvider;
+  /** Provides the daemon-backed tools and shell. An omitted provider leaves execution to installed extensions. */
+  workspaces?: WorkspaceProvider;
   /** The models an owner's agent may use, carrying that owner's credentials. */
   models: (owner: string) => Models;
   /** Where an owner's models read their credentials, which clients may then set; absent, they cannot. */
@@ -73,14 +81,16 @@ export interface AgentServiceOptions {
   layer?: Layer;
   /** The loop's versions laid over `layer`; each conversation keeps the ones in use when it was made. */
   layerVersions?: LayerSource;
-  /** Installed after the coding tools and the layer. */
-  extensions?: readonly Extension[];
+  /** Installed after the coding tools and layer. Owner factories run only after storage admission. */
+  extensions?: readonly Extension[] | ((owner: string) => readonly Extension[] | Promise<readonly Extension[]>);
   /** Failures that do not fail the call at hand, such as an unreachable MCP server. */
   report?: (error: unknown) => void;
   /** The execution daemon as the workspace runs it; the workspace image's by default. */
   daemon?: string;
   /** Stops workspaces whose owner has been idle this long, keeping their volumes; never when absent. */
   reclaimAfterMs?: number;
+  /** Allows clients to register their own MCP endpoints. Defaults to enabled. */
+  allowClientMcp?: boolean;
   /**
    * Keeps the MCP servers an owner's clients set in `dataDir`, headers and all, so they outlast a restart; only where
    * that directory is sealed at rest. In memory alone when absent.
@@ -106,9 +116,11 @@ interface Opened {
   harness: Harness;
   storage: Storage;
   idle: IdleCompaction;
+  mode: Extension;
   goals?: GoalEngine;
+  wake?: WakePublisher;
   /** The owner's workspace as the agent's tools reach it. */
-  env(): RemoteExecutionEnv;
+  env?: (cwd?: string) => RemoteExecutionEnv;
   mcp: McpServers;
   /** Serves an MCP server under `name` from now on, in place of any by that name, or none when `server` is absent. */
   serve(name: string, server: McpServer | undefined): Promise<void>;
@@ -125,8 +137,8 @@ interface Agent {
 }
 
 /**
- * Hosts one durable harness per owner. The agent and its store live here; its tools reach the owner's workspace
- * only through the execution daemon, which starts the workspace on first use and again after it was reclaimed.
+ * Hosts one durable harness per owner. A workspace provider enables daemon-backed execution for that owner.
+ * Services with a separate execution authority can install its tools without a workspace provider.
  */
 export class AgentService {
   readonly #options: AgentServiceOptions;
@@ -154,9 +166,10 @@ export class AgentService {
 
   constructor(options: AgentServiceOptions) {
     this.#options = options;
-    this.#reclaiming = options.reclaimAfterMs === undefined ? undefined : this.#reclaim(options.reclaimAfterMs);
+    this.#reclaiming = options.reclaimAfterMs === undefined || options.workspaces === undefined
+      ? undefined : this.#reclaim(options.workspaces, options.reclaimAfterMs);
     // MCP tools are only known once their servers answer; gates on them are checked again when an owner opens.
-    this.#checkGates(new Set(toolNames(this.#extensions(new Set()))));
+    if (typeof options.extensions !== "function") this.#checkGates(new Set(toolNames(this.#extensions(new Set(), options.extensions ?? []))));
   }
 
   /**
@@ -248,7 +261,8 @@ export class AgentService {
   /** What the owner's agent loads besides its tools: the layer's instructions, skills and MCP servers, and the project's instructions. */
   async loaded(owner: string, context: Context): Promise<Loaded> {
     const layer = this.#options.layer;
-    const project = await contextFiles((await this.#openedFor(owner)).env(), context);
+    const env = (await this.#openedFor(owner)).env?.();
+    const project = env === undefined ? [] : await contextFiles(env, context);
     return {
       instructions: layer?.instructions !== undefined,
       projectInstructions: project.map((file) => file.path),
@@ -291,9 +305,12 @@ export class AgentService {
 
   /** Runs a command of the owner's in their workspace, as the agent's shell tool runs its own. */
   async shell(owner: string, command: string, onOutput: (kept: string) => Promise<unknown>, context: Context): Promise<Omit<ShellRun, "command" | "excluded">> {
-    const env = (await this.#openedFor(owner)).env();
+    const opened = await this.#openedFor(owner);
+    const env = opened.env?.();
+    if (env === undefined) throw refusal("workspace_unavailable", "this service has no direct workspace shell");
     // A command at work is the agent at work: nothing hands over or reclaims under it.
     this.#commands.set(owner, (this.#commands.get(owner) ?? 0) + 1);
+    opened.wake?.offer();
     try {
       return await runShell(env, command, onOutput, context);
     } finally {
@@ -301,6 +318,7 @@ export class AgentService {
       if (left > 0) this.#commands.set(owner, left);
       else this.#commands.delete(owner);
       this.touch(owner);
+      opened.wake?.offer();
     }
   }
 
@@ -357,6 +375,7 @@ export class AgentService {
    * layer has one by that name, or the address is no web address.
    */
   async setMcpServer(owner: string, name: string, url: string, headers: Readonly<Record<string, string>>): Promise<string | undefined> {
+    if (this.#options.allowClientMcp === false) return "this service takes MCP servers from its trusted configuration";
     if (name in (this.#options.layer?.mcpServers ?? {})) return `the layer already serves an MCP server named ${name}`;
     if (!/^https?:$/.test(URL.parse(url)?.protocol ?? "")) return `${url} is no http or https address`;
     const server: McpServer = { type: "http", url, ...(Object.keys(headers).length > 0 && { headers: { ...headers } }) };
@@ -389,6 +408,7 @@ export class AgentService {
 
   /** The MCP servers the owner's clients set, read from `dataDir` the first time where they are kept there. */
   async #clientServers(owner: string): Promise<Record<string, McpServer>> {
+    if (this.#options.allowClientMcp === false) return {};
     const known = this.#clientMcp.get(owner);
     if (known !== undefined || this.#options.keepClientMcp !== true) return known ?? {};
     const read = (await readJsonObject(this.#clientMcpFile(owner), "MCP servers")) ?? {};
@@ -473,9 +493,11 @@ export class AgentService {
     await this.#options.models(owner).login(provider, type, interaction, { agentName: "chopin", getDeviceId: () => fingerprint(owner) });
   }
 
-  async #agent(owner: string): Promise<AgentChange | undefined> {
+  async #agent(owner: string, mode?: Extension): Promise<AgentChange | undefined> {
     const agent = this.#options.agent;
-    return typeof agent === "function" ? agent(owner) : agent;
+    const selected = typeof agent === "function" ? await agent(owner) : agent;
+    if (selected?.extensions == null) return selected;
+    return withMode(selected, mode ?? (await this.#openedFor(owner)).mode);
   }
 
   /** Hears of each conversation this service makes, until the returned function is called. */
@@ -489,7 +511,8 @@ export class AgentService {
    * with what it changed in the workspace.
    */
   async runTask(owner: string, prompt: string, context: Context): Promise<TaskRun> {
-    const workspace = this.#options.workspaces.open(owner);
+    const workspace = this.#options.workspaces?.open(owner);
+    if (workspace === undefined) throw refusal("workspace_unavailable", "this service has no direct task workspace");
     this.touch(owner);
     await workspace.start();
     const base = await snapshot(workspace);
@@ -552,7 +575,7 @@ export class AgentService {
       try {
         const inspection = await agent.ready.harness.inspect(BACKGROUND_CONTEXT);
         agent.unclear = false;
-        return inspection.tasks.length > 0 || inspection.submissions.length > 0 || await agent.ready.goals?.store.active(BACKGROUND_CONTEXT) ? [owner] : [];
+        return agent.ready.idle.active || inspection.tasks.length > 0 || inspection.submissions.length > 0 || await agent.ready.goals?.store.active(BACKGROUND_CONTEXT) ? [owner] : [];
       } catch (error) {
         // One whose state cannot be told counts as working, so nothing is stopped under it; it is told once.
         if (!agent.unclear) this.#options.report?.(error);
@@ -646,26 +669,48 @@ export class AgentService {
 
   async #open(owner: string, context: Context): Promise<Opened> {
     const report = this.#options.report ?? (() => {});
-    const workspace = this.#options.workspaces.open(owner);
-    const mcp = new McpServers({ ...this.#options.layer?.mcpServers, ...await this.#clientServers(owner) }, workspace);
-    const connection = new Connection({ command: () => this.#daemon(workspace) });
-    let storage: Storage | undefined;
+    const opening: { storage?: Storage; harness?: Harness; idle?: IdleCompaction; mcp?: McpServers; connection?: Connection; goals?: GoalEngine; retention?: { stop(): Promise<unknown> }; wake?: WakePublisher } = {};
     let harness: Harness | undefined;
     let goals: GoalEngine | undefined;
-    const idle = new IdleCompaction({
-      models: this.#options.models(owner),
-      eligible: async (id) => {
-        const record = await storage?.conversation(id, BACKGROUND_CONTEXT);
-        return record !== undefined && topLevel(record);
-      },
-      report,
-    });
+    let awake = false;
+    const offerWake = () => { if (awake) opening.wake?.offer(); };
     try {
+      // Restore and verify the store before invoking adapters that can perform external work.
+      await mkdir(this.#options.dataDir, { recursive: true });
+      await chmod(this.#options.dataDir, 0o700);
+      const storage = opening.storage = await (this.#options.store === undefined
+        ? openNodeSqliteStorage(join(this.#options.dataDir, `${fingerprint(owner)}.sqlite`))
+        : this.#options.store(owner));
+      if (storage === undefined || storage === null) throw new Error("the configured execution storage adapter returned no store");
+      const workspace = this.#options.workspaces?.open(owner);
+      const mcp = opening.mcp = new McpServers({ ...this.#options.layer?.mcpServers, ...await this.#clientServers(owner) }, workspace);
+      const execution = workspace === undefined ? undefined : this.#workspaceEnv(owner, workspace);
+      opening.connection = execution?.connection;
+      const idle = opening.idle = new IdleCompaction({
+        models: this.#options.models(owner),
+        eligible: async (id) => {
+          const record = await storage.conversation(id, BACKGROUND_CONTEXT);
+          return record !== undefined && topLevel(record);
+        },
+        ...(this.#options.goals !== undefined && { authorize: (id: ConversationId, context: Context) => goals!.allowsModel(id, context) }),
+        changed: offerWake,
+        report,
+      });
+      const wake = opening.wake = this.#options.onWake === undefined ? undefined : new WakePublisher(async () => {
+        const inspection = await harness!.inspect(BACKGROUND_CONTEXT);
+        const unfinished = await goals?.store.active(BACKGROUND_CONTEXT);
+        const native = harness!.wake();
+        const active = native.active || idle.active || this.#commands.has(owner) || unfinished || inspection.submissions.length > 0 || inspection.tasks.some((task) => task.state.kind === "blocked");
+        return { ...native, active: Boolean(active) };
+      }, (value) => this.#options.onWake!(owner, value), report);
       const registered = new Set<string>();
+      const configured = typeof this.#options.extensions === "function" ? await this.#options.extensions(owner) : this.#options.extensions ?? [];
+      const mode = modeExtension((tool) => READ_ONLY.has(tool) || mcp.readOnly.has(tool));
       const extensions = this.#extensions(
         registered,
+        configured,
         ...(await mcp.connect(report)),
-        modeExtension((tool) => READ_ONLY.has(tool) || mcp.readOnly.has(tool)),
+        mode,
         idle.extension,
       );
       for (const tool of toolNames(extensions)) registered.add(tool);
@@ -689,30 +734,37 @@ export class AgentService {
         if (offered.length > 0) tellMissing();
       };
 
-      const id = `workspace:${fingerprint(owner)}`;
-      const env = (cwd = workspace.root) => {
-        this.touch(owner);
-        return new OwnerEnv({ connection, id, cwd }, () => this.#variables.get(owner));
-      };
-      // Conversations are private to their owner; nobody else on the machine reads the store.
-      await mkdir(this.#options.dataDir, { recursive: true });
-      await chmod(this.#options.dataDir, 0o700);
-      storage = await (this.#options.store?.(owner) ?? openNodeSqliteStorage(join(this.#options.dataDir, `${fingerprint(owner)}.sqlite`)));
       const goalOptions = this.#options.goals?.(owner);
-      if (goalOptions !== undefined) { goals = new GoalEngine(goalOptions); for (const extension of goals.extensions) registry.install(extension); }
-      harness = await Harness.open(storage, {
+      if (goalOptions !== undefined) { goals = opening.goals = new GoalEngine(goalOptions); for (const extension of goals.extensions) registry.install(extension); }
+      harness = opening.harness = await Harness.open(storage, {
         models: this.#options.models(owner),
         registry,
         settings: () => goals?.settings(registry),
-        env: async ({ conversationId, cwd }, context) => await goals?.isReview(conversationId, context) ? undefined : env(cwd),
+        ...(execution !== undefined && {
+          env: async ({ conversationId, cwd }, context) => await goals?.isReview(conversationId, context) ? undefined : execution.env(cwd),
+        }),
         onReport: report,
+        ...(wake !== undefined && { onWake: offerWake }),
         ...(this.#options.layerVersions && { conversationCreated: pinLayerVersions(this.#options.layerVersions) }),
       }, context);
       goals?.attach(harness, storage);
       idle.attach(harness);
-      const agent = await this.#agent(owner);
+      const agent = await this.#agent(owner, mode);
       if (agent !== undefined) await harness.root(context, { agent });
-      harness.resume();
+      if (goals !== undefined && !goals.allowDirectConversations) {
+        await harness.commit(async (tx) => { await tx.doc(ActiveGoals); }, context);
+        const retention = await harness.watchDoc(ActiveGoals, context);
+        if (retention === undefined) throw new Error("goal activity observation is missing");
+        opening.retention = retention;
+        retention.start(async (change) => {
+          if (change.kind === "failed") report(change.error);
+          else if (change.value.count === 0) idle.cancelAll();
+          offerWake();
+        });
+      }
+      awake = true;
+      offerWake();
+      if (this.#options.startPaused !== true) harness.resume();
       let trying = false;
       let retrying: NodeJS.Timeout | undefined;
       // Unreachable servers are tried again until every one answers, for as long as the agent is open.
@@ -738,8 +790,10 @@ export class AgentService {
         harness: opened,
         storage,
         idle,
+        mode,
+        ...(wake !== undefined && { wake }),
         ...(goals === undefined ? {} : { goals }),
-        env,
+        ...(execution !== undefined && { env: execution.env }),
         mcp,
         serve: async (name, server) => {
           for (const tool of mcp.remove(name)) registered.delete(tool);
@@ -750,30 +804,49 @@ export class AgentService {
         },
         close: async (closing) => {
           clearInterval(retrying);
-          idle.close();
-          try {
-            await opened.close(closing);
-          } finally {
-            await goals?.close();
-            await mcp.close();
-            connection.close();
+          awake = false;
+          const failures: unknown[] = [];
+          for (const close of [
+            () => wake?.close(),
+            () => opening.retention?.stop(),
+            () => idle.close(),
+            () => opened.close(closing),
+            () => goals?.close(),
+            () => mcp.close(),
+            () => execution?.connection.close(),
+          ]) {
+            try { await close(); }
+            catch (error) { failures.push(error); }
           }
+          if (failures.length === 1) throw failures[0];
+          if (failures.length > 1) throw new AggregateError(failures, "the execution service could not close every resource");
         },
       };
     } catch (error) {
-      idle.close();
-      // An open harness owns its store; before that, the store is still this call's to close.
-      await (harness === undefined ? storage?.close(context) : harness.close(context))?.catch(() => {});
-      await mcp.close();
-      connection.close();
+      awake = false;
+      const failures = [error];
+      for (const close of [
+        () => opening.wake?.close(),
+        () => opening.retention?.stop(),
+        () => opening.idle?.close(),
+        () => opening.harness === undefined ? opening.storage?.close(context) : opening.harness.close(context),
+        () => opening.goals?.close(),
+        () => opening.mcp?.close(),
+        () => opening.connection?.close(),
+      ]) {
+        try { await close(); }
+        catch (closing) { failures.push(closing); }
+      }
+      if (failures.length > 1) throw new AggregateError(failures, "the execution service failed to open and close its resources");
       throw error;
     }
   }
 
-  #extensions(registered: ReadonlySet<string>, ...more: Extension[]): Extension[] {
+  #extensions(registered: ReadonlySet<string>, configured: readonly Extension[], ...more: Extension[]): Extension[] {
     const base = this.#options.layer ?? (this.#options.layerVersions === undefined ? undefined : EMPTY_LAYER);
     const layer = base === undefined ? [] : [layerExtension(base, registered, this.#options.layerVersions)];
-    return [CodingTools, ...layer, projectContext, clientContext, ...(this.#options.extensions ?? []), ...more];
+    const workspace = this.#options.workspaces !== undefined;
+    return [...(workspace ? [CodingTools] : []), ...layer, ...(workspace ? [projectContext] : []), clientContext, ...configured, ...more];
   }
 
   /**
@@ -790,24 +863,24 @@ export class AgentService {
     return fromMcp;
   }
 
-  #reclaim(idleMs: number): NodeJS.Timeout {
+  #reclaim(workspaces: WorkspaceProvider, idleMs: number): NodeJS.Timeout {
     // A sweep still stopping workspaces when the next is due is left to finish rather than joined by another.
     let sweeping = false;
     const sweep = setInterval(() => {
       if (sweeping) return;
       sweeping = true;
-      this.#sweep(idleMs).catch((error: unknown) => this.#options.report?.(error)).finally(() => void (sweeping = false));
+      this.#sweep(workspaces, idleMs).catch((error: unknown) => this.#options.report?.(error)).finally(() => void (sweeping = false));
     }, Math.min(idleMs, 5 * 60_000));
     sweep.unref();
     return sweep;
   }
 
   /** Stops idle owners' workspaces; an owner whose agent still has work counts as active, however long it runs. */
-  async #sweep(idleMs: number): Promise<void> {
+  async #sweep(workspaces: WorkspaceProvider, idleMs: number): Promise<void> {
     const now = Date.now();
     // An agent at work is in use now, so its idle time runs from when it stops, not from its last tool call.
     for (const owner of await this.working()) this.touch(owner);
-    const { failed } = await reclaimIdle(this.#options.workspaces, (owner) => this.lastActive(owner), idleMs, now);
+    const { failed } = await reclaimIdle(workspaces, (owner) => this.lastActive(owner), idleMs, now);
     for (const { owner, error } of failed) this.#options.report?.(new Error(`could not reclaim the workspace of ${owner}`, { cause: error }));
     // An agent no client holds that has been idle as long is closed too, so a service that has seen many owners
     // keeps open only those in use; the next use opens it again, resuming what it left.
@@ -829,10 +902,16 @@ export class AgentService {
     }));
   }
 
-  async #daemon(workspace: Workspace): Promise<readonly string[]> {
-    await workspace.start();
-    // No variables are carried, so the command line is the whole launch.
-    return workspace.command([this.#options.daemon ?? DAEMON_PATH]).argv;
+  #workspaceEnv(owner: string, workspace: Workspace) {
+    const id = `workspace:${fingerprint(owner)}`;
+    const connection = new Connection({ command: async () => {
+      await workspace.start();
+      return workspace.command([this.#options.daemon ?? DAEMON_PATH]).argv;
+    } });
+    return { connection, env: (cwd = workspace.root) => {
+      this.touch(owner);
+      return new OwnerEnv({ connection, id, cwd }, () => this.#variables.get(owner));
+    } };
   }
 }
 

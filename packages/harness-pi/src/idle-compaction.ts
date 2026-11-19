@@ -1,5 +1,5 @@
 import type { Draft } from "@earendil-works/chord/delta";
-import { BACKGROUND_CONTEXT, withAbortSignal } from "@earendil-works/chord/context";
+import { BACKGROUND_CONTEXT, withAbortSignal, type Context } from "@earendil-works/chord/context";
 import type { AssistantMessage, Models, UserMessage } from "@earendil-works/pi-ai";
 import { calculateContextTokens } from "@earendil-works/pi-ai/utils/estimate";
 import {
@@ -14,6 +14,7 @@ import {
   type EntryId,
   type Extension,
   type Harness,
+  type TaskId,
   type UsageState,
 } from "@earendil-works/pi-durable";
 
@@ -48,6 +49,10 @@ export interface IdleCompactionOptions {
   models: Models;
   /** Whether people come back to `conversation`; no other is compacted for being idle. */
   eligible(conversation: ConversationId): Promise<boolean>;
+  /** Current dispatch permission, checked again after provider request assembly. */
+  authorize?(conversation: ConversationId, context: Context): Promise<boolean>;
+  /** Activity notification for a host's wake and retention projection. */
+  changed?(): void;
   report?: (error: unknown) => void;
 }
 
@@ -62,8 +67,11 @@ export class IdleCompaction {
   readonly #waiting = new Map<ConversationId, { timer: NodeJS.Timeout; stop: AbortController }>();
   /** Summaries ready to be placed, each with the newest entry it covers. */
   readonly #summaries = new Map<ConversationId, { summary: string; tail: EntryId }>();
+  readonly #work = new Set<Promise<void>>();
+  readonly #placing = new Set<TaskId>();
   #harness: Harness | undefined;
   #closed = false;
+  #closing: Promise<void> | undefined;
 
   constructor(options: IdleCompactionOptions) {
     this.#options = options;
@@ -99,11 +107,28 @@ export class IdleCompaction {
     this.#waiting.delete(conversation);
     clearTimeout(waiting.timer);
     waiting.stop.abort();
+    this.#options.changed?.();
   }
 
-  close(): void {
-    this.#closed = true;
+  /** Nonpersistent timers and in-flight work require this process to remain available. */
+  get active(): boolean { return this.#waiting.size > 0 || this.#work.size > 0; }
+
+  /** Cancels optional work whose conversations no longer have an active delegation. */
+  cancelAll(): void {
     for (const conversation of [...this.#waiting.keys()]) this.cancel(conversation);
+  }
+
+  /** Stops new requests and drains existing summaries before their storage can close. */
+  close(): Promise<void> {
+    this.#closing ??= this.#close();
+    return this.#closing;
+  }
+
+  async #close(): Promise<void> {
+    this.#closed = true;
+    this.cancelAll();
+    await Promise.all([...this.#placing].map((task) => this.#harness!.abortTask(task, BACKGROUND_CONTEXT)));
+    await Promise.allSettled([...this.#work]);
   }
 
   /** After a final answer worth compacting, from a model whose cache lifetime is known and that did use its cache. */
@@ -118,20 +143,26 @@ export class IdleCompaction {
     this.cancel(conversation);
     const stop = new AbortController();
     const timer = setTimeout(() => {
-      this.#compact(conversation, answer, stop.signal)
+      const work = this.#compact(conversation, answer, stop.signal);
+      this.#work.add(work);
+      void work
         .catch((error: unknown) => void (this.#closed || stop.signal.aborted || this.#options.report?.(error)))
         .finally(() => {
+          this.#work.delete(work);
           if (this.#waiting.get(conversation)?.stop === stop) this.#waiting.delete(conversation);
+          this.#options.changed?.();
         });
     }, delay);
     timer.unref();
     this.#waiting.set(conversation, { timer, stop });
+    this.#options.changed?.();
   }
 
   async #compact(id: ConversationId, answer: AssistantMessage, signal: AbortSignal): Promise<void> {
     const harness = this.#harness;
     if (harness === undefined || !(await this.#options.eligible(id))) return;
     const context = withAbortSignal(signal, BACKGROUND_CONTEXT);
+    if (!(await this.#authorized(id, context))) return;
     const conversation = await harness.conversation(id, context);
     if (conversation === undefined) return;
     const [view, agent, provider] = await Promise.all([
@@ -146,25 +177,39 @@ export class IdleCompaction {
     if (last?.role !== "assistant" || last.timestamp !== answer.timestamp || tail === undefined || provider === undefined) return;
     if (model === undefined || model.provider !== answer.provider || model.id !== answer.model) return;
     const ask: UserMessage = { role: "user", content: [{ type: "text", text: PROMPT }], timestamp: Date.now() };
+    context.abortSignal?.throwIfAborted();
     const reply = await this.#options.models.completeSimple(model, { messages: [...view.messages, ask] }, {
       signal,
       sessionId: provider.sessionId,
+      ...(this.#options.authorize !== undefined && { onPayload: async () => {
+        if (!(await this.#authorized(id, context))) throw new Error("background model dispatch is no longer authorized");
+      } }),
       ...(agent.thinkingLevel === "off" ? {} : { reasoning: agent.thinkingLevel }),
     });
     await conversation.commit(async (tx) => charge(await tx.doc(UsageDoc, id), reply), BACKGROUND_CONTEXT);
     const summary = summaryOf(reply);
-    if (summary === undefined || signal.aborted) return;
+    if (summary === undefined || signal.aborted || this.#closed) return;
     // Past this point the summary is placed whoever comes back, so nothing waits on `signal`.
     this.#summaries.set(id, { summary, tail: tail.id });
+    let placing: TaskId | undefined;
     try {
-      const settled = await harness.waitForTask(await conversation.compact(undefined, BACKGROUND_CONTEXT), BACKGROUND_CONTEXT);
+      const task = await conversation.compact(undefined, BACKGROUND_CONTEXT);
+      placing = task;
+      this.#placing.add(placing);
+      if (this.#closed) await harness.abortTask(placing, BACKGROUND_CONTEXT);
+      const settled = await harness.waitForTask(task, BACKGROUND_CONTEXT);
       const outcome = settled.state.outcome;
       if (outcome.status === "completed" && (outcome.result.entryId !== undefined || outcome.result.submissionId !== undefined)) {
         await conversation.submit({ type: "write", entry: { kind: IdleCompactionEntry.kind } }, BACKGROUND_CONTEXT);
       }
     } finally {
+      if (placing !== undefined) this.#placing.delete(placing);
       this.#summaries.delete(id);
     }
+  }
+
+  #authorized(id: ConversationId, context: Context): Promise<boolean> {
+    return this.#options.authorize?.(id, context) ?? Promise.resolve(true);
   }
 }
 

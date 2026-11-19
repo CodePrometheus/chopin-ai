@@ -7,7 +7,7 @@ use chopin_job_broker::{
     Error, ExitStatus, JobId, JobKey, ProcessIdentity, Stream,
     runtime::{
         CaptureOptions, GateCommand, GateRecord, HostIdentity, Namespace, NamespaceConfig,
-        NamespaceProcess, OutputReader, ProcessObservation,
+        NamespaceProcess, NetworkMode, OutputReader, ProcessObservation,
     },
 };
 use std::{collections::BTreeMap, fs, num::NonZeroUsize, path::PathBuf, sync::Arc, time::Duration};
@@ -66,6 +66,7 @@ impl Fixture {
             .filter(|path| path.exists())
             .collect();
         let mut config = NamespaceConfig {
+            network: NetworkMode::Isolated,
             launcher: "/usr/local/bin/bwrap".into(),
             gate: env!("CARGO_BIN_EXE_chopin-job-gate").into(),
             capture: env!("CARGO_BIN_EXE_chopin-job-capture").into(),
@@ -214,6 +215,29 @@ async fn explicit_release() {
         NamespaceProcess::open(&f.host, &identity).unwrap(),
         ProcessObservation::Exited
     ));
+}
+
+#[tokio::test]
+async fn network_boundary() {
+    let original = fs::read_link("/proc/self/ns/net").unwrap();
+    for network in [NetworkMode::Isolated, NetworkMode::Inherited] {
+        let mut f = Fixture::configured(NonZeroUsize::new(4096).unwrap(), |_, config| {
+            config.network = network;
+        });
+        f.ready().await;
+        let command = f.command(vec!["/usr/bin/readlink".into(), "/proc/self/ns/net".into()]);
+        f.namespace.release(&command).await.unwrap();
+        assert!(f.ended().await.success());
+        timeout(deadline(), f.process.as_ref().unwrap().wait())
+            .await
+            .unwrap()
+            .unwrap();
+        let observed = String::from_utf8(f.stdout().await).unwrap();
+        assert_eq!(
+            observed.trim() == original.to_str().unwrap(),
+            network == NetworkMode::Inherited
+        );
+    }
 }
 
 #[tokio::test]
@@ -502,12 +526,16 @@ async fn pinned_workspace() {
 #[tokio::test]
 async fn readonly_mount() {
     let mut readonly = PathBuf::new();
-    let mut f = Fixture::configured(NonZeroUsize::new(4096).unwrap(), |base, config| {
-        readonly = base.join("readonly");
-        fs::create_dir(&readonly).unwrap();
-        fs::write(readonly.join("input"), b"approved data").unwrap();
-        config.read_only.push(readonly.clone());
-    });
+    let mut f = Fixture::rooted(
+        std::path::Path::new("/var/tmp"),
+        NonZeroUsize::new(4096).unwrap(),
+        |base, config| {
+            readonly = base.join("readonly");
+            fs::create_dir(&readonly).unwrap();
+            fs::write(readonly.join("input"), b"approved data").unwrap();
+            config.read_only.push(readonly.clone());
+        },
+    );
     f.ready().await;
     let script = r#"import errno,json,pathlib,sys
 path=pathlib.Path(sys.argv[1])

@@ -1,11 +1,12 @@
 [workspace]
 members = ["crates/protocol", "crates/job-broker"]
+exclude = ["crates/storage"]
 resolver = "3"
 
 [workspace.package]
 version = "0.7.0-rc1"
 edition = "2024"
-rust-version = "1.99"
+rust-version = "1.100"
 license = "Apache-2.0"
 repository = "https://github.com/CodePrometheus/chopin-ai"
 
@@ -23,7 +24,9 @@ tower = { version = "0.5.3", features = ["util"] }
 base64 = "0.23.1"
 chacha20poly1305 = "0.11.0"
 getrandom = "0.4.3"
-libseccomp = "0.4.0"
+jsonschema = { version = "0.61.2", default-features = false }
+schemars = "1.2.3"
+seccompiler = "0.5.0"
 sqlx = { version = "0.9.0", default-features = false, features = ["runtime-tokio", "tls-rustls-ring", "postgres", "uuid", "json"] }
 zeroize = { version = "1.9.1", features = ["derive"] }
 flate2 = "1.1.11"

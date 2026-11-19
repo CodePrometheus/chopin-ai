@@ -61,9 +61,25 @@ export class Vault {
     return vault;
   }
 
+  /** Opens existing sealed data without creating or replacing a missing key marker. */
+  static async openExisting(volume: string, home: string, key: Uint8Array): Promise<Vault> {
+    await checkKey(volume, key, { existingOnly: true });
+    const vault = new Vault(volume, home, key);
+    await vault.#restore();
+    return vault;
+  }
+
+  /** Allows first creation only after the trusted host admits the original initializer. */
+  static async initialize(volume: string, home: string, key: Uint8Array, authorizeCreation: () => Promise<void>): Promise<Vault> {
+    await checkKey(volume, key, { authorizeCreation });
+    const vault = new Vault(volume, home, key);
+    await vault.#restore();
+    return vault;
+  }
+
   /** Refuses any key but the vault's own, as opening does. */
   verify(key: Uint8Array): Promise<void> {
-    return checkKey(this.#volume, key);
+    return checkKey(this.#volume, key, { existingOnly: true });
   }
 
   /** Where the conversation store is sealed, under a key of its own. */
@@ -208,7 +224,7 @@ function objectContext(object: string): string {
  * sealed things but no record of its key lost it, and is refused too. Only what the vault writes counts as sealed: a
  * volume's root may hold what its file system put there, such as lost+found.
  */
-async function checkKey(volume: string, key: Uint8Array): Promise<void> {
+async function checkKey(volume: string, key: Uint8Array, options: { existingOnly?: boolean; authorizeCreation?: () => Promise<void> } = {}): Promise<void> {
   const file = join(volume, CHECK);
   const check = subkey(key, "check");
   const sealed = await readFile(file).catch((error: NodeJS.ErrnoException) => {
@@ -224,6 +240,8 @@ async function checkKey(volume: string, key: Uint8Array): Promise<void> {
       throw error;
     }
   }
+  if (options.existingOnly) throw new TamperedHome("the existing vault has no key marker");
+  await options.authorizeCreation?.();
   await mkdir(volume, { recursive: true, mode: 0o700 });
   if ((await readdir(volume)).some((name) => name === STORE || name === HOME)) throw new TamperedHome(`${volume} holds sealed things but no record of the key they were sealed with`);
   await writeSealed(file, check, CHECK_CONTEXT, randomBytes(16));

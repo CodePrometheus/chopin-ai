@@ -1,4 +1,4 @@
-import { mkdir, open, readFile, type FileHandle } from "node:fs/promises";
+import { mkdir, open, readFile, stat, type FileHandle } from "node:fs/promises";
 import { join } from "node:path";
 import { DatabaseSync } from "node:sqlite";
 import type { Context } from "@earendil-works/chord/context";
@@ -40,6 +40,8 @@ export class TamperedStore extends Error { }
  */
 export async function openSealedStore(options: SealedStoreOptions): Promise<Storage> {
   const { dir, key, report = () => { } } = options;
+  const pages = await stat(join(dir, "execution.sqlite")).catch((error: NodeJS.ErrnoException) => { if (error.code === "ENOENT") return undefined; throw error; });
+  if (pages !== undefined) throw new Error("encrypted page storage requires its protected adapter; the legacy store cannot open this directory");
   await mkdir(dir, { recursive: true, mode: 0o700 });
   const journalFile = join(dir, JOURNAL);
   const snapshot = await readSnapshot(join(dir, SNAPSHOT), key);

@@ -22,7 +22,7 @@ use std::{
     io::Write,
     num::{NonZeroU64, NonZeroUsize},
     os::fd::OwnedFd,
-    path::PathBuf,
+    path::{Path, PathBuf},
     process::Stdio,
     str::FromStr,
     sync::{
@@ -32,6 +32,7 @@ use std::{
     time::Duration,
 };
 use tokio::{
+    io::{AsyncBufReadExt, BufReader},
     net::TcpListener,
     process::Child,
     sync::{Notify, oneshot},
@@ -39,6 +40,10 @@ use tokio::{
     time::{sleep, timeout},
 };
 use uuid::Uuid;
+
+#[cfg(feature = "worker-service")]
+#[path = "controller/hosted.rs"]
+mod hosted;
 
 fn deadline() -> Duration {
     let contract: serde_json::Value =
@@ -378,9 +383,16 @@ struct Fixture {
     server: Option<Server>,
     child: Option<Child>,
     callback: String,
+    hosted: bool,
 }
 impl Fixture {
     async fn new() -> Self {
+        Self::prepare(false).await
+    }
+    async fn prepare(hosted: bool) -> Self {
+        Self::prepare_network(hosted, NetworkMode::Isolated).await
+    }
+    async fn prepare_network(hosted: bool, network: NetworkMode) -> Self {
         assert_ne!(rustix::process::geteuid().as_raw(), 0);
         let root = PathBuf::from("/tmp").join(format!("controller-{}", Uuid::new_v4()));
         fs::create_dir(&root).unwrap();
@@ -398,6 +410,7 @@ impl Fixture {
             create: true,
             ready: root.join("unused"),
             profile: NamespaceConfig {
+                network,
                 launcher: "/usr/local/bin/bwrap".into(),
                 gate: env!("CARGO_BIN_EXE_chopin-job-gate").into(),
                 capture: env!("CARGO_BIN_EXE_chopin-job-capture").into(),
@@ -487,6 +500,7 @@ impl Fixture {
             server: Some(server),
             child: None,
             callback,
+            hosted,
         };
         result.start().await;
         result
@@ -496,15 +510,19 @@ impl Fixture {
         let instance = Uuid::new_v4();
         config.ready = config.root.join(format!("ready-{instance}"));
         let path = config.root.join(format!("fixture-{instance}.json"));
-        fs::write(&path, serde_json::to_vec(&config).unwrap()).unwrap();
-        let mut child = tokio::process::Command::new(std::env::current_exe().unwrap())
-            .args(["--ignored", "--exact", "service_child", "--nocapture"])
-            .env("CHOPIN_CONTROLLER_FIXTURE", path)
-            .stdout(Stdio::null())
-            .stderr(File::create(config.root.join(format!("service-{instance}.log"))).unwrap())
-            .kill_on_drop(true)
-            .spawn()
-            .unwrap();
+        let mut child = if self.hosted {
+            self.start_hosted(&config, &path, instance).await
+        } else {
+            fs::write(&path, serde_json::to_vec(&config).unwrap()).unwrap();
+            tokio::process::Command::new(std::env::current_exe().unwrap())
+                .args(["--ignored", "--exact", "service_child", "--nocapture"])
+                .env("CHOPIN_CONTROLLER_FIXTURE", path)
+                .stdout(Stdio::null())
+                .stderr(File::create(config.root.join(format!("service-{instance}.log"))).unwrap())
+                .kill_on_drop(true)
+                .spawn()
+                .unwrap()
+        };
         self.event(&format!("spawn {}", child.id().unwrap()));
         let pid = rustix::process::Pid::from_raw(child.id().unwrap().try_into().unwrap()).unwrap();
         *self.faults.pause.lock().unwrap() =
@@ -548,6 +566,126 @@ impl Fixture {
         *self.directory.endpoint.lock().unwrap() = Some(endpoint);
         self.config.create = false;
         self.child = Some(child);
+    }
+    #[cfg(feature = "worker-service")]
+    async fn startup_output(&self, operation: Uuid) -> Result<String> {
+        let reader = OutputReader::open(
+            &self
+                .config
+                .profile
+                .private_root
+                .join("operations")
+                .join(self.config.scope.to_string())
+                .join(operation.to_string()),
+            &CaptureOptions {
+                id: JobId {
+                    scope: self.config.scope,
+                    operation,
+                },
+                worker: self.config.worker,
+                frame_bytes: NonZeroUsize::new(settings().frame_bytes).unwrap(),
+                key: Arc::new(JobKey::new([62; 32])),
+            },
+        )?;
+        timeout(deadline(), async {
+            loop {
+                if let Some(last) = reader.complete()? {
+                    let mut bytes = Vec::new();
+                    for sequence in 1..=last {
+                        let frame = reader.frame(sequence)?.ok_or(Error::Conflict)?;
+                        bytes.extend(
+                            BASE64_URL_SAFE_NO_PAD
+                                .decode(frame.data)
+                                .map_err(|_| Error::Invalid)?,
+                        );
+                    }
+                    return Ok(String::from_utf8_lossy(&bytes).into_owned());
+                }
+                sleep(Duration::from_millis(settings().poll_after_ms)).await;
+            }
+        })
+        .await
+        .map_err(|_| Error::Unavailable {
+            retry_after_ms: settings().poll_after_ms,
+        })?
+    }
+    fn hosted_command(&self, mode: &str, path: &Path) -> tokio::process::Command {
+        let Some(binary) = option_env!("CARGO_BIN_EXE_chopin-job-worker") else {
+            panic!("worker-service binary required");
+        };
+        let mut command = tokio::process::Command::new(binary);
+        command
+            .args([mode, "--config"])
+            .arg(path)
+            .env(
+                "CHOPIN_WORKER_JOURNAL_KEY",
+                BASE64_URL_SAFE_NO_PAD.encode([61; 32]),
+            )
+            .env(
+                "CHOPIN_WORKER_OUTPUT_KEY",
+                BASE64_URL_SAFE_NO_PAD.encode([62; 32]),
+            )
+            .env("CHOPIN_WORKER_TOKEN", "worker-fixture");
+        command
+    }
+    async fn start_hosted(&self, config: &ChildConfig, path: &Path, instance: Uuid) -> Child {
+        let value = serde_json::json!({
+            "version": 1, "worker": config.worker, "scope": config.scope, "domain": config.host.domain,
+            "policyRevision": settings().revision, "callbackBase": self.callback, "listen": "127.0.0.1:0", "namespace": config.profile,
+            "service": {"maxBodyBytes": settings().max_body_bytes, "recoveryPageSize": 2, "recoveryIntervalMs": settings().recovery_interval_ms},
+            "requestTimeoutMs": settings().request_timeout_ms, "responseBytes": settings().max_body_bytes, "retryAfterMs": settings().poll_after_ms,
+        });
+        fs::write(path, serde_json::to_vec(&value).unwrap()).unwrap();
+        if config.create {
+            let result = self.hosted_command("init", path).output().await.unwrap();
+            assert!(
+                result.status.success(),
+                "worker init failed: {}",
+                String::from_utf8_lossy(&result.stderr)
+            );
+        }
+        let mut child = self
+            .hosted_command("serve", path)
+            .stdout(Stdio::piped())
+            .stderr(File::create(config.root.join(format!("service-{instance}.log"))).unwrap())
+            .kill_on_drop(true)
+            .spawn()
+            .unwrap();
+        let mut lines = BufReader::new(child.stdout.take().unwrap()).lines();
+        let line = timeout(deadline(), lines.next_line())
+            .await
+            .unwrap()
+            .unwrap()
+            .expect("worker did not report its listener");
+        let ready: serde_json::Value = serde_json::from_str(&line).unwrap();
+        assert_eq!(ready["state"], "listening");
+        assert_eq!(ready["worker"], config.worker.to_string());
+        fs::write(
+            &config.ready,
+            format!("http://{}/", ready["address"].as_str().unwrap()),
+        )
+        .unwrap();
+        child
+    }
+    #[cfg(feature = "worker-service")]
+    async fn graceful(&mut self) {
+        let mut child = self.child.take().unwrap();
+        {
+            let held = self.faults.pause.lock().unwrap();
+            rustix::process::pidfd_send_signal(
+                held.as_ref().unwrap(),
+                rustix::process::Signal::TERM,
+            )
+            .unwrap();
+        }
+        assert!(
+            timeout(deadline(), child.wait())
+                .await
+                .unwrap()
+                .unwrap()
+                .success()
+        );
+        self.faults.pause.lock().unwrap().take();
     }
     async fn kill(&mut self) {
         let mut child = self.child.take().unwrap();
@@ -639,7 +777,9 @@ impl Fixture {
         (stdout, stderr)
     }
     async fn close(mut self) {
-        self.kill().await;
+        if self.child.is_some() {
+            self.kill().await;
+        }
         self.server.take().unwrap().close().await;
         self.pool.close().await;
     }

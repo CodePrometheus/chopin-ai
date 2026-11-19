@@ -6,6 +6,7 @@ use serde_json::{Value, json};
 use crate::{ChordClient, ProtocolError, Result, StateObserver};
 
 /// Conversation tool policy, supplied by the execution service.
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ConversationMode {
@@ -15,6 +16,7 @@ pub enum ConversationMode {
     Full,
 }
 /// Current conversation presentation; this bounded window is not its entire history.
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[derive(Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ConversationState {
@@ -37,6 +39,7 @@ impl std::fmt::Debug for ConversationState {
     }
 }
 /// Source identity and ownership metadata of one conversation.
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct ConversationRecord {
     /// Stable source identity.
@@ -46,6 +49,7 @@ pub struct ConversationRecord {
     pub extra: BTreeMap<String, Value>,
 }
 /// Materialized source window; older entries remain available through history pages.
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[derive(Clone, Serialize, Deserialize)]
 pub struct ConversationView {
     /// Original identity and ownership.
@@ -67,6 +71,7 @@ impl std::fmt::Debug for ConversationView {
     }
 }
 /// Source conversation metadata for navigation, not a goal completion decision.
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ConversationSummary {
@@ -94,6 +99,7 @@ pub struct ConversationSummary {
     pub seen: f64,
 }
 /// A durable source entry, retaining unknown application fields.
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[derive(Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct TranscriptEntry {
@@ -121,6 +127,7 @@ impl std::fmt::Debug for TranscriptEntry {
     }
 }
 /// One raw history page; the source decides when its cursor ends.
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct TranscriptPage {
     /// Entries in descending history order.
@@ -130,6 +137,7 @@ pub struct TranscriptPage {
     pub cursor: Option<Value>,
 }
 /// Provider-qualified model reference from the source catalog.
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ModelReference {
@@ -139,6 +147,7 @@ pub struct ModelReference {
     pub model_id: String,
 }
 /// One model currently usable by the service's owner.
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ModelChoice {
@@ -156,6 +165,7 @@ pub struct ModelChoice {
     pub thinking_levels: Vec<String>,
 }
 /// The current catalog and actual default model, read together from the service.
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct ModelChoices {
     /// Models whose providers the owner can currently use.
