@@ -45,6 +45,6 @@ COPY --from=native --chmod=0444 /native-output/chopin-storage.node packages/harn
 RUN chmod -R a+rX /app
 USER node
 RUN --network=none node -e 'const binding = require("/app/packages/harness-pi/native/chopin-storage.node"); if (typeof binding.openNativeStore !== "function") throw new Error("native storage ABI is unavailable");'
-RUN --network=none node -e 'const {spawnSync} = require("node:child_process"); const result = spawnSync(process.execPath, ["/app/apps/tui/dist/bin.js", "cloud"], {encoding:"utf8"}); if (result.error || result.status !== 1 || result.stdout !== "" || !result.stderr.includes("--config")) throw new Error("cloud CLI did not require its trusted configuration");'
+RUN --network=none node -e 'const {spawnSync} = require("node:child_process"); const result = spawnSync(process.execPath, ["/app/apps/tui/dist/bin.js", "cloud", "--supervise"], {encoding:"utf8"}); if (result.error || result.status !== 1 || result.stdout !== "" || !result.stderr.includes("--config")) throw new Error("cloud CLI did not require its trusted configuration");'
 ENTRYPOINT ["node", "/app/apps/tui/dist/bin.js"]
-CMD ["cloud"]
+CMD ["cloud", "--supervise"]

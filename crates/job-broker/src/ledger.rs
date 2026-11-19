@@ -268,6 +268,30 @@ impl Ledger {
     ) -> Result<Option<Record>> {
         let row = sqlx::query("SELECT content,state,revision FROM chopin_jobs WHERE scope=$1 AND operation=$2 FOR UPDATE")
             .bind(id.scope).bind(id.operation).fetch_optional(&mut **tx).await?;
+        self.decode_record(id, row)
+    }
+
+    /// Observe an original record without acquiring a write lock.
+    pub async fn read_observation(
+        &self,
+        tx: &mut Transaction<'_, Postgres>,
+        id: JobId,
+    ) -> Result<Option<Record>> {
+        let row = sqlx::query(
+            "SELECT content,state,revision FROM chopin_jobs WHERE scope=$1 AND operation=$2",
+        )
+        .bind(id.scope)
+        .bind(id.operation)
+        .fetch_optional(&mut **tx)
+        .await?;
+        self.decode_record(id, row)
+    }
+
+    fn decode_record(
+        &self,
+        id: JobId,
+        row: Option<sqlx::postgres::PgRow>,
+    ) -> Result<Option<Record>> {
         row.map(|row| {
             let version =
                 u64::try_from(row.try_get::<i64, _>("revision")?).map_err(|_| Error::Ciphertext)?;

@@ -22,6 +22,11 @@ configuration or command arguments:
 - `CHOPIN_JOB_TOKEN`: the purpose-bound command broker credential.
 - `CHOPIN_TOKEN`: the incoming controller connection credential for this owner.
 
+A managed launcher can supply `CHOPIN_AGENT_ID`, `CHOPIN_RUNTIME_EPOCH`, and
+`CHOPIN_CONTROL_URL` as an independent allocation binding. When any is present,
+the CLI requires all three to match the configuration before reading credentials
+or contacting a host.
+
 With `keySource: "custody"`, do not supply `CHOPIN_SERVICE_KEY`. The process uses
 its private control binding to request the current execution key. The host must
 explicitly enable custody release and independently verify the exact physical
@@ -78,3 +83,23 @@ mounts when launching the image. Put restored home on private memory storage.
 The image serves the durable harness; its command worker and provisioning host
 remain separate services. Building an image does not authorize execution or
 establish persistent-volume fencing.
+
+The cloud image defaults to `cloud --supervise`. Launch the hosted workload with
+`cloud --supervise --config runtime.json` and a custody configuration. It runs
+one service child at a time in the current allocation. If the restored child
+exits without a shutdown request, the supervisor opens the same frozen
+configuration in a new child. The child requests custody again and starts
+paused. The host uses current authority to resume it. A changed configuration
+or a failure before restoration ends the supervisor with an error and leaves
+Pod recovery to the host. `SIGTERM` or `SIGINT` to the supervisor stops recovery,
+forwards `SIGTERM` to the service, and waits for it to exit.
+
+For an interruption check, use the service PID from the latest restored event.
+Observe the service and its independent command worker separately. The
+supervisor writes JSON records with `source: "cloud-supervisor"`, their child
+`pid` and `attempt`, the UTC observation `at`, and monotonic `elapsedMs` since
+supervision started. An unexpected `exited` record and the `restored` record for
+the next attempt bound the observed service gap in one container. `restored`
+means the new listener is up with the scheduler paused. Match the worker's
+independently timed observations within the gap and verify the original
+operation through its durable receipt and output.
