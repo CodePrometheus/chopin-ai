@@ -1,20 +1,21 @@
 use std::{future::Future, num::NonZeroUsize, sync::Arc, time::Duration};
 
-use sqlx::{PgPool, Postgres, Transaction};
+use sqlx::PgPool;
 use url::Url;
 use uuid::Uuid;
 
+use crate::coordination::{PostgresAuthority, SqlBrokerStore};
 use crate::{
-    Action, Admission, Callback, Caller, Error, HostAuthority, JobId, Ledger, OutputPage, Phase,
-    Record, Request, Result, Settings, Snapshot, WorkerAction, WorkerCaller, WorkerEndpoint,
-    WorkerEvent, WorkerObservation, WorkerStart, WorkerState, WorkerTransport,
+    Action, Admission, BrokerStore, BrokerTransaction, Callback, Caller, Error, HostAuthority,
+    JobId, Ledger, LedgerStore, OutputPage, Phase, Record, Request, Result, Settings, Snapshot,
+    TransactionalHostAuthority, WorkerAction, WorkerCaller, WorkerEndpoint, WorkerEvent,
+    WorkerObservation, WorkerStart, WorkerState, WorkerTransport,
 };
 
 /// Coordinates durable intent and exact worker effects without holding a transaction across I/O.
 pub struct Broker {
-    pool: PgPool,
+    store: Arc<dyn BrokerStore>,
     ledger: Ledger,
-    authority: Arc<dyn HostAuthority>,
     worker: Arc<dyn WorkerTransport>,
     settings: Settings,
     callback: Url,
@@ -36,11 +37,49 @@ impl Broker {
         settings: Settings,
         callback: &str,
     ) -> Result<Self> {
+        Self::with_ledger(
+            LedgerStore::Postgres(pool),
+            ledger,
+            Arc::new(PostgresAuthority(authority)),
+            worker,
+            settings,
+            callback,
+        )
+    }
+
+    /// Uses a built-in coordination database and host authority sharing the same transaction.
+    pub fn with_ledger(
+        store: LedgerStore,
+        ledger: Ledger,
+        authority: Arc<dyn TransactionalHostAuthority>,
+        worker: Arc<dyn WorkerTransport>,
+        settings: Settings,
+        callback: &str,
+    ) -> Result<Self> {
+        Self::with_store(
+            Arc::new(SqlBrokerStore {
+                ledger: store,
+                authority,
+            }),
+            ledger,
+            worker,
+            settings,
+            callback,
+        )
+    }
+
+    /// Uses a host-supplied provider for command and authorization transactions.
+    pub fn with_store(
+        store: Arc<dyn BrokerStore>,
+        ledger: Ledger,
+        worker: Arc<dyn WorkerTransport>,
+        settings: Settings,
+        callback: &str,
+    ) -> Result<Self> {
         settings.validate()?;
         Ok(Self {
-            pool,
+            store,
             ledger,
-            authority,
             worker,
             settings,
             callback: crate::worker::address(callback)?,
@@ -58,25 +97,23 @@ impl Broker {
         let (record, inserted) = self
             .ledger
             .record(
-                &mut tx,
+                &mut *tx,
                 caller,
                 operation,
                 request,
                 Admission::Execute(&self.settings),
             )
             .await?;
-        self.authority
-            .authorize(
-                &mut tx,
-                caller,
-                record.request(),
-                if inserted {
-                    Action::Submit
-                } else {
-                    Action::Read
-                },
-            )
-            .await?;
+        tx.authorize(
+            caller,
+            record.request(),
+            if inserted {
+                Action::Submit
+            } else {
+                Action::Read
+            },
+        )
+        .await?;
         tx.commit().await?;
         if !inserted || record.state().phase == Phase::Drained {
             return Ok(record.snapshot());
@@ -95,17 +132,15 @@ impl Broker {
         let (mut record, _) = self
             .ledger
             .record(
-                &mut tx,
+                &mut *tx,
                 caller,
                 operation,
                 request,
                 Admission::Cancel(&self.settings),
             )
             .await?;
-        self.authority
-            .authorize(&mut tx, caller, record.request(), Action::Stop)
-            .await?;
-        self.ledger.stop(&mut tx, &mut record).await?;
+        tx.authorize(caller, record.request(), Action::Stop).await?;
+        self.ledger.stop(&mut *tx, &mut record).await?;
         tx.commit().await?;
         if record.state().worker.is_none() {
             return Ok(record.snapshot());
@@ -117,7 +152,7 @@ impl Broker {
     pub async fn get(&self, caller: &Caller, operation: Uuid) -> Result<Snapshot> {
         let mut tx = self.begin().await?;
         let record = self
-            .authorized(&mut tx, caller, operation, Action::Read)
+            .authorized(&mut *tx, caller, operation, Action::Read)
             .await?;
         tx.commit().await?;
         Ok(record.snapshot())
@@ -127,9 +162,9 @@ impl Broker {
     pub async fn stop(&self, caller: &Caller, operation: Uuid) -> Result<Snapshot> {
         let mut tx = self.begin().await?;
         let mut record = self
-            .authorized(&mut tx, caller, operation, Action::Stop)
+            .authorized(&mut *tx, caller, operation, Action::Stop)
             .await?;
-        self.ledger.stop(&mut tx, &mut record).await?;
+        self.ledger.stop(&mut *tx, &mut record).await?;
         tx.commit().await?;
         if record.state().phase == Phase::Drained {
             return Ok(record.snapshot());
@@ -147,9 +182,9 @@ impl Broker {
     ) -> Result<OutputPage> {
         let mut tx = self.begin().await?;
         let record = self
-            .authorized(&mut tx, caller, operation, Action::Read)
+            .authorized(&mut *tx, caller, operation, Action::Read)
             .await?;
-        let page = self.ledger.output(&mut tx, &record, cursor, bytes).await?;
+        let page = self.ledger.output(&mut *tx, &record, cursor, bytes).await?;
         tx.commit().await?;
         Ok(page)
     }
@@ -161,17 +196,16 @@ impl Broker {
         event: WorkerEvent,
     ) -> Result<Snapshot> {
         let mut tx = self.begin().await?;
-        let mut record = self.callback_record(&mut tx, caller).await?;
+        let mut record = self.callback_record(&mut *tx, caller).await?;
         let action = if matches!(event, WorkerEvent::Release) {
             WorkerAction::Release
         } else {
             WorkerAction::Observe
         };
-        self.authority
-            .authorize_worker(&mut tx, caller, record.request(), action)
+        tx.authorize_worker(caller, record.request(), action)
             .await?;
         self.ledger
-            .event(&mut tx, &mut record, caller.worker, &event)
+            .event(&mut *tx, &mut record, caller.worker, &event)
             .await?;
         tx.commit().await?;
         Ok(record.snapshot())
@@ -182,7 +216,7 @@ impl Broker {
     pub async fn reconcile(&self, caller: &Caller, operation: Uuid) -> Result<Snapshot> {
         let mut tx = self.begin().await?;
         let record = self
-            .authorized(&mut tx, caller, operation, Action::Read)
+            .authorized(&mut *tx, caller, operation, Action::Read)
             .await?;
         tx.commit().await?;
         if record.state().phase == Phase::Drained {
@@ -197,18 +231,17 @@ impl Broker {
             .await?;
         let mut tx = self.begin().await?;
         let mut record = self
-            .authorized(&mut tx, caller, operation, Action::Read)
+            .authorized(&mut *tx, caller, operation, Action::Read)
             .await?;
         if record.state().phase == Phase::Drained {
             tx.commit().await?;
             return Ok(record.snapshot());
         }
         if record.state().worker.is_none() {
-            self.authority
-                .authorize(&mut tx, caller, record.request(), Action::Submit)
+            tx.authorize(caller, record.request(), Action::Submit)
                 .await?;
             self.ledger
-                .reserve(&mut tx, &mut record, endpoint.worker())
+                .reserve(&mut *tx, &mut record, endpoint.worker())
                 .await?;
         } else if record.state().worker != Some(endpoint.worker()) {
             return Err(Error::Conflict);
@@ -264,7 +297,7 @@ impl Broker {
     ) -> Result<Option<WorkerStart>> {
         let mut tx = self.begin().await?;
         let record = self
-            .authorized(&mut tx, caller, operation, Action::Read)
+            .authorized(&mut *tx, caller, operation, Action::Read)
             .await?;
         if record.state().worker != Some(endpoint.worker()) {
             return Err(Error::Conflict);
@@ -273,8 +306,7 @@ impl Broker {
             tx.commit().await?;
             return Ok(None);
         }
-        self.authority
-            .authorize(&mut tx, caller, record.request(), Action::Submit)
+        tx.authorize(caller, record.request(), Action::Submit)
             .await?;
         let callback = Callback {
             url: self
@@ -282,7 +314,7 @@ impl Broker {
                 .join(&format!("{operation}/worker"))
                 .map_err(|_| Error::Invalid)?
                 .to_string(),
-            credential: self.authority.worker_credential(
+            credential: self.store.worker_credential(
                 record.caller(),
                 record.id(),
                 endpoint.worker(),
@@ -314,7 +346,7 @@ impl Broker {
         }
         let mut tx = self.begin().await?;
         let mut record = self
-            .authorized(&mut tx, caller, observed.id.operation, Action::Read)
+            .authorized(&mut *tx, caller, observed.id.operation, Action::Read)
             .await?;
         if record.state().worker != Some(endpoint.worker()) {
             return Err(Error::Conflict);
@@ -324,8 +356,7 @@ impl Broker {
             operation: record.id().operation,
             worker: endpoint.worker(),
         };
-        self.authority
-            .authorize_worker(&mut tx, &original, record.request(), WorkerAction::Observe)
+        tx.authorize_worker(&original, record.request(), WorkerAction::Observe)
             .await?;
         let process = match &observed.state {
             WorkerState::Attached { process }
@@ -336,7 +367,7 @@ impl Broker {
         if let Some(process) = process {
             self.ledger
                 .event(
-                    &mut tx,
+                    &mut *tx,
                     &mut record,
                     endpoint.worker(),
                     &WorkerEvent::Attached {
@@ -351,7 +382,7 @@ impl Broker {
             WorkerState::Running { .. } => {
                 self.ledger
                     .event(
-                        &mut tx,
+                        &mut *tx,
                         &mut record,
                         endpoint.worker(),
                         &WorkerEvent::Started,
@@ -361,7 +392,7 @@ impl Broker {
             WorkerState::Cancelled => {
                 self.ledger
                     .event(
-                        &mut tx,
+                        &mut *tx,
                         &mut record,
                         endpoint.worker(),
                         &WorkerEvent::NotStarted,
@@ -378,7 +409,7 @@ impl Broker {
                 }
                 self.ledger
                     .event(
-                        &mut tx,
+                        &mut *tx,
                         &mut record,
                         endpoint.worker(),
                         &WorkerEvent::Exited { exit },
@@ -387,7 +418,7 @@ impl Broker {
                 if sequence == record.state().last_sequence {
                     self.ledger
                         .event(
-                            &mut tx,
+                            &mut *tx,
                             &mut record,
                             endpoint.worker(),
                             &WorkerEvent::OutputComplete { sequence },
@@ -395,7 +426,7 @@ impl Broker {
                         .await?;
                     self.ledger
                         .event(
-                            &mut tx,
+                            &mut *tx,
                             &mut record,
                             endpoint.worker(),
                             &WorkerEvent::Drained { process, sequence },
@@ -420,16 +451,12 @@ impl Broker {
             })?
     }
 
-    pub(crate) async fn begin(&self) -> Result<Transaction<'_, Postgres>> {
-        let mut tx = self.pool.begin().await?;
-        sqlx::query("SET LOCAL synchronous_commit='on'")
-            .execute(&mut *tx)
-            .await?;
-        Ok(tx)
+    pub(crate) async fn begin(&self) -> Result<Box<dyn BrokerTransaction + '_>> {
+        self.store.begin().await
     }
     async fn authorized(
         &self,
-        tx: &mut Transaction<'_, Postgres>,
+        tx: &mut dyn BrokerTransaction,
         caller: &Caller,
         operation: Uuid,
         action: Action,
@@ -448,14 +475,12 @@ impl Broker {
             )
             .await?
             .ok_or(Error::NotFound)?;
-        self.authority
-            .authorize(tx, caller, record.request(), action)
-            .await?;
+        tx.authorize(caller, record.request(), action).await?;
         Ok(record)
     }
     pub(crate) async fn callback_record(
         &self,
-        tx: &mut Transaction<'_, Postgres>,
+        tx: &mut dyn BrokerTransaction,
         caller: &WorkerCaller,
     ) -> Result<Record> {
         let record = self
@@ -475,8 +500,8 @@ impl Broker {
         Ok(record)
     }
     #[cfg(feature = "transport")]
-    pub(crate) fn authority(&self) -> &dyn HostAuthority {
-        self.authority.as_ref()
+    pub(crate) fn store(&self) -> &dyn BrokerStore {
+        self.store.as_ref()
     }
     #[cfg(feature = "transport")]
     pub(crate) fn settings(&self) -> &Settings {
@@ -504,8 +529,8 @@ impl Broker {
     /// Whether this scope retains command work; an authorization or store failure stays an error.
     pub async fn has_pending(&self, caller: &Caller) -> Result<bool> {
         let mut tx = self.begin().await?;
-        self.authority.authorize_scope(&mut tx, caller).await?;
-        let pending = self.ledger.has_pending(&mut tx, caller.scope).await?;
+        tx.authorize_scope(caller).await?;
+        let pending = self.ledger.has_pending(&mut *tx, caller.scope).await?;
         tx.commit().await?;
         Ok(pending)
     }
@@ -517,10 +542,10 @@ impl Broker {
         cursor: Option<&str>,
     ) -> Result<RecoveryPage> {
         let mut tx = self.begin().await?;
-        self.authority.authorize_scope(&mut tx, caller).await?;
+        tx.authorize_scope(caller).await?;
         let page = self
             .ledger
-            .pending(&mut tx, caller.scope, limit, cursor)
+            .pending(&mut *tx, caller.scope, limit, cursor)
             .await?;
         tx.commit().await?;
         let mut outcomes = Vec::with_capacity(page.operations.len());

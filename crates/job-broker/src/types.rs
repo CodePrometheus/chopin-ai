@@ -358,3 +358,36 @@ pub trait HostAuthority: Send + Sync {
     /// Issue a purpose-bound callback credential after reserving its worker.
     fn worker_credential(&self, caller: &Caller, id: JobId, worker: Uuid) -> Result<Credential>;
 }
+
+/// Host identity and policy for the built-in database adapters.
+#[async_trait::async_trait]
+pub trait TransactionalHostAuthority: Send + Sync {
+    /// Authenticate an execution credential without interpreting a worker credential as one.
+    async fn authenticate(&self, credential: &str) -> Result<Caller>;
+    /// Authenticate an exact worker callback identity.
+    async fn authenticate_worker(&self, credential: &str) -> Result<WorkerCaller>;
+    /// Validate current ownership of a whole scope without inventing a placeholder command.
+    async fn authorize_scope(
+        &self,
+        tx: &mut crate::StoreTransaction<'_>,
+        caller: &Caller,
+    ) -> Result<()>;
+    /// Validate current ownership and permission using the supplied transaction.
+    async fn authorize(
+        &self,
+        tx: &mut crate::StoreTransaction<'_>,
+        caller: &Caller,
+        request: &Request,
+        action: Action,
+    ) -> Result<()>;
+    /// Validate a callback's original binding and, for release, current execution permission.
+    async fn authorize_worker(
+        &self,
+        tx: &mut crate::StoreTransaction<'_>,
+        caller: &WorkerCaller,
+        request: &Request,
+        action: WorkerAction,
+    ) -> Result<()>;
+    /// Issue a purpose-bound callback credential after reserving its worker.
+    fn worker_credential(&self, caller: &Caller, id: JobId, worker: Uuid) -> Result<Credential>;
+}

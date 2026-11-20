@@ -6,13 +6,13 @@ use chacha20poly1305::{
     aead::{Aead, KeyInit, Payload},
 };
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
-use sqlx::{Postgres, Row, Transaction};
 use uuid::Uuid;
 use zeroize::{Zeroize, ZeroizeOnDrop, Zeroizing};
 
+use crate::storage::SealedRecord;
 use crate::{
-    Admission, Caller, Error, ExitStatus, JobId, ProcessIdentity, Request, Result, Settings,
-    Stream, WorkerEvent,
+    Admission, Caller, Error, ExitStatus, JobId, LedgerTransaction, ProcessIdentity, Request,
+    Result, Settings, Stream, WorkerEvent,
 };
 
 /// Initial immutable ledger schema, applied in the host's migration transaction.
@@ -210,7 +210,7 @@ impl Ledger {
     /// Returns whether this transaction inserted the record. Existing cancellation always wins.
     pub async fn record(
         &self,
-        tx: &mut Transaction<'_, Postgres>,
+        tx: &mut (impl LedgerTransaction + ?Sized),
         caller: &Caller,
         operation: Uuid,
         request: &Request,
@@ -222,7 +222,7 @@ impl Ledger {
             Admission::Cancel(settings) => (settings, true),
         };
         settings.validate()?;
-        durable(tx).await?;
+        tx.storage().durable().await?;
         if caller.scope.is_nil() || operation.is_nil() {
             return Err(Error::Invalid);
         }
@@ -251,8 +251,15 @@ impl Ledger {
             output_complete: cancelled,
             last_sequence: 0,
         };
-        let inserted = sqlx::query("INSERT INTO chopin_jobs(scope,operation,content,state,revision,drained) VALUES($1,$2,$3,$4,1,$5) ON CONFLICT(scope,operation) DO NOTHING")
-            .bind(id.scope).bind(id.operation).bind(self.key.seal(&aad(id,"content",0),&content)?).bind(self.key.seal(&aad(id,"state",1),&state)?).bind(cancelled).execute(&mut **tx).await?.rows_affected() == 1;
+        let inserted = tx
+            .storage()
+            .insert(
+                id,
+                self.key.seal(&aad(id, "content", 0), &content)?,
+                self.key.seal(&aad(id, "state", 1), &state)?,
+                cancelled,
+            )
+            .await?;
         let record = self.read(tx, id).await?.ok_or(Error::NotFound)?;
         if record.request() != request {
             return Err(Error::Conflict);
@@ -261,47 +268,30 @@ impl Ledger {
     }
 
     /// Lock one original record; absence is distinct from an unavailable database.
+    /// A SQLite caller acquires its write reservation when opening the transaction.
     pub async fn read(
         &self,
-        tx: &mut Transaction<'_, Postgres>,
+        tx: &mut (impl LedgerTransaction + ?Sized),
         id: JobId,
     ) -> Result<Option<Record>> {
-        let row = sqlx::query("SELECT content,state,revision FROM chopin_jobs WHERE scope=$1 AND operation=$2 FOR UPDATE")
-            .bind(id.scope).bind(id.operation).fetch_optional(&mut **tx).await?;
-        self.decode_record(id, row)
+        self.decode_record(id, tx.storage().read(id, true).await?)
     }
 
     /// Observe an original record without acquiring a write lock.
+    /// The caller chooses whether the encompassing transaction reserves the writer.
     pub async fn read_observation(
         &self,
-        tx: &mut Transaction<'_, Postgres>,
+        tx: &mut (impl LedgerTransaction + ?Sized),
         id: JobId,
     ) -> Result<Option<Record>> {
-        let row = sqlx::query(
-            "SELECT content,state,revision FROM chopin_jobs WHERE scope=$1 AND operation=$2",
-        )
-        .bind(id.scope)
-        .bind(id.operation)
-        .fetch_optional(&mut **tx)
-        .await?;
-        self.decode_record(id, row)
+        self.decode_record(id, tx.storage().read(id, false).await?)
     }
 
-    fn decode_record(
-        &self,
-        id: JobId,
-        row: Option<sqlx::postgres::PgRow>,
-    ) -> Result<Option<Record>> {
-        row.map(|row| {
-            let version =
-                u64::try_from(row.try_get::<i64, _>("revision")?).map_err(|_| Error::Ciphertext)?;
-            let content = self
-                .key
-                .open(&aad(id, "content", 0), row.try_get::<&[u8], _>("content")?)?;
-            let state: State = self.key.open(
-                &aad(id, "state", version),
-                row.try_get::<&[u8], _>("state")?,
-            )?;
+    fn decode_record(&self, id: JobId, row: Option<SealedRecord>) -> Result<Option<Record>> {
+        row.map(|(content, state, revision)| {
+            let version = u64::try_from(revision).map_err(|_| Error::Ciphertext)?;
+            let content = self.key.open(&aad(id, "content", 0), &content)?;
+            let state: State = self.key.open(&aad(id, "state", version), &state)?;
             if state.version != version {
                 return Err(Error::Ciphertext);
             }
@@ -313,7 +303,7 @@ impl Ledger {
     /// Persist the exact worker before issuing a start request. No replacement is inferred from time.
     pub async fn reserve(
         &self,
-        tx: &mut Transaction<'_, Postgres>,
+        tx: &mut (impl LedgerTransaction + ?Sized),
         record: &mut Record,
         worker: Uuid,
     ) -> Result<()> {
@@ -339,7 +329,7 @@ impl Ledger {
     /// Persist stop intent without claiming that an external process has already stopped.
     pub async fn stop(
         &self,
-        tx: &mut Transaction<'_, Postgres>,
+        tx: &mut (impl LedgerTransaction + ?Sized),
         record: &mut Record,
     ) -> Result<()> {
         if record.state.stop_requested {
@@ -357,7 +347,7 @@ impl Ledger {
     /// Apply one callback after host authorization. Duplicate events must agree byte for byte.
     pub async fn event(
         &self,
-        tx: &mut Transaction<'_, Postgres>,
+        tx: &mut (impl LedgerTransaction + ?Sized),
         record: &mut Record,
         worker: Uuid,
         event: &WorkerEvent,
@@ -446,9 +436,15 @@ impl Ledger {
                 {
                     return Err(Error::Conflict);
                 }
-                durable(tx).await?;
-                sqlx::query("INSERT INTO chopin_job_output(scope,operation,sequence,sealed) VALUES($1,$2,$3,$4)")
-                    .bind(record.id.scope).bind(record.id.operation).bind(integer(*sequence)?).bind(self.key.seal(&aad(record.id,"output",*sequence),&incoming)?).execute(&mut **tx).await?;
+                tx.storage().durable().await?;
+                tx.storage()
+                    .insert_frame(
+                        record.id,
+                        integer(*sequence)?,
+                        self.key
+                            .seal(&aad(record.id, "output", *sequence), &incoming)?,
+                    )
+                    .await?;
                 state.last_sequence = *sequence;
             }
             WorkerEvent::Exited { exit } => {
@@ -491,7 +487,7 @@ impl Ledger {
     /// Read one channel-preserving output slice from an operation-bound cursor.
     pub async fn output(
         &self,
-        tx: &mut Transaction<'_, Postgres>,
+        tx: &mut (impl LedgerTransaction + ?Sized),
         record: &Record,
         cursor: Option<&str>,
         bytes: NonZeroUsize,
@@ -548,35 +544,37 @@ impl Ledger {
 
     async fn frame(
         &self,
-        tx: &mut Transaction<'_, Postgres>,
+        tx: &mut (impl LedgerTransaction + ?Sized),
         id: JobId,
         sequence: u64,
     ) -> Result<Option<Output>> {
-        let bytes = sqlx::query_scalar::<_, Vec<u8>>(
-            "SELECT sealed FROM chopin_job_output WHERE scope=$1 AND operation=$2 AND sequence=$3",
-        )
-        .bind(id.scope)
-        .bind(id.operation)
-        .bind(integer(sequence)?)
-        .fetch_optional(&mut **tx)
-        .await?;
-        bytes
+        tx.storage()
+            .frame(id, integer(sequence)?)
+            .await?
             .map(|bytes| self.key.open(&aad(id, "output", sequence), &bytes))
             .transpose()
     }
 
     async fn save(
         &self,
-        tx: &mut Transaction<'_, Postgres>,
+        tx: &mut (impl LedgerTransaction + ?Sized),
         record: &mut Record,
         mut state: State,
     ) -> Result<()> {
-        durable(tx).await?;
+        tx.storage().durable().await?;
         state.version = state.version.checked_add(1).ok_or(Error::Invalid)?;
-        let changed = sqlx::query("UPDATE chopin_jobs SET state=$3,revision=$4,drained=$5 WHERE scope=$1 AND operation=$2 AND revision=$6")
-            .bind(record.id.scope).bind(record.id.operation).bind(self.key.seal(&aad(record.id,"state",state.version),&state)?)
-            .bind(integer(state.version)?).bind(state.phase == Phase::Drained).bind(integer(record.state.version)?).execute(&mut **tx).await?.rows_affected();
-        if changed != 1 {
+        let changed = tx
+            .storage()
+            .update(
+                record.id,
+                self.key
+                    .seal(&aad(record.id, "state", state.version), &state)?,
+                integer(state.version)?,
+                state.phase == Phase::Drained,
+                integer(record.state.version)?,
+            )
+            .await?;
+        if !changed {
             return Err(Error::Conflict);
         }
         record.state = state;
@@ -607,17 +605,6 @@ fn integer(value: u64) -> Result<i64> {
     i64::try_from(value).map_err(|_| Error::Invalid)
 }
 
-async fn durable(tx: &mut Transaction<'_, Postgres>) -> Result<()> {
-    let (fsync, commit): (String, String) =
-        sqlx::query_as("SELECT current_setting('fsync'),current_setting('synchronous_commit')")
-            .fetch_one(&mut **tx)
-            .await?;
-    if fsync != "on" || !matches!(commit.as_str(), "on" | "remote_apply") {
-        return Err(Error::Durability);
-    }
-    Ok(())
-}
-
 /// One source page of operations still requiring a running worker or reconciliation.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
@@ -637,20 +624,15 @@ impl Ledger {
     /// Observe whether this ledger retains work. A failed query is never reported as idle.
     pub async fn has_pending(
         &self,
-        tx: &mut Transaction<'_, Postgres>,
+        tx: &mut (impl LedgerTransaction + ?Sized),
         scope: Uuid,
     ) -> Result<bool> {
-        Ok(sqlx::query_scalar(
-            "SELECT EXISTS(SELECT 1 FROM chopin_jobs WHERE scope=$1 AND NOT drained)",
-        )
-        .bind(scope)
-        .fetch_one(&mut **tx)
-        .await?)
+        tx.storage().has_pending(scope).await
     }
     /// Read exactly one source page. The host authenticates the scope in this transaction.
     pub async fn pending(
         &self,
-        tx: &mut Transaction<'_, Postgres>,
+        tx: &mut (impl LedgerTransaction + ?Sized),
         scope: Uuid,
         limit: NonZeroUsize,
         cursor: Option<&str>,
@@ -674,8 +656,7 @@ impl Ledger {
             .ok()
             .and_then(|limit| limit.checked_add(1))
             .ok_or(Error::Invalid)?;
-        let mut operations:Vec<Uuid>=sqlx::query_scalar("SELECT operation FROM chopin_jobs WHERE scope=$1 AND NOT drained AND ($2::uuid IS NULL OR operation>$2) ORDER BY operation LIMIT $3")
-            .bind(scope).bind(after).bind(count).fetch_all(&mut **tx).await?;
+        let mut operations = tx.storage().pending(scope, after, count).await?;
         let more = operations.len() > limit.get();
         if more {
             operations.pop();

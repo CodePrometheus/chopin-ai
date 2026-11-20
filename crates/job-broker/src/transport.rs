@@ -34,7 +34,7 @@ async fn submit(
     headers: HeaderMap,
     body: Body,
 ) -> Result<impl IntoResponse> {
-    let caller = broker.authority().authenticate(bearer(&headers)?).await?;
+    let caller = broker.store().authenticate(bearer(&headers)?).await?;
     let request = decode(body, broker.settings().max_body_bytes).await?;
     Ok(Json(broker.submit(&caller, operation, &request).await?))
 }
@@ -44,7 +44,7 @@ async fn cancel(
     headers: HeaderMap,
     body: Body,
 ) -> Result<impl IntoResponse> {
-    let caller = broker.authority().authenticate(bearer(&headers)?).await?;
+    let caller = broker.store().authenticate(bearer(&headers)?).await?;
     let request = decode(body, broker.settings().max_body_bytes).await?;
     Ok(Json(broker.cancel(&caller, operation, &request).await?))
 }
@@ -53,7 +53,7 @@ async fn snapshot(
     Path(operation): Path<Uuid>,
     headers: HeaderMap,
 ) -> Result<impl IntoResponse> {
-    let caller = broker.authority().authenticate(bearer(&headers)?).await?;
+    let caller = broker.store().authenticate(bearer(&headers)?).await?;
     Ok(Json(broker.get(&caller, operation).await?))
 }
 async fn stop(
@@ -61,7 +61,7 @@ async fn stop(
     Path(operation): Path<Uuid>,
     headers: HeaderMap,
 ) -> Result<impl IntoResponse> {
-    let caller = broker.authority().authenticate(bearer(&headers)?).await?;
+    let caller = broker.store().authenticate(bearer(&headers)?).await?;
     Ok(Json(broker.stop(&caller, operation).await?))
 }
 async fn reconcile(
@@ -69,7 +69,7 @@ async fn reconcile(
     Path(operation): Path<Uuid>,
     headers: HeaderMap,
 ) -> Result<impl IntoResponse> {
-    let caller = broker.authority().authenticate(bearer(&headers)?).await?;
+    let caller = broker.store().authenticate(bearer(&headers)?).await?;
     Ok(Json(broker.reconcile(&caller, operation).await?))
 }
 
@@ -85,7 +85,7 @@ async fn output(
     Query(query): Query<OutputQuery>,
     headers: HeaderMap,
 ) -> Result<impl IntoResponse> {
-    let caller = broker.authority().authenticate(bearer(&headers)?).await?;
+    let caller = broker.store().authenticate(bearer(&headers)?).await?;
     Ok(Json(
         broker
             .output(&caller, operation, query.cursor.as_deref(), query.limit)
@@ -100,17 +100,15 @@ async fn worker(
     body: Body,
 ) -> Result<impl IntoResponse> {
     let caller = broker
-        .authority()
+        .store()
         .authenticate_worker(bearer(&headers)?)
         .await?;
     if caller.operation != operation {
         return Err(Error::Forbidden);
     }
     let mut tx = broker.begin().await?;
-    let record = broker.callback_record(&mut tx, &caller).await?;
-    broker
-        .authority()
-        .authorize_worker(&mut tx, &caller, record.request(), WorkerAction::Observe)
+    let record = broker.callback_record(&mut *tx, &caller).await?;
+    tx.authorize_worker(&caller, record.request(), WorkerAction::Observe)
         .await?;
     let maximum = record.settings().max_body_bytes;
     tx.commit().await?;
