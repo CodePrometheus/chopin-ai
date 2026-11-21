@@ -92,7 +92,11 @@ export async function createAgentHost(source: AgentService | Sealed, loop?: Loop
       }, () => service.release(owner));
       const state = self.follow((observer, ctx) => opened.value.store.harness.observeDoc(GoalDoc, goal, observer, ctx));
       const snapshot = self.derive([state], () => requireSnapshot(state.value));
-      return { variant: "owner", members: { snapshot } };
+      return { variant: "owner", members: {
+        snapshot,
+        artifacts: async (ctx) => opened.value.artifacts(goal, durable(ctx)),
+        artifactContent: async ({artifactId, offset}, ctx) => opened.value.artifactContent(goal, artifactId, offset, durable(ctx)),
+      } };
     });
     provider.serve(Vault, (_input, principal, self) => {
       ownerOf(principal);

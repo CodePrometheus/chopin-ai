@@ -2,7 +2,7 @@ import { mkdir, realpath } from "node:fs/promises";
 import { isAbsolute, join, resolve, sep } from "node:path";
 import { BACKGROUND_CONTEXT as context } from "@earendil-works/chord/context";
 import type { Models } from "@earendil-works/pi-ai";
-import { AgentService, CommandJobs, CommandPolicySchema, JobIdSchema, launchToken, listen, openEncryptedStore, type GoalOptions, type Listening } from "@chopin-ai/harness-pi";
+import { AgentService, CommandJobs, CommandPolicySchema, JobIdSchema, launchToken, listen, openEncryptedStore, verifyPublishedArtifact, type GoalOptions, type Listening } from "@chopin-ai/harness-pi";
 import { Type, type Static } from "typebox";
 import { Value } from "typebox/value";
 import { ControlConfigurationSchema, ControlHost } from "./control.js";
@@ -89,6 +89,7 @@ export async function openCloudRuntime(configuration: CloudConfiguration, secret
         requireOwner(given);
         return { authorize: (request, ctx) => control!.authorize(request, ctx.abortSignal), review: dependencies.review ?? { model: config.reviewModel },
           settled: async (goal, ctx) => commands.settled((await service!.goals(owner)).store, goal, ctx),
+          artifact: async (goal, artifact, sourceTaskId, ctx) => verifyPublishedArtifact((await service!.goals(owner)).store, goal.goalId, artifact, sourceTaskId, ctx),
           retryAfterMs: config.goalRetryAfterMs, report: dependencies.report,
         };
       },

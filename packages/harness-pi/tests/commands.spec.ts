@@ -1,9 +1,10 @@
-import { spawn, type ChildProcess } from "node:child_process";
-import { randomUUID } from "node:crypto";
+import { execFile, spawn, type ChildProcess } from "node:child_process";
+import { createHash, randomUUID } from "node:crypto";
 import { once } from "node:events";
-import { mkdir, mkdtemp, readFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, writeFile } from "node:fs/promises";
 import { constants, tmpdir } from "node:os";
 import { join } from "node:path";
+import { promisify } from "node:util";
 import { awaitWithContext, BACKGROUND_CONTEXT as context, withAbortSignal } from "@earendil-works/chord/context";
 import { createModels, type TranscriptContext } from "@earendil-works/pi-ai";
 import { fauxAssistantMessage, fauxProvider, fauxToolCall } from "@earendil-works/pi-ai/providers/faux";
@@ -12,10 +13,12 @@ import { openNodeSqliteStorage } from "@earendil-works/pi-durable/storage/sqlite
 import { expect, it } from "vitest";
 import { CommandJobs, type CommandPolicy } from "../src/commands.js";
 import { CommandRefusal, isJobRequest, type CommandBroker, type JobRequest, type JobSnapshot } from "../src/jobs.js";
-import { GoalEngine } from "../src/goals/engine.js";
+import { GoalEngine, type GoalReview } from "../src/goals/engine.js";
+import { ArtifactDoc, artifactContent, artifactList, verifyPublishedArtifact } from "../src/goals/artifact.js";
 import { GoalDoc } from "../src/goals/store.js";
 import { terminal, type EngineCommand, type GoalSnapshot } from "../src/goals/contracts.js";
-import { CALL_TIMEOUT_MS } from "../src/protocol.js";
+import { CALL_TIMEOUT_MS, connect, Goal } from "../src/protocol.js";
+import { listen } from "../src/server.js";
 import { AgentService } from "../src/service.js";
 import { localWorkspace } from "./local-workspace.js";
 import { ModeDoc } from "../src/mode.js";
@@ -118,20 +121,23 @@ class ProcessBroker implements CommandBroker {
 
 const policy: CommandPolicy = { pollAfterMs: 1, outputPageBytes: 1, scanPageSize: 1, output: { maxBytes: 64, maxLines: 4 } };
 
-async function fixture(broker: ProcessBroker, directory?: string, changed = false) {
+async function fixture(broker: ProcessBroker, directory?: string, changed = false, commandPolicy = policy) {
   const root = directory ?? await mkdtemp(join(tmpdir(), "chopin-command-goal-"));
   const storage = await openNodeSqliteStorage(join(root, "store.sqlite"));
   const provider = fauxProvider(); const models = createModels(); models.setProvider(provider.provider); const model = provider.getModel();
   const errors: unknown[] = []; let prepared = 0;
-  const hooks: { prepare?: () => Promise<void>; settled?: () => void } = {};
+  const hooks: { prepare?: () => Promise<void>; settled?: () => void; review?: GoalReview } = {};
   let engine: GoalEngine;
-  const jobs = new CommandJobs({ broker, policy, report: (error) => errors.push(error), prepare: async (api, ctx) => {
+  const jobs = new CommandJobs({ broker, policy: commandPolicy, report: (error) => errors.push(error), prepare: async (api, ctx) => {
     prepared++;
     const goal = await engine.forExecution(api.conversationId, ctx);
     await hooks.prepare?.();
     return { goal, domain: changed ? randomUUID() : broker.scope, policyRevision: changed ? "replacement" : "original", cwd: changed ? "/unavailable-replacement" : root, inheritEnv: false };
   } });
-  engine = new GoalEngine({ authorize: async () => ({ allowed: true }), settled: async (goal, ctx) => { try { await jobs.settled(engine.store, goal, ctx); } finally { hooks.settled?.(); } }, retryAfterMs: policy.pollAfterMs, report: (error) => errors.push(error), review: async (input) => {
+  engine = new GoalEngine({ authorize: async () => ({ allowed: true }), settled: async (goal, ctx) => { try { await jobs.settled(engine.store, goal, ctx); } finally { hooks.settled?.(); } }, retryAfterMs: policy.pollAfterMs, report: (error) => errors.push(error),
+    artifact: (goal, artifact, taskId, ctx) => verifyPublishedArtifact(engine.store, goal.goalId, artifact, taskId, ctx),
+    review: async (input, ctx) => {
+    if (hooks.review !== undefined) return hooks.review(input, ctx);
     const page = await input.entries(16);
     const tool = page.items.find((entry) => entry.kind === ToolResultEntry.kind);
     if (tool === undefined) throw new Error("the original command has no committed result");
@@ -223,6 +229,217 @@ it("reads every original binary output byte through model-visible pages after th
     expect(broker.spawns).toBe(1);
     expect(f.errors).toEqual([]);
   } finally { await f.close(); await broker.close(); }
+});
+
+function artifactCall(id: string, source: string) {
+  return fauxAssistantMessage(fauxToolCall("command", {
+    argv: [process.execPath, "--input-type=module", "--eval", source], artifact: "result.bin",
+  }, { id }), { stopReason: "toolUse" });
+}
+
+it("preserves independent versions of the same filename by publication ID after reopening", async () => {
+  const broker = new ProcessBroker();
+  const artifactPolicy = { ...policy, artifactMaxBytes: 128, outputPageBytes: 11, output: { maxBytes: 1, maxLines: 1 } };
+  const first = Buffer.from([0, 1, 2, 200, 255, 5, 6, 7, 8, 9, 10, 11, 255]);
+  const second = Buffer.from([255, 9, 0, 250, 2, 3]);
+  let f = await fixture(broker, undefined, false, artifactPolicy);
+  f.provider.setResponses([
+    artifactCall("first-artifact", `import { writeFile } from "node:fs/promises"; await writeFile("runs", "run\\n"); await writeFile("result.bin", Buffer.from(${JSON.stringify([...first])}));`),
+    artifactCall("second-artifact", `import { writeFile } from "node:fs/promises"; await writeFile("result.bin", Buffer.from(${JSON.stringify([...second])}));`),
+    fauxAssistantMessage("Files completed"),
+  ]);
+  try {
+    const {goalId} = await f.engine.execute(request(), undefined, context);
+    const completed = await until(f, goalId, (goal) => goal.status === "completed");
+    expect(broker.spawns).toBe(4);
+    f.provider.setResponses([
+      fauxAssistantMessage(fauxToolCall("command", {
+        argv: [process.execPath, "--input-type=module", "--eval", 'import {writeFile} from "node:fs/promises"; await writeFile("runs", "run\\n");'],
+      }), {stopReason: "toolUse"}),
+      fauxAssistantMessage("A separate goal finished"),
+    ]);
+    const other = await f.engine.execute(request(), undefined, context);
+    await until(f, other.goalId, (goal) => goal.status === "completed");
+    expect(await artifactList(f.engine.store, other.goalId, context)).toEqual([]);
+    const recorded = (await f.harness.snapshot(ArtifactDoc, goalId, context))?.published ?? [];
+    expect(recorded).toHaveLength(2);
+    expect(new Set(recorded.map((record) => record.metadata.artifactId)).size).toBe(2);
+    expect(new Set(recorded.map((record) => record.metadata.operationId)).size).toBe(2);
+    expect(recorded.map((record) => record.version.size)).toEqual([String(first.length), String(second.length)]);
+    for (const record of recorded) {
+      const capture = broker.rows.get(record.captureOperationId);
+      const source = broker.rows.get(record.metadata.operationId);
+      expect(capture?.request.source).toEqual(source?.request.source);
+      expect(capture?.request.argv.at(-2)).toBe("result.bin");
+      expect(capture?.snapshot.state.primaryExit).toEqual({kind: "code", value: 0});
+    }
+    expect(await artifactContent(f.engine.store, other.goalId, recorded[0]!.metadata.artifactId, 0, context)).toBeNull();
+    await writeFile(join(f.root, "result.bin"), "new unrelated bytes");
+    const root = f.root;
+    await f.close();
+    f = await fixture(broker, root, false, artifactPolicy);
+    const list = await artifactList(f.engine.store, goalId, context);
+    expect(list.map((item) => item.name)).toEqual(["result.bin", "result.bin"]);
+    expect(list).toEqual(recorded.map((record) => record.metadata));
+    await verifyPublishedArtifact(f.engine.store, goalId, {path: "result.bin", sha256: list[0]!.sha256}, recorded[0]!.sourceTaskId, context);
+    await expect(verifyPublishedArtifact(f.engine.store, completed.goalId, {path: "other.bin", sha256: list[0]!.sha256}, recorded[0]!.sourceTaskId, context)).rejects.toThrow("no matching");
+    for (const [artifact, content] of [[list[0]!, first], [list[1]!, second]] as const) {
+      const chunks: Buffer[] = [];
+      let offset: number | null = 0;
+      while (offset !== null) {
+        const page = await artifactContent(f.engine.store, goalId, artifact.artifactId, offset, context);
+        if (page === null) throw new Error("the stored publication did not provide a page");
+        chunks.push(Buffer.from(page.data, "base64url"));
+        offset = page.nextOffset;
+      }
+      expect(Buffer.concat(chunks)).toEqual(content);
+    }
+    expect(await artifactContent(f.engine.store, goalId, list[0]!.artifactId, 1, context)).toBeNull();
+    await f.close();
+    let ownerAuthorized = true;
+    const service = new AgentService({
+      dataDir: join(root, "readers"),
+      store: (owner) => openNodeSqliteStorage(join(root, owner === "first" ? "store.sqlite" : "foreign.sqlite")),
+      models: () => createModels(),
+      goals: () => ({
+        authorize: async (request) => ({allowed: request.action === "owner" && ownerAuthorized}), settled: async () => {},
+        review: async () => { throw new Error("readers do not run goals"); },
+        retryAfterMs: policy.pollAfterMs, report: () => {},
+      }),
+    });
+    const server = await listen(service, {authenticate: (owner) => ({kind: "owner", owner})});
+    const owner = connect(`ws://127.0.0.1:${server.port}/?token=first`);
+    const foreign = connect(`ws://127.0.0.1:${server.port}/?token=second`);
+    try {
+      const goal = await owner.get(Goal, {goal: goalId});
+      expect(await owner.root((ctx) => goal.artifacts(ctx))).toEqual(list);
+      const page = await owner.root((ctx) => goal.artifactContent({artifactId: list[0]!.artifactId, offset: 0}, ctx));
+      expect(Buffer.from(page!.data, "base64url")).toEqual(first.subarray(0, artifactPolicy.outputPageBytes));
+      const unrelated = await owner.get(Goal, {goal: other.goalId});
+      expect(await owner.root((ctx) => unrelated.artifactContent({artifactId: list[0]!.artifactId, offset: 0}, ctx))).toBeNull();
+      await expect(foreign.get(Goal, {goal: goalId})).rejects.toThrow("unknown_goal");
+      const probe = process.env.CHOPIN_TEST_ARTIFACT_PROBE;
+      if (probe !== undefined) {
+        const execution = await service.goals("first");
+        const originalRead = execution.artifactContent.bind(execution);
+        for (const [mode, maxFileBytes, expectedStatus, expectedPulls] of [
+          ["exact-budget", first.length, 200, 2],
+          ["over-budget", first.length - 1, 413, 0],
+          ["short-content", first.length, 503, 2],
+          ["wrong-digest", first.length, 503, 2],
+        ] as const) {
+          let pulls = 0;
+          execution.artifactContent = async (...args) => {
+            pulls++;
+            const page = await originalRead(...args);
+            if (page === null) return null;
+            const data = Buffer.from(page.data, "base64url");
+            if (mode === "short-content" && page.nextOffset === null) {
+              return {...page, data: data.subarray(0, -1).toString("base64url")};
+            }
+            if (mode === "wrong-digest" && page.offset === 0 && data[0] !== undefined) {
+              data[0] ^= 0xff;
+              return {...page, data: data.toString("base64url")};
+            }
+            return page;
+          };
+          const result = await promisify(execFile)(probe, ["--ignored", "downloads_original_artifact_for_browser_owner"], {
+            env: {...process.env, CHOPIN_TEST_ARTIFACT_FIXTURE: JSON.stringify({
+              endpoint: `ws://127.0.0.1:${server.port}`, goalId, unrelatedGoalId: other.goalId,
+              artifact: list[0], data: first.toString("base64url"), maxFileBytes, expectedStatus,
+            })},
+          });
+          expect(result.stdout).toContain("1 passed");
+          expect(pulls).toBe(expectedPulls);
+          console.log(`${mode}: HTTP ${expectedStatus}, ${pulls} content page reads`);
+        }
+        execution.artifactContent = originalRead;
+      }
+      ownerAuthorized = false;
+      await expect(owner.root((ctx) => goal.artifacts(ctx))).rejects.toThrow("current goal authority");
+      expect(broker.spawns).toBe(5);
+    } finally {
+      await owner.close(); await foreign.close(); await server.close(); await service.close(context);
+    }
+  } finally { await f.close(); await broker.close(); }
+}, CALL_TIMEOUT_MS);
+
+it.each([{source: "producer", accepted: true}, {source: "other", accepted: false}])(
+  "binds completion artifact evidence to the successful tool task: $source",
+  async ({source, accepted}) => {
+    const broker = new ProcessBroker();
+    const f = await fixture(broker, undefined, false, { ...policy, artifactMaxBytes: 128 });
+    const bytes = "original artifact contents";
+    const sha256 = createHash("sha256").update(bytes).digest("hex");
+    const evidence = Promise.withResolvers<{producer: EntryRecord; other: EntryRecord}>();
+    f.hooks.review = async (input) => {
+      const tools = (await input.entries(16)).items.filter((entry) => entry.kind === ToolResultEntry.kind);
+      const publisher = tools.find((entry) => entry.model?.some((message) => message.role === "toolResult" &&
+        !message.isError && message.content.some((part) => part.type === "text" && part.text.includes("producer-output"))));
+      const other = tools.find((entry) => entry.model?.some((message) => message.role === "toolResult" &&
+        !message.isError && message.content.some((part) => part.type === "text" && part.text.includes("other-output"))));
+      if (publisher === undefined || other === undefined) throw new Error("expected two successful committed tools");
+      evidence.resolve({producer: publisher, other});
+      const entry = source === "producer" ? publisher : other;
+      return {kind: "complete", summary: "Selected tool evidence", evidence: [{
+        kind: "tool", criterion: 0, entryId: Number(entry.id), artifact: {path: "result.bin", sha256},
+      }]};
+    };
+    f.provider.setResponses([
+      artifactCall("producer-with-evidence", `import {writeFile} from "node:fs/promises"; await writeFile("result.bin", ${JSON.stringify(bytes)}); console.log("producer-output");`),
+      fauxAssistantMessage(fauxToolCall("command", {
+        argv: [process.execPath, "--eval", 'console.log("other-output")'],
+      }, {id: "other-successful-tool"}), {stopReason: "toolUse"}),
+      fauxAssistantMessage("Both commands ran"),
+    ]);
+    try {
+      const {goalId} = await f.engine.execute(request(), undefined, context);
+      const goal = await until(f, goalId, (value) => value.status === (accepted ? "completed" : "waiting_dependency"));
+      const {producer, other} = await evidence.promise;
+      expect(producer.id).not.toBe(other.id);
+      expect(producer.byTaskId).toBeDefined();
+      expect(other.byTaskId).toBeDefined();
+      expect(producer.byTaskId).not.toBe(other.byTaskId);
+      expect(await readFile(join(f.root, "result.bin"), "utf8")).toBe(bytes);
+      const [publication] = (await f.harness.snapshot(ArtifactDoc, goalId, context))!.published;
+      expect(publication?.sourceTaskId).toBe(Number(producer.byTaskId));
+      expect(publication?.metadata.sha256).toBe(sha256);
+      if (accepted) {
+        expect(goal.result?.evidence[0]?.entryId).toBe(Number(producer.id));
+        expect(await artifactList(f.engine.store, goalId, context)).toEqual([publication?.metadata]);
+      } else {
+        expect(goal.result).toBeUndefined();
+        expect(f.errors.map(String).join("\n")).toContain("successful tool task has no matching published artifact");
+      }
+      expect(broker.spawns).toBe(3);
+    } finally { await f.close(); await broker.close(); }
+  },
+);
+
+it("withholds an oversize file and a symlink after the original command exits", async () => {
+  const broker = new ProcessBroker();
+  const f = await fixture(broker, undefined, false, { ...policy, artifactMaxBytes: 4 });
+  const toolErrors = Promise.withResolvers<EntryRecord[]>();
+  const entries: EntryRecord[] = [];
+  const observer = f.harness.observeCommits({ advance: (commit) => {
+    for (const change of commit.changes) {
+      if (change.type === "entry" && change.value.kind === ToolResultEntry.kind) entries.push(change.value);
+    }
+    if (entries.length >= 2) toolErrors.resolve(entries);
+  }, end: () => {} });
+  f.provider.setResponses([
+    artifactCall("oversize-artifact", `import { writeFile } from "node:fs/promises"; await writeFile("result.bin", "12345");`),
+    artifactCall("linked-artifact", `import { rename, symlink } from "node:fs/promises"; await rename("result.bin", "source.bin"); await symlink("source.bin", "result.bin");`),
+    fauxAssistantMessage("No artifact captured"),
+  ]);
+  try {
+    const {goalId} = await f.engine.execute(request(), undefined, context);
+    const results = await awaitWithContext(toolErrors.promise, withAbortSignal(AbortSignal.timeout(CALL_TIMEOUT_MS), context));
+    expect(results.every((entry) => entry.model?.some((message) => message.role === "toolResult" && message.isError))).toBe(true);
+    expect(broker.spawns).toBe(4);
+    expect((await f.harness.snapshot(ArtifactDoc, goalId, context))?.published ?? []).toEqual([]);
+    expect(await artifactList(f.engine.store, goalId, context)).toEqual([]);
+  } finally { observer.detach(); await f.close(); await broker.close(); }
 });
 
 it("rejects an output read from another goal before contacting the broker", async () => {

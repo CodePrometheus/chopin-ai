@@ -22,8 +22,9 @@ pub use conversation::{
 };
 pub use error::{CommandRejection, ProtocolError, TransportError};
 pub use goals::{
-    EngineCommand, EngineReceipt, EngineWake, GoalArtifact, GoalCommand, GoalContinuation,
-    GoalEvidence, GoalGrant, GoalPage, GoalResult, GoalSnapshot, GoalStatus, GoalWaiting,
+    ArtifactContentPage, EngineCommand, EngineReceipt, EngineWake, GoalArtifact, GoalCommand,
+    GoalContinuation, GoalEvidence, GoalGrant, GoalPage, GoalResult, GoalSnapshot, GoalStatus,
+    GoalWaiting, PublishedArtifact,
 };
 pub use learning::{
     CorrectionKind, HeldChange, LoopChange, LoopSettings, LoopSettingsPatch, LoopStanding,

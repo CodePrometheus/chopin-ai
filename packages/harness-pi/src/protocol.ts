@@ -3,7 +3,7 @@ import { CALL_TIMEOUT_MS, within, type CallOptions, type Client } from "./client
 export { CALL_TIMEOUT_MS, CallTimeout, connect, subscribe, within } from "./client.js";
 export type { CallOptions, Client, ConnectOptions } from "./client.js";
 import { serviceKey, type DataKey } from "./keys.js";
-import { EngineCommandSchema, EngineReceiptSchema, GoalPageSchema, GoalSnapshotSchema } from "./goals/contracts.js";
+import { ArtifactContentPageSchema, EngineCommandSchema, EngineReceiptSchema, GoalPageSchema, GoalSnapshotSchema, PublishedArtifactSchema } from "./goals/contracts.js";
 export * from "./goals/contracts.js";
 
 /**
@@ -23,6 +23,11 @@ const GoalPageArgs = obj({ limit: int({ min: 1, max: Number.MAX_SAFE_INTEGER }),
 const GoalConversationArgs = obj({ conversation: int({ min: 1, max: Number.MAX_SAFE_INTEGER }) });
 const GoalReceiptResult = union([EngineReceiptSchema, nul()]);
 const GoalLookupResult = union([GoalSnapshotSchema, nul()]);
+const GoalArtifactsResult = arr(PublishedArtifactSchema);
+const ArtifactContentArgs = obj({
+  artifactId: str({ min: 1 }), offset: int({ min: 0, max: Number.MAX_SAFE_INTEGER }),
+});
+const ArtifactPageResult = union([ArtifactContentPageSchema, nul()]);
 export const WakeSchema = obj({ active: bool(), at: opt(int({ min: -Number.MAX_SAFE_INTEGER, max: Number.MAX_SAFE_INTEGER })) });
 const GoalsSpec = {
   version: 2, params: {}, hostAddress: () => AgentHost({}), variants: { owner: { state: {}, methods: {
@@ -37,8 +42,11 @@ const GoalsSpec = {
 /** Durable command admission and source-owned goal queries. */
 export const Goals = remote("chopin.goals", GoalsSpec);
 const GoalSpec = {
-  version: 2, params: { goal: str({ min: 1 }) }, hostAddress: () => AgentHost({}),
-  variants: { owner: { state: { snapshot: GoalSnapshotSchema }, methods: {} } },
+  version: 3, params: { goal: str({ min: 1 }) }, hostAddress: () => AgentHost({}),
+  variants: { owner: { state: { snapshot: GoalSnapshotSchema }, methods: {
+    artifacts: method(undefined, GoalArtifactsResult) as Query<undefined, typeof GoalArtifactsResult>,
+    artifactContent: method(ArtifactContentArgs, ArtifactPageResult) as Query<typeof ArtifactContentArgs, typeof ArtifactPageResult>,
+  } } },
 } as const;
 /** One goal's persisted authoritative state, independent of the observing connection. */
 export const Goal = remote("chopin.goal", GoalSpec);

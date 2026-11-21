@@ -22,6 +22,7 @@ export { McpServers } from "./mcp.js";
 export { AgentService, DAEMON_PATH } from "./service.js";
 export type { AgentServiceOptions, Changed } from "./service.js";
 export { GoalEngine } from "./goals/engine.js";
+export { verifyPublishedArtifact } from "./goals/artifact.js";
 export type { GoalOptions, GoalAuthorization, GoalDecision, GoalReview } from "./goals/engine.js";
 export type { GoalReviewOptions } from "./goals/reviewer.js";
 export { JobIdSchema, JobRequestSchema, JobSnapshotSchema, JobOutputSchema, CommandRefusal, isJobRequest } from "./jobs.js";

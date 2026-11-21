@@ -8,12 +8,17 @@ import { Type, type Static } from "typebox";
 import { Value } from "typebox/value";
 import { CommandRefusal, isJobRequest, JobIdSchema, JobOutputSchema, JobRequestSchema, JobSnapshotSchema, type CommandBroker, type JobOutput, type JobRequest, type JobSnapshot } from "./jobs.js";
 import { appendCommandOutput, commandOutput, commandOutputPrefix, emptyCommandOutput, type CommandOutputState } from "./commands-output.js";
-import { terminal, type GoalSnapshot } from "./goals/contracts.js";
+import { terminal, type GoalSnapshot, type PublishedArtifact } from "./goals/contracts.js";
 import { GoalDoc, requireSnapshot } from "./goals/store.js";
+import { ArtifactContentDoc, ArtifactDoc, ArtifactToolSchema, CAPTURE_HEADER_BYTES, MAX_ARTIFACT_PAGE_BYTES, READ_ARTIFACT, artifactDigest, artifactPageKey, artifactPath, capturedArtifact } from "./goals/artifact.js";
 
 const positive = Type.Integer({ minimum: 1, maximum: Number.MAX_SAFE_INTEGER });
 const limit = Type.Integer({ minimum: 0, maximum: Number.MAX_SAFE_INTEGER - 4 });
-export const CommandPolicySchema = Type.Object({ pollAfterMs: positive, outputPageBytes: positive, scanPageSize: positive, output: Type.Object({ maxBytes: limit, maxLines: limit }, { additionalProperties: false }) }, { additionalProperties: false });
+export const CommandPolicySchema = Type.Object({
+  pollAfterMs: positive, outputPageBytes: positive, scanPageSize: positive,
+  output: Type.Object({ maxBytes: limit, maxLines: limit }, { additionalProperties: false }),
+  artifactMaxBytes: Type.Optional(Type.Integer({ minimum: 1, maximum: Number.MAX_SAFE_INTEGER - CAPTURE_HEADER_BYTES })),
+}, { additionalProperties: false });
 export type CommandPolicy = Static<typeof CommandPolicySchema>;
 export const CommandInputSchema = Type.Object({
   argv: JobRequestSchema.properties.argv,
@@ -21,9 +26,10 @@ export const CommandInputSchema = Type.Object({
   env: Type.Optional(JobRequestSchema.properties.env),
   inheritEnv: Type.Optional(Type.Boolean()),
   timeoutMs: Type.Optional(positive),
+  artifact: Type.Optional(Type.String({ minLength: 1 })),
 }, { additionalProperties: false });
 export type CommandInput = Static<typeof CommandInputSchema>;
-export const CommandResultSchema = Type.Object({ operationId: JobIdSchema, output: Type.String(), truncated: Type.Boolean(), exit: JobSnapshotSchema.properties.state.properties.primaryExit, stopRequested: Type.Boolean() }, { additionalProperties: false });
+export const CommandResultSchema = Type.Object({ operationId: JobIdSchema, output: Type.String(), truncated: Type.Boolean(), exit: JobSnapshotSchema.properties.state.properties.primaryExit, stopRequested: Type.Boolean(), artifact: Type.Optional(ArtifactToolSchema) }, { additionalProperties: false });
 export type CommandResult = Static<typeof CommandResultSchema>;
 export const CommandOutputInputSchema = Type.Object({ operationId: JobIdSchema, cursor: Type.Optional(Type.String({ minLength: 1 })), encoding: Type.Optional(Type.Union([Type.Literal("utf8"), Type.Literal("base64url")])) }, { additionalProperties: false });
 export type CommandOutputInput = Static<typeof CommandOutputInputSchema>;
@@ -32,6 +38,7 @@ export type CommandOutputResult = Static<typeof CommandOutputResultSchema>;
 type Intent = { operationId: string; goalConversationId: number; request: JobRequest; policy: CommandPolicy };
 type CallState = { input: CommandInput | null; intent: Intent | null; cursor: string | null; output: CommandOutputState; result: CommandResult | null };
 type PendingState = { intent: Intent | null; taskId: number | null };
+const ARTIFACT_CAPTURE = "artifact-capture";
 
 const CallDoc = defineDocFamily<CallState, null>({
   kind: "chopin.command-call", version: 1, scope: "task", family: true,
@@ -73,14 +80,20 @@ export class CommandJobs {
     this.#policy = structuredClone(options.policy);
     this.tool = defineTool({
       name: "command", replay: "safe",
-      description: "Execute an argument vector in the authorized workspace. Interrupted calls recover the original operation and output. A timeout is in milliseconds; no timeout is added when absent.",
+      description: "Execute an argument vector in the authorized workspace. To deliver one file, declare its workspace-relative path in artifact on the command that creates it. Interrupted calls recover the original operation and output. A timeout is in milliseconds; no timeout is added when absent.",
       parameters: CommandInputSchema,
       structuredOutputSchema: CommandResultSchema,
       outputLimits: { ...this.#policy.output, retain: "tail" },
       execute: async (input, api, context) => {
+        if (input.artifact !== undefined && (!artifactPath(input.artifact) || this.#policy.artifactMaxBytes === undefined)) {
+          throw new Error("artifact publication is unavailable for the declared path");
+        }
         const result = await this.run(api, "command", input, context);
+        if (input.artifact !== undefined && successful(result)) {
+          result.artifact = await this.#publish(api, input.artifact, result, context);
+        }
         return { output: [{ type: "text", text: result.output }], structuredOutput: result,
-          isError: result.stopRequested || result.exit?.kind !== "code" || result.exit.value !== 0,
+          isError: !successful(result),
           diagnostics: [
             { severity: "info", code: "command_result", message: JSON.stringify({ operationId: result.operationId, exit: result.exit, stopRequested: result.stopRequested }) },
             ...(result.truncated ? [{ severity: "info" as const, code: "command_output", message: `Read complete output with command_output for operation ${result.operationId}` }] : []),
@@ -182,8 +195,89 @@ export class CommandJobs {
     await harness.commit((tx) => tx.retireDoc(PendingDoc, conversation, key), context);
   }
 
+  async #publish(api: ToolExecutionApi, path: string, original: CommandResult, context: Context): Promise<PublishedArtifact> {
+    const source = await api.snapshot(CallDoc, api.taskId, "command", context);
+    const intent = source?.intent;
+    if (intent?.request.source.kind !== "tool" || source?.input?.artifact !== path
+      || intent.operationId !== original.operationId || source.result === null || !successful(source.result)) {
+      throw new Error("artifact lacks its original successful command");
+    }
+    const goalId = intent.request.source.goalId;
+    const saved = (await api.snapshot(ArtifactDoc, goalId, context))?.published.find((item) => item.metadata.operationId === original.operationId);
+    if (saved !== undefined) {
+      if (saved.path !== path) throw new Error("the original command already published a different artifact");
+      return saved.metadata;
+    }
+    const binding = await this.#options.prepare(api, context);
+    if (binding.goal.goalId !== goalId || binding.domain !== intent.request.domain
+      || !isDeepStrictEqual(binding.goal.grant, intent.request.grant)) throw new Error("artifact capture authority changed");
+    const maximum = intent.policy.artifactMaxBytes;
+    if (maximum === undefined) throw new Error("the original command has no artifact byte limit");
+    const capture = await this.run(api, ARTIFACT_CAPTURE, {
+      argv: ["python3", "-I", "-S", "-c", READ_ARTIFACT, path, String(maximum)],
+      cwd: binding.cwd, inheritEnv: false,
+      ...(intent.request.timeoutMs == null ? {} : { timeoutMs: intent.request.timeoutMs }),
+    }, context);
+    if (!successful(capture)) throw new Error("the declared artifact could not be captured");
+    const raw = await this.#artifactBytes(capture.operationId, maximum + CAPTURE_HEADER_BYTES, intent.policy.outputPageBytes, context);
+    const {version, bytes} = capturedArtifact(raw, maximum);
+    const artifactId = capture.operationId;
+    const name = path.slice(path.lastIndexOf("/") + 1);
+    const metadata = { artifactId, goalId, operationId: original.operationId, name, sha256: artifactDigest(bytes), sizeBytes: bytes.length };
+    const pageBytes = Math.min(intent.policy.outputPageBytes, MAX_ARTIFACT_PAGE_BYTES);
+    const publication = { metadata, path, captureOperationId: capture.operationId,
+      sourceTaskId: intent.request.source.taskId, version, pageBytes };
+    return api.commit(async (tx) => {
+      const record = await tx.doc(GoalDoc, goalId, null);
+      const current = requireSnapshot(record);
+      if (record.stop || terminal(current.status) || !isDeepStrictEqual(current.grant, intent.request.grant)) {
+        throw new Error("the goal no longer admits artifact publication");
+      }
+      const artifact = await tx.doc(ArtifactDoc, goalId, null);
+      const existing = artifact.published.find((item) => item.metadata.operationId === original.operationId || item.metadata.artifactId === artifactId);
+      if (existing !== undefined) {
+        if (!isDeepStrictEqual(existing, publication)) {
+          throw new Error("the existing goal artifact cannot be replaced");
+        }
+        return existing.metadata;
+      }
+      let offset = 0;
+      do {
+        const page = await tx.doc(ArtifactContentDoc, artifactPageKey(artifactId, offset), null);
+        if (page.data !== null) throw new Error("the artifact page identity has already been used");
+        const end = Math.min(offset + pageBytes, bytes.length);
+        page.data = bytes.subarray(offset, end).toString("base64url");
+        offset = end;
+      } while (offset < bytes.length);
+      artifact.published.push(publication);
+      return metadata;
+    }, context);
+  }
+
+  async #artifactBytes(operation: string, maximum: number, pageBytes: number, context: Context): Promise<Buffer> {
+    let cursor: string | undefined;
+    let size = 0;
+    const chunks: Buffer[] = [];
+    for (;;) {
+      context.abortSignal?.throwIfAborted();
+      const limit = Math.min(pageBytes, maximum - size + 1);
+      const page = await this.#options.broker.output(operation, limit, cursor, context.abortSignal);
+      const bytes = Buffer.from(page.data, "base64url");
+      if (!Value.Check(JobOutputSchema, page) || bytes.toString("base64url") !== page.data || bytes.length > limit
+        || (bytes.length > 0 ? page.stream !== "stdout" || page.cursor === cursor : !page.complete || page.stream !== null)) {
+        throw new Error("artifact capture returned incomplete or invalid output");
+      }
+      size += bytes.length;
+      if (size > maximum) throw new Error("artifact capture exceeds the byte limit");
+      if (bytes.length > 0) chunks.push(bytes);
+      if (page.complete) return Buffer.concat(chunks, size);
+      cursor = page.cursor;
+    }
+  }
+
   async #run(api: ToolExecutionApi, key: string, input: CommandInput, context: Context): Promise<CommandResult> {
     let state = await api.snapshot(CallDoc, api.taskId, key, context);
+    const capture = key === ARTIFACT_CAPTURE;
     if (state === undefined) {
       const binding = await this.#options.prepare(api, context);
       const intent: Intent = {
@@ -195,6 +289,15 @@ export class CommandJobs {
       };
       if (!isJobRequest(intent.request)) throw new Error("the trusted command binding does not satisfy its declared contract");
       await api.commit(async (tx) => {
+        if (capture) {
+          const original = await tx.doc(CallDoc, api.taskId, "command", null);
+          if (original.intent === null || original.result === null || original.input?.artifact === undefined
+            || !successful(original.result) || original.intent.request.domain !== intent.request.domain
+            || !isDeepStrictEqual(original.intent.request.source, intent.request.source)
+            || !isDeepStrictEqual(original.intent.request.grant, intent.request.grant)) {
+            throw new Error("artifact capture does not share the original command authority");
+          }
+        }
         const call = await tx.doc(CallDoc, api.taskId, key, null);
         if (call.intent !== null) {
           if (!isDeepStrictEqual(call.input, input)) throw new Error("the command key already names different arguments");
@@ -215,7 +318,7 @@ export class CommandJobs {
     if (source.kind !== "tool" || source.taskId !== Number(api.taskId) || source.conversationId !== Number(api.conversationId) || source.callId !== api.callId) throw new Error("the original command belongs to another invocation");
     if (state.result !== null) return structuredClone(state.result);
     const intent = state.intent;
-    api.output(state.output.window, commandOutputPrefix(state.output));
+    if (!capture) api.output(state.output.window, commandOutputPrefix(state.output));
     let retained = false;
     while (true) {
       context.abortSignal?.throwIfAborted();
@@ -230,7 +333,7 @@ export class CommandJobs {
           retained = true;
         }
         if (snapshot.operationId !== intent.operationId) throw new Error("the command observation names another operation");
-        pages = state.output.complete || snapshot.state.lastSequence === 0 && !snapshot.state.outputComplete ? [] : await this.#pages(intent, state.cursor, context);
+        pages = capture || state.output.complete || snapshot.state.lastSequence === 0 && !snapshot.state.outputComplete ? [] : await this.#pages(intent, state.cursor, context);
       } catch (error) {
         context.abortSignal?.throwIfAborted();
         if (error instanceof CommandRefusal && error.status >= 400 && error.status < 500) throw error;
@@ -243,7 +346,7 @@ export class CommandJobs {
       let delta = "";
       for (const page of pages) { delta += appendCommandOutput(output, page, intent.policy.output); cursor = page.cursor; }
       const rendered = commandOutput(output, intent.policy.output);
-      const result: CommandResult | null = drained(snapshot) && output.complete ? {
+      const result: CommandResult | null = drained(snapshot) && (capture || output.complete) ? {
         operationId: intent.operationId, output: rendered.text,
         truncated: rendered.truncated,
         exit: structuredClone(snapshot.state.primaryExit), stopRequested: snapshot.state.stopRequested,
@@ -255,7 +358,7 @@ export class CommandJobs {
         call.cursor = cursor; call.output = output; call.result = result;
         if (result !== null) await tx.retireDoc(PendingDoc, intent.goalConversationId as ConversationId, intent.operationId);
       }, context);
-      api.output(delta);
+      if (!capture) api.output(delta);
       if (result !== null) return result;
       state = { ...state, output, cursor, result };
       if (pages.length === 0 || pages.at(-1)?.data === "") await pause(intent.policy.pollAfterMs, context);
@@ -278,6 +381,7 @@ export class CommandJobs {
 }
 
 function drained(snapshot: JobSnapshot): boolean { return snapshot.state.phase === "drained" && snapshot.state.outputComplete; }
+function successful(result: CommandResult): boolean { return !result.stopRequested && result.exit?.kind === "code" && result.exit.value === 0; }
 
 async function pause(milliseconds: number, context: Context): Promise<void> {
   let remaining = milliseconds;

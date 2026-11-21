@@ -8,7 +8,7 @@ license.workspace = true
 repository.workspace = true
 
 [features]
-schema = ["dep:schemars"]
+schema = ["dep:schemars", "schemars/uuid1"]
 
 [dependencies]
 flate2.workspace = true

@@ -40,6 +40,18 @@ export type GoalWaiting = Static<typeof GoalWaitingSchema>;
 /** A verified workspace artifact reference; a path is never a public download URL. */
 export const GoalArtifactSchema = obj({ path: str({ min: 1 }), sha256: str({ pattern: "^[a-f0-9]{64}$" }) });
 export type GoalArtifact = Static<typeof GoalArtifactSchema>;
+export const PublishedArtifactSchema = obj({
+  artifactId: str({ min: 1 }), goalId: str({ min: 1 }), operationId: str({ min: 1 }),
+  name: str({ min: 1 }), sha256: str({ pattern: "^[a-f0-9]{64}$" }),
+  sizeBytes: int({ min: 0, max: Number.MAX_SAFE_INTEGER }),
+});
+export type PublishedArtifact = Static<typeof PublishedArtifactSchema>;
+export const ArtifactContentPageSchema = obj({
+  offset: int({ min: 0, max: Number.MAX_SAFE_INTEGER }),
+  data: str({ pattern: "^[A-Za-z0-9_-]*$" }),
+  nextOffset: union([int({ min: 1, max: Number.MAX_SAFE_INTEGER }), nul()]),
+});
+export type ArtifactContentPage = Static<typeof ArtifactContentPageSchema>;
 const Criterion = int({ min: 0, max: Number.MAX_SAFE_INTEGER });
 export const GoalEvidenceSchema = union([
   obj({ kind: lit("assistant"), criterion: Criterion, entryId: EntryId }),
