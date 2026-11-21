@@ -13,8 +13,9 @@ use base64::{Engine as _, prelude::BASE64_URL_SAFE_NO_PAD};
 use chopin_job_broker::{runtime::*, *};
 use serde::{Deserialize, Serialize};
 use sqlx::{
-    Executor, PgPool, Postgres, Transaction,
+    Executor, SqlitePool,
     postgres::{PgConnectOptions, PgPoolOptions},
+    sqlite::{SqliteConnectOptions, SqliteJournalMode, SqlitePoolOptions, SqliteSynchronous},
 };
 use std::{
     collections::{BTreeMap, HashMap},
@@ -62,7 +63,7 @@ fn settings() -> Settings {
         max_body_bytes: 65536,
     }
 }
-fn client() -> ControlClient {
+fn client_builder() -> reqwest::ClientBuilder {
     let tls = rustls::ClientConfig::builder_with_provider(Arc::new(
         rustls::crypto::ring::default_provider(),
     ))
@@ -70,11 +71,14 @@ fn client() -> ControlClient {
     .unwrap()
     .with_root_certificates(rustls::RootCertStore::empty())
     .with_no_client_auth();
+    reqwest::Client::builder()
+        .no_proxy()
+        .timeout(deadline())
+        .tls_backend_preconfigured(tls)
+}
+fn client() -> ControlClient {
     ControlClient::new(
-        reqwest::Client::builder()
-            .no_proxy()
-            .timeout(deadline())
-            .tls_backend_preconfigured(tls),
+        client_builder(),
         TransportPolicy {
             response_bytes: NonZeroUsize::new(settings().max_body_bytes).unwrap(),
             retry_after_ms: NonZeroU64::new(1).unwrap(),
@@ -88,7 +92,7 @@ struct Authority {
     tokens: Mutex<HashMap<String, WorkerCaller>>,
 }
 #[async_trait::async_trait]
-impl HostAuthority for Authority {
+impl TransactionalHostAuthority for Authority {
     async fn authenticate(&self, credential: &str) -> Result<Caller> {
         if credential != "engine-fixture" {
             return Err(Error::Unauthorized);
@@ -103,11 +107,7 @@ impl HostAuthority for Authority {
             .cloned()
             .ok_or(Error::Unauthorized)
     }
-    async fn authorize_scope(
-        &self,
-        _: &mut Transaction<'_, Postgres>,
-        caller: &Caller,
-    ) -> Result<()> {
+    async fn authorize_scope(&self, _: &mut StoreTransaction<'_>, caller: &Caller) -> Result<()> {
         if caller != &self.caller {
             return Err(Error::Forbidden);
         }
@@ -115,7 +115,7 @@ impl HostAuthority for Authority {
     }
     async fn authorize(
         &self,
-        tx: &mut Transaction<'_, Postgres>,
+        tx: &mut StoreTransaction<'_>,
         caller: &Caller,
         request: &Request,
         action: Action,
@@ -130,7 +130,7 @@ impl HostAuthority for Authority {
     }
     async fn authorize_worker(
         &self,
-        tx: &mut Transaction<'_, Postgres>,
+        tx: &mut StoreTransaction<'_>,
         caller: &WorkerCaller,
         request: &Request,
         action: WorkerAction,
@@ -184,6 +184,7 @@ impl WorkerDirectory for Directory {
     }
 }
 struct Faults {
+    lose_submit: AtomicBool,
     lose_output: AtomicBool,
     pause: Mutex<Option<OwnedFd>>,
     committed: Notify,
@@ -200,12 +201,16 @@ async fn intercept(
     next: Next,
 ) -> Response {
     let (parts, body) = request.into_parts();
+    let is_submit = parts.method == axum::http::Method::PUT;
     let bytes = to_bytes(body, settings().max_body_bytes).await.unwrap();
     let event = serde_json::from_slice::<WorkerEvent>(&bytes).ok();
     let response = next
         .run(HttpRequest::from_parts(parts, Body::from(bytes)))
         .await;
     if response.status().is_success() {
+        if is_submit && faults.lose_submit.swap(false, Ordering::SeqCst) {
+            return lost_reply();
+        }
         if matches!(event, Some(WorkerEvent::Started))
             && faults.hold_started.swap(false, Ordering::SeqCst)
         {
@@ -228,13 +233,17 @@ async fn intercept(
                 rustix::process::pidfd_send_signal(handle, rustix::process::Signal::STOP).unwrap();
             }
             faults.committed.notify_one();
-            return Body::from_stream(futures_util::stream::iter([Err::<Vec<u8>, _>(
-                std::io::Error::from(std::io::ErrorKind::ConnectionReset),
-            )]))
-            .into_response();
+            return lost_reply();
         }
     }
     response
+}
+
+fn lost_reply() -> Response {
+    Body::from_stream(futures_util::stream::iter([Err::<Vec<u8>, _>(
+        std::io::Error::from(std::io::ErrorKind::ConnectionReset),
+    )]))
+    .into_response()
 }
 struct Server {
     stop: Option<oneshot::Sender<()>>,
@@ -375,7 +384,7 @@ async fn service_child() {
 struct Fixture {
     config: ChildConfig,
     caller: Caller,
-    pool: PgPool,
+    store: LedgerStore,
     broker: Arc<Broker>,
     directory: Arc<Directory>,
     authority: Arc<Authority>,
@@ -393,6 +402,9 @@ impl Fixture {
         Self::prepare_network(hosted, NetworkMode::Isolated).await
     }
     async fn prepare_network(hosted: bool, network: NetworkMode) -> Self {
+        Self::prepare_store(hosted, network, false).await
+    }
+    async fn prepare_store(hosted: bool, network: NetworkMode, sqlite: bool) -> Self {
         assert_ne!(rustix::process::geteuid().as_raw(), 0);
         let root = PathBuf::from("/tmp").join(format!("controller-{}", Uuid::new_v4()));
         fs::create_dir(&root).unwrap();
@@ -443,37 +455,39 @@ impl Fixture {
             endpoint: Mutex::new(None),
             domain,
         });
-        let url = std::env::var("CHOPIN_TEST_DATABASE_URL").expect("isolated database required");
-        let schema = format!("controller_{}", Uuid::new_v4().simple());
-        let bootstrap = PgPoolOptions::new().connect(&url).await.unwrap();
-        bootstrap
-            .execute(sqlx::AssertSqlSafe(format!("CREATE SCHEMA {schema}")))
-            .await
-            .unwrap();
-        bootstrap.close().await;
-        let pool = PgPoolOptions::new()
-            .connect_with(
-                PgConnectOptions::from_str(&url)
-                    .unwrap()
-                    .options([("search_path", schema.as_str())]),
-            )
-            .await
-            .unwrap();
-        sqlx::raw_sql(SCHEMA_V1).execute(&pool).await.unwrap();
+        let store = if sqlite {
+            let pool = Self::sqlite_pool(&root, true).await;
+            sqlx::raw_sql(SQLITE_SCHEMA_V1)
+                .execute(&pool)
+                .await
+                .unwrap();
+            LedgerStore::Sqlite(pool)
+        } else {
+            let url =
+                std::env::var("CHOPIN_TEST_DATABASE_URL").expect("isolated database required");
+            let schema = format!("controller_{}", Uuid::new_v4().simple());
+            let bootstrap = PgPoolOptions::new().connect(&url).await.unwrap();
+            bootstrap
+                .execute(sqlx::AssertSqlSafe(format!("CREATE SCHEMA {schema}")))
+                .await
+                .unwrap();
+            bootstrap.close().await;
+            let pool = PgPoolOptions::new()
+                .connect_with(
+                    PgConnectOptions::from_str(&url)
+                        .unwrap()
+                        .options([("search_path", schema.as_str())]),
+                )
+                .await
+                .unwrap();
+            sqlx::raw_sql(SCHEMA_V1).execute(&pool).await.unwrap();
+            LedgerStore::Postgres(pool)
+        };
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let callback = format!("http://{}/", listener.local_addr().unwrap());
-        let broker = Arc::new(
-            Broker::new(
-                pool.clone(),
-                Ledger::new(JobKey::new([63; 32])),
-                authority.clone(),
-                Arc::new(HttpWorkerTransport::new(directory.clone(), client())),
-                settings(),
-                &callback,
-            )
-            .unwrap(),
-        );
+        let broker = Self::broker(&store, &authority, &directory, &callback);
         let faults = Arc::new(Faults {
+            lose_submit: AtomicBool::new(false),
             lose_output: AtomicBool::new(false),
             pause: Mutex::new(None),
             committed: Notify::new(),
@@ -484,15 +498,11 @@ impl Fixture {
             started: Notify::new(),
             release_started: Notify::new(),
         });
-        let router = broker
-            .clone()
-            .router()
-            .layer(middleware::from_fn_with_state(faults.clone(), intercept));
-        let server = Server::start(listener, router);
+        let server = Self::serve_broker(listener, &broker, &faults);
         let mut result = Self {
             config,
             caller,
-            pool,
+            store,
             broker,
             directory,
             authority,
@@ -504,6 +514,63 @@ impl Fixture {
         };
         result.start().await;
         result
+    }
+    async fn sqlite_pool(root: &Path, create: bool) -> SqlitePool {
+        SqlitePoolOptions::new()
+            .connect_with(
+                SqliteConnectOptions::new()
+                    .filename(root.join("coordination.db"))
+                    .create_if_missing(create)
+                    .journal_mode(SqliteJournalMode::Wal)
+                    .synchronous(SqliteSynchronous::Full)
+                    .foreign_keys(true),
+            )
+            .await
+            .unwrap()
+    }
+    fn broker(
+        store: &LedgerStore,
+        authority: &Arc<Authority>,
+        directory: &Arc<Directory>,
+        callback: &str,
+    ) -> Arc<Broker> {
+        Arc::new(
+            Broker::with_ledger(
+                store.clone(),
+                Ledger::new(JobKey::new([63; 32])),
+                authority.clone(),
+                Arc::new(HttpWorkerTransport::new(directory.clone(), client())),
+                settings(),
+                callback,
+            )
+            .unwrap(),
+        )
+    }
+    fn serve_broker(listener: TcpListener, broker: &Arc<Broker>, faults: &Arc<Faults>) -> Server {
+        let router = broker
+            .clone()
+            .router()
+            .layer(middleware::from_fn_with_state(faults.clone(), intercept));
+        Server::start(listener, router)
+    }
+    async fn reopen_sqlite(&mut self) {
+        let LedgerStore::Sqlite(pool) = &self.store else {
+            panic!("SQLite fixture required");
+        };
+        self.server.take().unwrap().close().await;
+        pool.close().await;
+        self.store = LedgerStore::Sqlite(Self::sqlite_pool(&self.config.root, false).await);
+        let url = url::Url::parse(&self.callback).unwrap();
+        let listener = TcpListener::bind((url.host_str().unwrap(), url.port().unwrap()))
+            .await
+            .unwrap();
+        self.broker = Self::broker(
+            &self.store,
+            &self.authority,
+            &self.directory,
+            &self.callback,
+        );
+        self.server = Some(Self::serve_broker(listener, &self.broker, &self.faults));
     }
     async fn start(&mut self) {
         let mut config = self.config.clone();
@@ -749,7 +816,9 @@ impl Fixture {
         .unwrap()
     }
     async fn output(&self, id: Uuid) -> (Vec<u8>, Vec<u8>) {
-        let mut cursor = None;
+        self.output_from(id, None).await
+    }
+    async fn output_from(&self, id: Uuid, mut cursor: Option<String>) -> (Vec<u8>, Vec<u8>) {
         let mut stdout = Vec::new();
         let mut stderr = Vec::new();
         loop {
@@ -781,7 +850,10 @@ impl Fixture {
             self.kill().await;
         }
         self.server.take().unwrap().close().await;
-        self.pool.close().await;
+        match &self.store {
+            LedgerStore::Postgres(pool) => pool.close().await,
+            LedgerStore::Sqlite(pool) => pool.close().await,
+        }
     }
 }
 impl Drop for Fixture {
@@ -902,24 +974,84 @@ async fn revoked_release() {
 #[tokio::test]
 #[ignore = "requires real native isolation and an isolated transactional database"]
 async fn crash_resume() {
-    let mut f = Fixture::new().await;
+    recover_original(Fixture::new().await).await;
+}
+
+#[tokio::test]
+#[ignore = "requires real native isolation"]
+async fn sqlite_crash_resume() {
+    recover_original(Fixture::prepare_store(false, NetworkMode::Isolated, true).await).await;
+}
+
+async fn recover_original(mut f: Fixture) {
     let id = Uuid::new_v4();
     nix::unistd::mkfifo(
         &f.config.root.join("workspace/input"),
         nix::sys::stat::Mode::S_IRUSR | nix::sys::stat::Mode::S_IWUSR,
     )
     .unwrap();
+    f.faults.lose_submit.store(true, Ordering::SeqCst);
     f.faults.lose_output.store(true, Ordering::SeqCst);
     let request=f.request("import os,pathlib,sys; pathlib.Path('/workspace/effect').write_text('once'); sys.stdout.write('before\\n'); sys.stdout.flush(); data=open('/workspace/input','rb').read(); sys.stdout.buffer.write(data); sys.stdout.flush(); sys.stderr.write(os.environ['PROFILE_VALUE'])");
-    f.broker.submit(&f.caller, id, &request).await.unwrap();
+    let receipt = client_builder()
+        .retry(reqwest::retry::never())
+        .build()
+        .unwrap()
+        .put(format!("{}{id}", f.callback))
+        .bearer_auth("engine-fixture")
+        .json(&request)
+        .send()
+        .await;
+    if let Ok(response) = receipt {
+        assert!(
+            response.bytes().await.is_err(),
+            "submit receipt was delivered"
+        );
+    }
+    assert!(!f.faults.lose_submit.load(Ordering::SeqCst));
     timeout(deadline(), f.faults.committed.notified())
         .await
         .unwrap();
     let before = f.broker.get(&f.caller, id).await.unwrap();
     assert_eq!(before.state.last_sequence, 1);
     assert!(!before.state.output_complete);
-    let original = before.state.process.unwrap();
+    let original = before.state.process.clone().unwrap();
+    println!("original process: {original:?}");
+    let first = f
+        .broker
+        .output(&f.caller, id, None, NonZeroUsize::new(3).unwrap())
+        .await
+        .unwrap();
+    assert_eq!(BASE64_URL_SAFE_NO_PAD.decode(&first.data).unwrap(), b"bef");
     f.kill().await;
+    if matches!(f.store, LedgerStore::Sqlite(_)) {
+        f.reopen_sqlite().await;
+    }
+    assert_eq!(
+        f.broker.submit(&f.caller, id, &request).await.unwrap(),
+        before
+    );
+    let mut changed = request.clone();
+    changed.argv.push("different command content".into());
+    assert!(matches!(
+        f.broker.submit(&f.caller, id, &changed).await,
+        Err(Error::Conflict)
+    ));
+    let continued = f
+        .broker
+        .output(
+            &f.caller,
+            id,
+            Some(&first.cursor),
+            NonZeroUsize::new(4096).unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(continued.stream, Some(Stream::Stdout));
+    assert_eq!(
+        BASE64_URL_SAFE_NO_PAD.decode(&continued.data).unwrap(),
+        b"ore\n"
+    );
     assert!(matches!(
         NamespaceProcess::open(&f.config.host, &original).unwrap(),
         ProcessObservation::Alive(_)
@@ -950,6 +1082,10 @@ async fn crash_resume() {
     drop(input);
     let done = f.done(id).await;
     assert_eq!(done.state.process, Some(original));
+    assert_eq!(
+        f.output_from(id, Some(continued.cursor)).await,
+        (b"after restart".to_vec(), b"original".to_vec())
+    );
     assert_eq!(
         f.output(id).await,
         (b"before\nafter restart".to_vec(), b"original".to_vec())

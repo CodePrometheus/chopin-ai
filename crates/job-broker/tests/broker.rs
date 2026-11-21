@@ -12,9 +12,11 @@ use chopin_job_broker::*;
 use sqlx::{
     Executor, PgPool, Postgres, Transaction,
     postgres::{PgConnectOptions, PgPoolOptions},
+    sqlite::{SqliteConnectOptions, SqliteJournalMode, SqlitePoolOptions, SqliteSynchronous},
 };
 use std::{
     collections::{BTreeMap, HashMap},
+    num::NonZeroUsize,
     str::FromStr,
     sync::{
         Arc, Mutex,
@@ -197,75 +199,13 @@ struct Fixture {
 }
 impl Fixture {
     async fn new() -> Self {
-        let url = std::env::var("CHOPIN_TEST_DATABASE_URL")
-            .expect("isolated transactional database required");
-        let schema = format!("broker_{}", Uuid::new_v4().simple());
-        let bootstrap = PgPoolOptions::new().connect(&url).await.unwrap();
-        bootstrap
-            .execute(sqlx::AssertSqlSafe(format!("CREATE SCHEMA {schema}")))
-            .await
-            .unwrap();
-        bootstrap.close().await;
-        let pool = PgPoolOptions::new()
-            .connect_with(
-                PgConnectOptions::from_str(&url)
-                    .unwrap()
-                    .options([("search_path", schema.as_str())]),
-            )
-            .await
-            .unwrap();
-        sqlx::raw_sql(SCHEMA_V1).execute(&pool).await.unwrap();
-        let domain = Uuid::new_v4();
-        let caller = Caller {
-            scope: Uuid::new_v4(),
-            domain,
-            runtime: domain,
-            generation: 1,
-            owner: "fixture".into(),
-        };
+        let pool = postgres_pool().await;
+        let (caller, worker, settings, request) = broker_inputs();
         let authority = Arc::new(Authority {
             caller,
             deny: AtomicBool::new(false),
             tokens: Mutex::new(HashMap::new()),
         });
-        let worker = Arc::new(Worker {
-            id: Uuid::new_v4(),
-            operations: Mutex::new(HashMap::new()),
-            starts: AtomicUsize::new(0),
-            lose_reply: AtomicBool::new(false),
-            fail_observe: AtomicBool::new(false),
-            wrong_identity: Mutex::new(None),
-        });
-        let settings = Settings {
-            version: 1,
-            revision: "fixture".into(),
-            poll_after_ms: 1,
-            recovery_interval_ms: 7,
-            request_timeout_ms: 1000,
-            frame_bytes: 64,
-            output_page_bytes: 64,
-            max_body_bytes: 4096,
-        };
-        let request = Request {
-            version: 1,
-            domain,
-            source: Source::Tool {
-                goal_id: "goal".into(),
-                conversation_id: 1,
-                task_id: 2,
-                call_id: "call".into(),
-            },
-            grant: GrantReference {
-                id: Uuid::new_v4(),
-                version: 1,
-            },
-            argv: vec!["command".into()],
-            cwd: "/workspace".into(),
-            env: BTreeMap::new(),
-            inherit_env: false,
-            timeout_ms: None,
-            policy_revision: "fixture".into(),
-        };
         let broker = Arc::new(
             Broker::new(
                 pool.clone(),
@@ -329,6 +269,384 @@ impl Fixture {
             namespace_inode: 23,
         }
     }
+}
+
+async fn postgres_pool() -> PgPool {
+    let url = std::env::var("CHOPIN_TEST_DATABASE_URL")
+        .expect("isolated transactional database required");
+    let schema = format!("broker_{}", Uuid::new_v4().simple());
+    let bootstrap = PgPoolOptions::new().connect(&url).await.unwrap();
+    bootstrap
+        .execute(sqlx::AssertSqlSafe(format!("CREATE SCHEMA {schema}")))
+        .await
+        .unwrap();
+    bootstrap.close().await;
+    let pool = PgPoolOptions::new()
+        .connect_with(
+            PgConnectOptions::from_str(&url)
+                .unwrap()
+                .options([("search_path", schema.as_str())]),
+        )
+        .await
+        .unwrap();
+    sqlx::raw_sql(SCHEMA_V1).execute(&pool).await.unwrap();
+    pool
+}
+
+fn broker_inputs() -> (Caller, Arc<Worker>, Settings, Request) {
+    let domain = Uuid::new_v4();
+    let caller = Caller {
+        scope: Uuid::new_v4(),
+        domain,
+        runtime: domain,
+        generation: 1,
+        owner: "fixture".into(),
+    };
+    let worker = Arc::new(Worker {
+        id: Uuid::new_v4(),
+        operations: Mutex::new(HashMap::new()),
+        starts: AtomicUsize::new(0),
+        lose_reply: AtomicBool::new(false),
+        fail_observe: AtomicBool::new(false),
+        wrong_identity: Mutex::new(None),
+    });
+    let settings = Settings {
+        version: 1,
+        revision: "fixture".into(),
+        poll_after_ms: 1,
+        recovery_interval_ms: 7,
+        request_timeout_ms: 1000,
+        frame_bytes: 64,
+        output_page_bytes: 64,
+        max_body_bytes: 4096,
+    };
+    let request = Request {
+        version: 1,
+        domain,
+        source: Source::Tool {
+            goal_id: "goal".into(),
+            conversation_id: 1,
+            task_id: 2,
+            call_id: "call".into(),
+        },
+        grant: GrantReference {
+            id: Uuid::new_v4(),
+            version: 1,
+        },
+        argv: vec!["command".into()],
+        cwd: "/workspace".into(),
+        env: BTreeMap::new(),
+        inherit_env: false,
+        timeout_ms: None,
+        policy_revision: "fixture".into(),
+    };
+    (caller, worker, settings, request)
+}
+
+struct DatabaseAuthority {
+    credentials: Authority,
+    ledger: Ledger,
+}
+
+async fn authority_state(tx: &mut StoreTransaction<'_>) -> Result<(i64, bool)> {
+    let query = "SELECT generation, revoked FROM fixture_authority";
+    Ok(match tx {
+        StoreTransaction::Postgres(tx) => sqlx::query_as(query).fetch_one(&mut **tx).await?,
+        StoreTransaction::Sqlite(tx) => sqlx::query_as(query).fetch_one(&mut **tx).await?,
+    })
+}
+
+async fn execute(tx: &mut StoreTransaction<'_>, statement: &'static str) -> Result<()> {
+    match tx {
+        StoreTransaction::Postgres(tx) => sqlx::query(statement)
+            .execute(&mut **tx)
+            .await?
+            .rows_affected(),
+        StoreTransaction::Sqlite(tx) => sqlx::query(statement)
+            .execute(&mut **tx)
+            .await?
+            .rows_affected(),
+    };
+    Ok(())
+}
+
+#[async_trait]
+impl TransactionalHostAuthority for DatabaseAuthority {
+    async fn authenticate(&self, credential: &str) -> Result<Caller> {
+        self.credentials.authenticate(credential).await
+    }
+
+    async fn authenticate_worker(&self, credential: &str) -> Result<WorkerCaller> {
+        self.credentials.authenticate_worker(credential).await
+    }
+
+    async fn authorize_scope(&self, tx: &mut StoreTransaction<'_>, caller: &Caller) -> Result<()> {
+        let (generation, _) = authority_state(tx).await?;
+        if caller.scope != self.credentials.caller.scope
+            || u64::try_from(generation).ok() != Some(caller.generation)
+        {
+            return Err(Error::Forbidden);
+        }
+        Ok(())
+    }
+
+    async fn authorize(
+        &self,
+        tx: &mut StoreTransaction<'_>,
+        caller: &Caller,
+        request: &Request,
+        action: Action,
+    ) -> Result<()> {
+        self.authorize_scope(tx, caller).await?;
+        if action == Action::Submit {
+            let id = JobId {
+                scope: caller.scope,
+                operation: request.grant.id,
+            };
+            let recorded = self.ledger.read_observation(tx, id).await?.unwrap();
+            assert_eq!(recorded.request(), request);
+            execute(tx, "INSERT INTO fixture_admissions VALUES (1)").await?;
+            if authority_state(tx).await?.1 {
+                return Err(Error::Forbidden);
+            }
+        }
+        Ok(())
+    }
+
+    async fn authorize_worker(
+        &self,
+        tx: &mut StoreTransaction<'_>,
+        caller: &WorkerCaller,
+        _: &Request,
+        action: WorkerAction,
+    ) -> Result<()> {
+        if action == WorkerAction::Release {
+            self.authorize_scope(tx, &caller.caller).await?;
+            if authority_state(tx).await?.1 {
+                return Err(Error::Forbidden);
+            }
+        }
+        Ok(())
+    }
+
+    fn worker_credential(&self, caller: &Caller, id: JobId, worker: Uuid) -> Result<Credential> {
+        self.credentials.worker_credential(caller, id, worker)
+    }
+}
+
+#[tokio::test]
+async fn sqlite_shared_admission() {
+    let root = std::env::temp_dir().join(format!("broker-{}", Uuid::new_v4()));
+    std::fs::create_dir(&root).unwrap();
+    let options = SqliteConnectOptions::new()
+        .filename(root.join("coordination.db"))
+        .journal_mode(SqliteJournalMode::Wal)
+        .foreign_keys(true);
+    let pool = SqlitePoolOptions::new()
+        .connect_with(
+            options
+                .clone()
+                .create_if_missing(true)
+                .synchronous(SqliteSynchronous::Full),
+        )
+        .await
+        .unwrap();
+    sqlx::raw_sql(SQLITE_SCHEMA_V1)
+        .execute(&pool)
+        .await
+        .unwrap();
+    shared_admission(LedgerStore::Sqlite(pool.clone())).await;
+    pool.close().await;
+
+    let pool = SqlitePoolOptions::new()
+        .connect_with(options.synchronous(SqliteSynchronous::Normal))
+        .await
+        .unwrap();
+    assert!(matches!(
+        LedgerStore::Sqlite(pool.clone()).begin().await,
+        Err(Error::Durability)
+    ));
+    pool.close().await;
+}
+
+#[tokio::test]
+#[ignore = "requires a real isolated transactional database"]
+async fn postgres_shared_admission() {
+    let pool = postgres_pool().await;
+    shared_admission(LedgerStore::Postgres(pool.clone())).await;
+    pool.close().await;
+}
+
+async fn shared_admission(store: LedgerStore) {
+    let (caller, worker, settings, request) = broker_inputs();
+    let operation = request.grant.id;
+    let id = JobId {
+        scope: caller.scope,
+        operation,
+    };
+    let mut tx = store.begin().await.unwrap();
+    execute(
+        &mut tx,
+        "CREATE TABLE fixture_authority (generation BIGINT, revoked BOOLEAN)",
+    )
+    .await
+    .unwrap();
+    execute(&mut tx, "INSERT INTO fixture_authority VALUES (1, TRUE)")
+        .await
+        .unwrap();
+    execute(
+        &mut tx,
+        "CREATE TABLE fixture_admissions (write_marker INTEGER)",
+    )
+    .await
+    .unwrap();
+    tx.commit().await.unwrap();
+
+    let ledger = Ledger::new(JobKey::new([31; 32]));
+    let authority = Arc::new(DatabaseAuthority {
+        credentials: Authority {
+            caller: caller.clone(),
+            deny: AtomicBool::new(false),
+            tokens: Mutex::new(HashMap::new()),
+        },
+        ledger: ledger.clone(),
+    });
+    let broker = Broker::with_ledger(
+        store.clone(),
+        ledger.clone(),
+        authority,
+        worker.clone(),
+        settings,
+        "http://broker.invalid/jobs/",
+    )
+    .unwrap();
+    assert!(matches!(
+        broker.submit(&caller, operation, &request).await,
+        Err(Error::Forbidden)
+    ));
+    assert!(matches!(
+        broker.get(&caller, operation).await,
+        Err(Error::NotFound)
+    ));
+    assert_eq!(worker.starts.load(Ordering::SeqCst), 0);
+    let mut tx = store.begin().await.unwrap();
+    let query = "SELECT COUNT(*) FROM fixture_admissions";
+    let host_writes: i64 = match &mut tx {
+        StoreTransaction::Postgres(tx) => sqlx::query_scalar(query)
+            .fetch_one(&mut **tx)
+            .await
+            .unwrap(),
+        StoreTransaction::Sqlite(tx) => sqlx::query_scalar(query)
+            .fetch_one(&mut **tx)
+            .await
+            .unwrap(),
+    };
+    assert_eq!(host_writes, 0);
+    execute(&mut tx, "UPDATE fixture_authority SET revoked=FALSE")
+        .await
+        .unwrap();
+    tx.commit().await.unwrap();
+
+    worker.lose_reply.store(true, Ordering::SeqCst);
+    assert!(matches!(
+        broker.submit(&caller, operation, &request).await,
+        Err(Error::Unavailable { .. })
+    ));
+    let original = broker.get(&caller, operation).await.unwrap();
+    assert_eq!(
+        broker.submit(&caller, operation, &request).await.unwrap(),
+        original
+    );
+    let mut changed = request.clone();
+    changed.argv.push("changed".into());
+    assert!(matches!(
+        broker.submit(&caller, operation, &changed).await,
+        Err(Error::Conflict)
+    ));
+    assert_eq!(worker.starts.load(Ordering::SeqCst), 1);
+
+    let callback = WorkerCaller {
+        caller: caller.clone(),
+        operation,
+        worker: worker.id,
+    };
+    let process = ProcessIdentity {
+        domain: caller.domain,
+        boot: Uuid::new_v4(),
+        init_pid: 42,
+        start_ticks: 11,
+        namespace_inode: 23,
+    };
+    let attached = broker
+        .worker_event(&callback, WorkerEvent::Attached { process })
+        .await
+        .unwrap();
+    let mut tx = store.begin().await.unwrap();
+    execute(&mut tx, "UPDATE fixture_authority SET revoked=TRUE")
+        .await
+        .unwrap();
+    tx.commit().await.unwrap();
+    assert!(matches!(
+        broker.worker_event(&callback, WorkerEvent::Release).await,
+        Err(Error::Forbidden)
+    ));
+    assert_eq!(
+        broker.submit(&caller, operation, &request).await.unwrap(),
+        attached
+    );
+
+    let mut tx = store.begin().await.unwrap();
+    execute(
+        &mut tx,
+        "UPDATE fixture_authority SET generation=2, revoked=FALSE",
+    )
+    .await
+    .unwrap();
+    tx.commit().await.unwrap();
+    assert!(matches!(
+        broker.worker_event(&callback, WorkerEvent::Release).await,
+        Err(Error::Forbidden)
+    ));
+    let mut next = request.clone();
+    next.grant.id = Uuid::new_v4();
+    assert!(matches!(
+        broker.submit(&caller, next.grant.id, &next).await,
+        Err(Error::Forbidden)
+    ));
+    let current = Caller {
+        generation: 2,
+        ..caller
+    };
+    assert!(matches!(
+        broker.get(&current, next.grant.id).await,
+        Err(Error::NotFound)
+    ));
+    assert_eq!(broker.get(&current, operation).await.unwrap(), attached);
+    let mut tx = store.begin().await.unwrap();
+    assert_eq!(
+        ledger.read(&mut tx, id).await.unwrap().unwrap().snapshot(),
+        attached
+    );
+    tx.commit().await.unwrap();
+
+    broker.submit(&current, next.grant.id, &next).await.unwrap();
+    assert!(broker.has_pending(&current).await.unwrap());
+    let mut ids = [operation, next.grant.id];
+    ids.sort_unstable();
+    let mut tx = store.begin().await.unwrap();
+    let limit = NonZeroUsize::new(1).unwrap();
+    let first = ledger
+        .pending(&mut tx, current.scope, limit, None)
+        .await
+        .unwrap();
+    let last = ledger
+        .pending(&mut tx, current.scope, limit, first.cursor.as_deref())
+        .await
+        .unwrap();
+    assert_eq!(first.operations, [ids[0]]);
+    assert_eq!(last.operations, [ids[1]]);
+    assert!(last.cursor.is_none());
+    tx.commit().await.unwrap();
 }
 
 #[tokio::test]
