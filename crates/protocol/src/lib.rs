@@ -10,6 +10,7 @@ mod error;
 mod goals;
 mod learning;
 mod legacy_vault;
+mod model_settings;
 mod observation;
 #[cfg(feature = "schema")]
 mod schema;
@@ -32,6 +33,10 @@ pub use learning::{
 pub use legacy_vault::{
     KEY_VERIFICATION_PURPOSE, KeyVerificationBindings, KeyVerificationCapability,
     KeyVerificationRequest, KeyVerificationResponse, SealedKeyVerification,
+};
+pub use model_settings::{
+    ModelCredentialInfo, ModelCredentialKind, ModelLoginWay, ModelSettingsProvider,
+    ModelSettingsSnapshot,
 };
 pub use observation::{StateObserver, StateUpdate};
 pub use tokio_tungstenite::Connector as TlsConnector;

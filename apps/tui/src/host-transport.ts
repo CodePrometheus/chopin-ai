@@ -43,8 +43,13 @@ export class HostTransport {
     this.#base = base;
     this.#credential = credential;
     this.#timeout = configuration.requestTimeoutMs;
-    this.#agent = new Agent({ ...(configuration.maxResponseBytes !== undefined && { maxResponseSize: configuration.maxResponseBytes }), ...(ca !== undefined && { connect: { ca } }) });
+    this.#agent = new Agent({
+      ...(configuration.maxResponseBytes !== undefined && { maxResponseSize: configuration.maxResponseBytes }),
+      connect: { rejectUnauthorized: true, ...(ca !== undefined && { ca }) },
+    });
   }
+
+  get secure(): boolean { return this.#base.protocol === "https:"; }
 
   async request(method: "GET" | "POST" | "PUT" | "DELETE", path: string, body?: object, signal?: AbortSignal): Promise<Response> {
     if (this.#closed) throw new Error("the trusted host transport is closed");

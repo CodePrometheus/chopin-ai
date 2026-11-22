@@ -1,4 +1,4 @@
-import { arr, bool, hostKind, int, lit, map, method, nul, num, obj, opt, remote, str, union, unknown, type Ctx, type RefState, type NullSchema, type NumberSchema, type Reference, type Schema, type Static } from "@earendil-works/chord";
+import { arr, bool, evolve, hostKind, int, lit, map, method, nul, num, obj, opt, remote, str, union, unknown, type Ctx, type RefState, type NullSchema, type NumberSchema, type Reference, type Schema, type Static } from "@earendil-works/chord";
 import { CALL_TIMEOUT_MS, within, type CallOptions, type Client } from "./client.js";
 export { CALL_TIMEOUT_MS, CallTimeout, connect, subscribe, within } from "./client.js";
 export type { CallOptions, Client, ConnectOptions } from "./client.js";
@@ -286,6 +286,16 @@ export const ProviderEntrySchema = obj({ id: str(), name: str(), ways: arr(Login
 export type ProviderEntry = Static<typeof ProviderEntrySchema>;
 const ProviderList = arr(ProviderEntrySchema);
 
+/** A point-in-time view of this owner's model connections and usable configured models. */
+export const ModelSettingsSchema = obj({
+  providers: ProviderList,
+  credentials: CredentialList,
+  models: arr(ModelChoiceSchema),
+  execution: union([ModelArgs, nul()]),
+  review: union([ModelArgs, nul()]),
+});
+export type ModelSettings = Static<typeof ModelSettingsSchema>;
+
 /** News from a login as the provider gives it: a page to open, a code to enter on any device, a note, or progress. */
 export const LoginEventSchema = union([
   obj({ type: lit("auth_url"), url: str(), instructions: opt(str()) }),
@@ -323,7 +333,7 @@ const LoginIdArgs = obj({ login: num() });
  * login, which the service runs and every client of the owner follows. Secrets only ever travel to the service, which
  * keeps each where it keeps that owner's credentials.
  */
-const CredentialsSpec = {
+const CredentialsV2Spec = {
   version: 2,
   params: {},
   hostAddress: () => AgentHost({}),
@@ -345,7 +355,22 @@ const CredentialsSpec = {
     },
   },
 } as const;
-export const Credentials = remote("chopin.credentials", CredentialsSpec);
+const snapshotMethod = method(undefined, ModelSettingsSchema) as Query<undefined, typeof ModelSettingsSchema>;
+const PersonalCredentialChangeArgs = obj({ operationId: str({ pattern: "^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$" }) });
+const applyPersonalCredentialChange = method(PersonalCredentialChangeArgs) as Call<typeof PersonalCredentialChangeArgs>;
+export const Credentials = evolve(remote("chopin.credentials", CredentialsV2Spec),
+  (edit) => edit.addMethod("owner", "snapshot", snapshotMethod.args, snapshotMethod.result)
+    .addMethod("owner", "applyPersonalCredentialChange", applyPersonalCredentialChange.args, applyPersonalCredentialChange.result));
+const CredentialsSpec = {
+  ...CredentialsV2Spec,
+  version: Credentials.version,
+  variants: {
+    owner: {
+      ...CredentialsV2Spec.variants.owner,
+      methods: { ...CredentialsV2Spec.variants.owner.methods, snapshot: snapshotMethod, applyPersonalCredentialChange },
+    },
+  },
+} as const;
 
 /** An MCP server a client set, and how many tools it offers, or why it offers none yet; never its headers. */
 export const McpServerSchema = obj({ name: str(), url: str(), tools: num(), error: opt(str()) });

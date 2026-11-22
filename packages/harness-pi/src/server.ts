@@ -156,7 +156,7 @@ export async function createAgentHost(source: AgentService | Sealed, loop?: Loop
 
           summaries: (ctx) => service.summaries(owner, durable(ctx)),
 
-          models: () => service.modelChoices(owner),
+          models: (ctx) => service.modelChoices(owner, durable(ctx)),
 
           fork: async ({ conversation, at }, ctx) => {
             if (!await service.directConversation(owner, conversation)) throw refusal("goal_command_required", "submit an explicit goal continuation");
@@ -484,7 +484,10 @@ export async function createAgentHost(source: AgentService | Sealed, loop?: Loop
       const owner = ownerOf(principal);
       const service = current();
       const listed = async () => (await service.credentials(owner)).map(({ providerId, type }) => ({ provider: providerId, type }));
-      const providers = projection(self, listed);
+      const providers = projection(self, async (ctx) => {
+        await service.authorizeModelSettings(owner, ctx);
+        return listed();
+      });
       const settled = async (problem: string | undefined, ctx: Ctx<Principal>) => {
         if (problem !== undefined) throw refusal("credential_refused", problem);
         providers.replace(ctx, await listed());
@@ -500,10 +503,19 @@ export async function createAgentHost(source: AgentService | Sealed, loop?: Loop
           providers: providers.view,
 
           login: login.view,
-          setKey: async ({ provider, key }, ctx) => { await (settled(await service.setKey(owner, provider, key), ctx)); return null; },
-          remove: async ({ provider }, ctx) => { await (settled(await service.removeKey(owner, provider), ctx)); return null; },
+          setKey: async ({ provider, key }, ctx) => { await settled(await service.setKey(owner, provider, key), ctx); return null; },
+          remove: async ({ provider }, ctx) => { await settled(await service.removeKey(owner, provider), ctx); return null; },
 
-          catalog: async () => service.catalog(owner),
+          catalog: async (ctx) => {
+            await service.authorizeModelSettings(owner, durable(ctx));
+            return service.catalog(owner);
+          },
+          snapshot: (ctx) => service.modelSettings(owner, durable(ctx)),
+          applyPersonalCredentialChange: async ({ operationId }, ctx) => {
+            await service.applyPersonalCredentialChange(owner, operationId, durable(ctx));
+            providers.replace(ctx, await listed());
+            return null;
+          },
 
           startLogin: async ({ provider, type }, ctx) => {
             const problem = service.loginRefusal(owner, provider, type);
@@ -580,7 +592,7 @@ export async function createAgentHost(source: AgentService | Sealed, loop?: Loop
           }
         }
       };
-    });
+    }, { accepts: { 2: {} }, untraced: true });
 
     provider.serve(Loop, (_input, principal) => {
       ownerOf(principal);

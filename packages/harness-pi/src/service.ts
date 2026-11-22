@@ -1,10 +1,11 @@
 import { createHash } from "node:crypto";
 import { chmod, mkdir, rename, writeFile } from "node:fs/promises";
+import { validateHeaderValue } from "node:http";
 import { join } from "node:path";
 import type { Context } from "@earendil-works/chord/context";
 import type { ExecutionError, Result, ShellExecOptions, ShellExecResult } from "@earendil-works/pi-durable/env";
 import { BACKGROUND_CONTEXT } from "@earendil-works/chord/context";
-import { getSupportedThinkingLevels, type AssistantMessage, type AuthInteraction, type AuthType, type CredentialInfo, type CredentialStore, type Models } from "@earendil-works/pi-ai";
+import { getSupportedThinkingLevels, type Api, type AssistantMessage, type AuthInteraction, type AuthType, type CredentialInfo, type CredentialStore, type Model, type Models } from "@earendil-works/pi-ai";
 import {
   CompactionEntry,
   createRegistry,
@@ -37,7 +38,7 @@ import { layerExtension, pinLayerVersions, type LayerSource } from "./layer.js";
 import { mcpExtensionName, McpServers } from "./mcp.js";
 import { drain } from "./pages.js";
 import { ListingDoc, modeExtension, NameDoc, withMode } from "./mode.js";
-import { unansweredText, type Loaded, type McpServerState, type ModelChoices, type ProviderEntry, type Summary } from "./protocol.js";
+import { unansweredText, type Loaded, type McpServerState, type ModelChoices, type ModelSettings, type ProviderEntry, type Summary } from "./protocol.js";
 import { clientContext } from "./client-context.js";
 import { contextFiles, projectContext } from "./project-context.js";
 import { runShell, ShellEntry, type ShellRun } from "./shell.js";
@@ -56,6 +57,8 @@ const EMPTY_LAYER: Layer = { instructions: undefined, skills: [], mcpServers: {}
 const MCP_RETRY_MS = 30_000;
 
 const FIXED_CREDENTIALS = "this service takes its credentials from where it runs, not from its clients";
+const CLAIM_REQUIRED = "the hosted service only accepts personal model credential changes from its trusted host";
+type PersonalCredentialChange = { kind: "set"; provider: string; key: string } | { kind: "remove"; provider: string };
 
 /** Where the workspace image keeps the execution daemon. */
 export const DAEMON_PATH = "/usr/local/bin/pi-env";
@@ -75,6 +78,13 @@ export interface AgentServiceOptions {
   models: (owner: string) => Models;
   /** Where an owner's models read their credentials, which clients may then set; absent, they cannot. */
   credentials?: (owner: string) => CredentialStore;
+  /** Hosted API key settings for a fixed execution and review model, gated by current owner authority. */
+  personalModelSettings?: (owner: string) => {
+    execution: ModelRef;
+    review: ModelRef;
+    authorize(context: Context): Promise<boolean>;
+    claim(operationId: string, context: Context): Promise<PersonalCredentialChange | null>;
+  };
   /** What a new conversation of an owner runs with, such as its model; asked again for each, so a default may change. */
   agent?: AgentChange | ((owner: string) => Promise<AgentChange | undefined>);
   /** The portable layer every agent loads. */
@@ -158,6 +168,7 @@ export class AgentService {
   readonly #variables = new Map<string, Map<string, string>>();
   /** Keeping the servers clients set, one write at a time, so none overtakes a later one. */
   #keeping: Promise<unknown> = Promise.resolve();
+  #credentialChanges: Promise<void> = Promise.resolve();
   /** When this service started, which is as recent as anything it knows of an owner it has not seen. */
   readonly #started = Date.now();
   readonly #lastActive = new Map<string, number>();
@@ -344,18 +355,15 @@ export class AgentService {
   }
 
   /** The models the owner's agent can use now, those whose providers have credentials, and its model for a new conversation. */
-  async modelChoices(owner: string): Promise<ModelChoices> {
+  async modelChoices(owner: string, context: Context = BACKGROUND_CONTEXT): Promise<ModelChoices> {
+    if (this.#options.personalModelSettings !== undefined) {
+      const { models, execution } = await this.modelSettings(owner, context);
+      return { models, current: execution };
+    }
     const available = await this.#options.models(owner).getAvailable();
     const model = (await this.#agent(owner))?.model;
     return {
-      models: available.map((each) => ({
-        provider: each.provider,
-        modelId: each.id,
-        name: each.name,
-        contextWindow: each.contextWindow,
-        images: each.input.includes("image"),
-        thinkingLevels: [...getSupportedThinkingLevels(each)],
-      })),
+      models: available.map(modelChoice),
       current: model == null ? null : { provider: model.provider, modelId: model.modelId },
     };
   }
@@ -442,11 +450,32 @@ export class AgentService {
     return [...((await this.#options.credentials?.(owner).list()) ?? [])];
   }
 
+  async authorizeModelSettings(owner: string, context: Context): Promise<void> {
+    const settings = this.#options.personalModelSettings?.(owner);
+    if (settings !== undefined && !await settings.authorize(context)) throw refusal("forbidden", "current owner authority is required");
+  }
+
+  /** Read the credential metadata once and derive both uses from the same view of the static hosted catalog. */
+  async modelSettings(owner: string, context: Context = BACKGROUND_CONTEXT): Promise<ModelSettings> {
+    const settings = this.#options.personalModelSettings?.(owner);
+    if (settings === undefined) throw refusal("credential_refused", FIXED_CREDENTIALS);
+    await this.authorizeModelSettings(owner, context);
+    const providers = this.catalog(owner);
+    const admitted = new Set(providers.map(({ id }) => id));
+    const credentials = (await this.credentials(owner)).flatMap(({ providerId, type }) =>
+      admitted.has(providerId) ? [{ provider: providerId, type }] : []);
+    const connected = new Set(credentials.map(({ provider }) => provider));
+    const models = this.#options.models(owner).getModels().filter(({ provider }) => connected.has(provider)).map(modelChoice);
+    const usable = ({ provider, modelId }: ModelRef) => models.some((model) => model.provider === provider && model.modelId === modelId) ? { provider, modelId } : null;
+    return { providers, credentials, models, execution: usable(settings.execution), review: usable(settings.review) };
+  }
+
   /**
    * Keeps `key` as the owner's credential for `provider`, so the next request reaches it with the key; else why it
    * cannot: credentials here are not the clients' to set, or no such provider takes an API key.
    */
   async setKey(owner: string, provider: string, key: string): Promise<string | undefined> {
+    if (this.#options.personalModelSettings !== undefined) return CLAIM_REQUIRED;
     const store = this.#options.credentials?.(owner);
     if (store === undefined) return FIXED_CREDENTIALS;
     if (this.#options.models(owner).getProvider(provider)?.auth.apiKey === undefined) return `there is no provider ${provider} that takes an API key`;
@@ -456,20 +485,54 @@ export class AgentService {
 
   /** Forgets the owner's credential for `provider`; else why it cannot, as for `setKey`. */
   async removeKey(owner: string, provider: string): Promise<string | undefined> {
+    if (this.#options.personalModelSettings !== undefined) return CLAIM_REQUIRED;
     const store = this.#options.credentials?.(owner);
     if (store === undefined) return FIXED_CREDENTIALS;
     await store.delete(provider);
     return undefined;
   }
 
+  /** Serialize accepted owner requests before claiming and through acknowledgement by the protected store. */
+  async applyPersonalCredentialChange(owner: string, operationId: string, context: Context): Promise<void> {
+    const settings = this.#options.personalModelSettings?.(owner);
+    const store = this.#options.credentials?.(owner);
+    if (settings === undefined || store === undefined) throw refusal("credential_refused", FIXED_CREDENTIALS);
+    const applied = this.#credentialChanges.then(async () => {
+      if (this.#closed) throw new Error("the agent service is closed");
+      context.abortSignal?.throwIfAborted();
+      await this.authorizeModelSettings(owner, context);
+      const change = await settings.claim(operationId, context).catch(() => {
+        throw refusal("credential_outcome_unknown", "the personal model credential claim outcome could not be observed");
+      });
+      if (change === null) throw refusal("credential_refused", "the host has not admitted this credential change");
+      if (this.#options.models(owner).getProvider(change.provider)?.auth.apiKey === undefined) {
+        throw refusal("credential_refused", "this provider does not admit a personal API key");
+      }
+      if (change.kind === "set") {
+        if (change.key.trim() === "") throw refusal("credential_refused", "a personal API key is required");
+        try { validateHeaderValue("authorization", change.key); }
+        catch { throw refusal("credential_refused", "the API key cannot be sent in an HTTP header"); }
+      }
+      try {
+        if (change.kind === "remove") await store.delete(change.provider);
+        else await store.modify(change.provider, async () => ({ type: "api_key", key: change.key }));
+      } catch {
+        throw refusal("credential_outcome_unknown", "protected model credentials are unavailable");
+      }
+    });
+    this.#credentialChanges = applied.catch(() => {});
+    await applied;
+  }
+
   /** Every provider the owner's models know that a client can sign in to, each way in, and where its models are reached. */
   catalog(owner: string): ProviderEntry[] {
     const models = this.#options.models(owner);
+    const personal = this.#options.personalModelSettings !== undefined;
     return models.getProviders().flatMap((provider) => {
       const { oauth, apiKey } = provider.auth;
       const ways = [
         ...(oauth === undefined ? [] : [{ type: "oauth" as const, name: oauth.loginLabel ?? oauth.name, subscription: oauth.isSubscription === true }]),
-        ...(apiKey?.login === undefined ? [] : [{ type: "api_key" as const, name: apiKey.name, subscription: false }]),
+        ...(apiKey === undefined || !personal && apiKey.login === undefined ? [] : [{ type: "api_key" as const, name: apiKey.name, subscription: false }]),
       ];
       if (ways.length === 0) return [];
       const urls = [provider.baseUrl, ...models.getModels(provider.id).map((model) => model.baseUrl)];
@@ -480,6 +543,7 @@ export class AgentService {
 
   /** Why the owner cannot sign in to `provider` the `type` way here, or undefined when they can. */
   loginRefusal(owner: string, provider: string, type: AuthType): string | undefined {
+    if (this.#options.personalModelSettings !== undefined) return CLAIM_REQUIRED;
     if (this.#options.credentials?.(owner) === undefined) return FIXED_CREDENTIALS;
     const auth = this.#options.models(owner).getProvider(provider)?.auth;
     const takes = type === "oauth" ? auth?.oauth !== undefined : auth?.apiKey?.login !== undefined;
@@ -640,6 +704,7 @@ export class AgentService {
     this.#agents.clear();
     // An open that failed has already released what it held; agents a sweep is closing are waited for too.
     await Promise.all([
+      this.#credentialChanges,
       ...opened.map(async (pending) => (await pending.catch(() => undefined))?.close(context)),
       ...[...this.#closing.values()].map((closing) => closing.catch(() => {})),
     ]);
@@ -944,6 +1009,17 @@ class OwnerEnv extends RemoteExecutionEnv {
 }
 
 /** The host `url` names, or none for no URL or one that does not parse. */
+function modelChoice(model: Model<Api>): ModelChoices["models"][number] {
+  return {
+    provider: model.provider,
+    modelId: model.id,
+    name: model.name,
+    contextWindow: model.contextWindow,
+    images: model.input.includes("image"),
+    thinkingLevels: [...getSupportedThinkingLevels(model)],
+  };
+}
+
 function hostOf(url: string | undefined): string[] {
   if (url === undefined || !URL.canParse(url)) return [];
   return [new URL(url).hostname];

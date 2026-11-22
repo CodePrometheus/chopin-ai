@@ -22,6 +22,11 @@ const lease = object({ operationId: Type.String({ minLength: 1 }), serviceKey: T
 const runtimeKey = object({ revision: integer(1), serviceKey: Type.String({ minLength: 1 }) });
 const receipt = object({ operationId: Type.String({ minLength: 1 }), revision: integer(1), action: Type.Literal("enrolled"), createdAt: Type.String({ minLength: 1 }) });
 const wakeState = object({ active: Type.Boolean(), at: Type.Optional(integer(-Number.MAX_SAFE_INTEGER)) });
+const provider = Type.String({ minLength: 1 });
+const personalChange = Type.Union([
+  object({ kind: Type.Literal("set"), provider, key: Type.String({ minLength: 1 }) }),
+  object({ kind: Type.Literal("remove"), provider }),
+]);
 
 /** A fixed trusted binding and private transport, independent of model or plugin proxies. */
 export class ControlHost {
@@ -53,6 +58,17 @@ export class ControlHost {
   authorize(request: GoalAuthorization, signal?: AbortSignal): Promise<{ allowed: boolean; reason?: string }> {
     const { action, grant, tool } = request;
     return this.#required("authority", { action, ...(grant !== undefined && { grant }), ...(tool !== undefined && { tool }) }, decision, signal);
+  }
+
+  /** Take the change for this operation once from the authenticated host, only over verified HTTPS. */
+  async claimPersonalCredentialChange(operationId: string, signal?: AbortSignal): Promise<Static<typeof personalChange> | null> {
+    if (!this.#transport.secure) throw new Error("personal model credential claims require a trusted HTTPS endpoint");
+    try {
+      return await this.#required("personal-model/claim", { operationId }, personalChange, signal);
+    } catch (error) {
+      if (error instanceof HostRefusal && [400, 401, 403, 404, 409].includes(error.status)) return null;
+      throw new Error("the personal model credential claim outcome could not be observed");
+    }
   }
 
   /** Releases only the current admitted execution writer's key over the private host transport. */

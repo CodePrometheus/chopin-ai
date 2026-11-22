@@ -83,9 +83,9 @@ export async function credentialsFrom(text: string): Promise<CredentialStore> {
  * the providers `models.json` in the chopin home adds; catalogs are kept beside it, read as kept at the start and
  * fetched anew on request. A `models.json` that cannot be read in full is told to `told` by its name alone.
  */
-export async function chopinModels(credentials: CredentialStore = chopinCredentials(), told?: (notice: string) => void): Promise<ModelRuntime> {
+export async function chopinModels(credentials: CredentialStore = chopinCredentials(), told?: (notice: string) => void, refreshOnCreate = true): Promise<ModelRuntime> {
   const file = join(chopinHome(), "models.json");
-  const runtime = await ModelRuntime.create({ credentials, modelsPath: file });
+  const runtime = await ModelRuntime.create({ credentials, modelsPath: file, refreshOnCreate });
   // Fresh, the runtime has fetched nothing, so what went wrong lies in what that file adds; the runtime's own account
   // of it may quote the file.
   if (runtime.getError() !== undefined) told?.(`${file} could not be read in full; models it adds may be missing`);

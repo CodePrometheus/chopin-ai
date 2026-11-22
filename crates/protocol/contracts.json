@@ -833,8 +833,8 @@
       ]
     },
     "chopin.credentials": {
-      "version": 2,
-      "fingerprint": "e069db4271972dd5",
+      "version": 3,
+      "fingerprint": "48e109a17d648cf2",
       "address": {
         "kind": "chopin",
         "params": {}
@@ -849,10 +849,12 @@
           ],
           "methods": [
             "answer",
+            "applyPersonalCredentialChange",
             "cancelLogin",
             "catalog",
             "remove",
             "setKey",
+            "snapshot",
             "startLogin"
           ],
           "schemas": {
@@ -1280,6 +1282,217 @@
                   },
                   "required": [
                     "login"
+                  ],
+                  "additionalProperties": false
+                },
+                "result": {
+                  "type": "null"
+                }
+              },
+              "snapshot": {
+                "args": {
+                  "type": "null"
+                },
+                "result": {
+                  "type": "object",
+                  "properties": {
+                    "providers": {
+                      "type": "array",
+                      "items": {
+                        "type": "object",
+                        "properties": {
+                          "id": {
+                            "type": "string"
+                          },
+                          "name": {
+                            "type": "string"
+                          },
+                          "ways": {
+                            "type": "array",
+                            "items": {
+                              "type": "object",
+                              "properties": {
+                                "type": {
+                                  "anyOf": [
+                                    {
+                                      "type": "string",
+                                      "const": "api_key"
+                                    },
+                                    {
+                                      "type": "string",
+                                      "const": "oauth"
+                                    }
+                                  ]
+                                },
+                                "name": {
+                                  "type": "string"
+                                },
+                                "subscription": {
+                                  "type": "boolean"
+                                }
+                              },
+                              "required": [
+                                "type",
+                                "name",
+                                "subscription"
+                              ],
+                              "additionalProperties": false
+                            }
+                          },
+                          "hosts": {
+                            "type": "array",
+                            "items": {
+                              "type": "string"
+                            }
+                          }
+                        },
+                        "required": [
+                          "id",
+                          "name",
+                          "ways",
+                          "hosts"
+                        ],
+                        "additionalProperties": false
+                      }
+                    },
+                    "credentials": {
+                      "type": "array",
+                      "items": {
+                        "type": "object",
+                        "properties": {
+                          "provider": {
+                            "type": "string"
+                          },
+                          "type": {
+                            "anyOf": [
+                              {
+                                "type": "string",
+                                "const": "api_key"
+                              },
+                              {
+                                "type": "string",
+                                "const": "oauth"
+                              }
+                            ]
+                          }
+                        },
+                        "required": [
+                          "provider",
+                          "type"
+                        ],
+                        "additionalProperties": false
+                      }
+                    },
+                    "models": {
+                      "type": "array",
+                      "items": {
+                        "type": "object",
+                        "properties": {
+                          "provider": {
+                            "type": "string"
+                          },
+                          "modelId": {
+                            "type": "string"
+                          },
+                          "name": {
+                            "type": "string"
+                          },
+                          "contextWindow": {
+                            "type": "number"
+                          },
+                          "images": {
+                            "type": "boolean"
+                          },
+                          "thinkingLevels": {
+                            "type": "array",
+                            "items": {
+                              "type": "string"
+                            }
+                          }
+                        },
+                        "required": [
+                          "provider",
+                          "modelId",
+                          "name",
+                          "contextWindow",
+                          "images",
+                          "thinkingLevels"
+                        ],
+                        "additionalProperties": false
+                      }
+                    },
+                    "execution": {
+                      "anyOf": [
+                        {
+                          "type": "object",
+                          "properties": {
+                            "provider": {
+                              "type": "string",
+                              "minLength": 1
+                            },
+                            "modelId": {
+                              "type": "string",
+                              "minLength": 1
+                            }
+                          },
+                          "required": [
+                            "provider",
+                            "modelId"
+                          ],
+                          "additionalProperties": false
+                        },
+                        {
+                          "type": "null"
+                        }
+                      ]
+                    },
+                    "review": {
+                      "anyOf": [
+                        {
+                          "type": "object",
+                          "properties": {
+                            "provider": {
+                              "type": "string",
+                              "minLength": 1
+                            },
+                            "modelId": {
+                              "type": "string",
+                              "minLength": 1
+                            }
+                          },
+                          "required": [
+                            "provider",
+                            "modelId"
+                          ],
+                          "additionalProperties": false
+                        },
+                        {
+                          "type": "null"
+                        }
+                      ]
+                    }
+                  },
+                  "required": [
+                    "providers",
+                    "credentials",
+                    "models",
+                    "execution",
+                    "review"
+                  ],
+                  "additionalProperties": false
+                }
+              },
+              "applyPersonalCredentialChange": {
+                "args": {
+                  "type": "object",
+                  "properties": {
+                    "operationId": {
+                      "type": "string",
+                      "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$"
+                    }
+                  },
+                  "required": [
+                    "operationId"
                   ],
                   "additionalProperties": false
                 },

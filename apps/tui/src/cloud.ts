@@ -1,6 +1,6 @@
 import { mkdir, realpath } from "node:fs/promises";
 import { isAbsolute, join, resolve, sep } from "node:path";
-import { BACKGROUND_CONTEXT as context } from "@earendil-works/chord/context";
+import { BACKGROUND_CONTEXT as context, type Context } from "@earendil-works/chord/context";
 import type { Models } from "@earendil-works/pi-ai";
 import { AgentService, CommandJobs, CommandPolicySchema, JobIdSchema, launchToken, listen, openEncryptedStore, verifyPublishedArtifact, type GoalOptions, type Listening } from "@chopin-ai/harness-pi";
 import { Type, type Static } from "typebox";
@@ -8,6 +8,8 @@ import { Value } from "typebox/value";
 import { ControlConfigurationSchema, ControlHost } from "./control.js";
 import { InitializationConfigurationSchema } from "./initialize-command.js";
 import { JobClient, JobsConfigurationSchema } from "./jobs.js";
+import { PersonalCredentials } from "./personal-credentials.js";
+import { personalModels } from "./personal-models.js";
 import { Vault } from "./vault.js";
 
 const text = Type.String({ minLength: 1 });
@@ -19,14 +21,14 @@ export const CloudConfigurationSchema = Type.Object({
   jobs: Type.Object({ transport: JobsConfigurationSchema, domain: JobIdSchema, cwd: text, policyRevision: text, inheritEnv: Type.Boolean(), policy: CommandPolicySchema }, { additionalProperties: false }),
   storage: InitializationConfigurationSchema.properties.storage,
   server: Type.Object({ port: Type.Integer({ minimum: 0, maximum: 65535 }), hostname: Type.Optional(text) }, { additionalProperties: false }),
-  model, reviewModel: model, goalRetryAfterMs: positive,
+  model, reviewModel: model, personalModels: Type.Optional(Type.Boolean()), goalRetryAfterMs: positive,
   vaultSyncMs: Type.Integer({ minimum: 1, maximum: 0x7fff_ffff }),
 }, { additionalProperties: false });
 export type CloudConfiguration = Static<typeof CloudConfigurationSchema>;
 export interface CloudSecrets { controlToken: string; jobToken: string; launchToken: string; serviceKey?: Uint8Array; }
 export interface CloudDependencies {
   /** Called only after the existing encrypted store and trusted freshness have been verified. */
-  models(home: string): Promise<Models>;
+  models(home: string, catalogOnly: boolean): Promise<Models>;
   /** Trusted embedding hosts may provide an independent verifier; the CLI uses the configured model. */
   review?: GoalOptions["review"];
   report(error: unknown): void;
@@ -37,18 +39,22 @@ export interface CloudRuntime { service: AgentService; server: Listening; close(
 export async function openCloudRuntime(configuration: CloudConfiguration, secrets: CloudSecrets, dependencies: CloudDependencies): Promise<CloudRuntime> {
   const config = structuredClone(configuration);
   if (!Value.Check(CloudConfigurationSchema, config)) throw new Error("the cloud runtime configuration does not satisfy its versioned contract");
+  if (config.personalModels === true && URL.parse(config.control.url)?.protocol !== "https:") {
+    throw new Error("personal model credential claims require a trusted HTTPS endpoint");
+  }
   if (config.jobs.transport.scopeId !== config.control.agentId) throw new Error("the command and control bindings name different agents");
   for (const path of [config.volume, config.home]) if (!isAbsolute(path)) throw new Error("cloud runtime locations must be absolute");
   separate(resolve(config.volume), resolve(config.home));
   if (secrets.launchToken === "" || (config.keySource === "provided" ? secrets.serviceKey?.length !== 32 : secrets.serviceKey !== undefined)) throw new Error("the runtime requires its configured key source and a launch credential");
   let key: Buffer | undefined = secrets.serviceKey === undefined ? undefined : Buffer.from(secrets.serviceKey); secrets.serviceKey?.fill(0);
   let control: ControlHost | undefined; let broker: JobClient | undefined; let vault: Vault | undefined;
+  let credentials: PersonalCredentials | undefined;
   let storage: Awaited<ReturnType<typeof openEncryptedStore>> | undefined;
   let service: AgentService | undefined; let server: Listening | undefined;
   let admitted = false; let closing: Promise<void> | undefined;
   const close = () => closing ??= (async () => {
     const failures: unknown[] = [];
-    for (const action of [() => server?.close(), () => service?.close(context), () => storage?.close(context), () => admitted ? vault?.close() : undefined, () => broker?.close(), () => control?.close()]) {
+    for (const action of [() => server?.close(), () => service?.close(context), () => credentials?.close(), () => storage?.close(context), () => admitted ? vault?.close() : undefined, () => broker?.close(), () => control?.close()]) {
       try { await action(); } catch (error) { failures.push(error); }
     }
     key?.fill(0);
@@ -66,16 +72,35 @@ export async function openCloudRuntime(configuration: CloudConfiguration, secret
     const protectedStore = vault.store;
     try { storage = await openEncryptedStore({ ...config.storage, ...protectedStore, anchor }); }
     finally { protectedStore.key.fill(0); }
-    const models = await dependencies.models(config.home);
-    for (const selected of [config.model, config.reviewModel]) if (models.getModel(selected.provider, selected.modelId) === undefined) throw new Error("a configured execution or review model is not available");
-    broker = await JobClient.connect(config.jobs.transport, secrets.jobToken);
     const owner = config.control.owner;
+    const selected = [config.model, config.reviewModel];
+    const catalog = await dependencies.models(config.home, config.personalModels === true);
+    if (config.personalModels === true) {
+      credentials = new PersonalCredentials(join(config.volume, "personal-credentials"), key, config.control.agentId, owner);
+    } else {
+      for (const model of selected) if (catalog.getModel(model.provider, model.modelId) === undefined) throw new Error("a configured execution or review model is not available");
+    }
+    const personal = credentials;
+    const models = personal === undefined ? catalog : personalModels(catalog, selected, personal);
+    broker = await JobClient.connect(config.jobs.transport, secrets.jobToken);
     const requireOwner = (given: string) => { if (given !== owner) throw new Error("this cloud runtime belongs to another execution owner"); };
     let commands: CommandJobs;
     service = new AgentService({
       dataDir: join(config.home, "execution"), startPaused: true, allowClientMcp: false,
       store: async (given) => { requireOwner(given); return storage!; },
       models: (given) => { requireOwner(given); return models; },
+      ...(personal !== undefined && {
+        credentials: (given: string) => { requireOwner(given); return personal; },
+        personalModelSettings: (given: string) => {
+          requireOwner(given);
+          return {
+            execution: config.model,
+            review: config.reviewModel,
+            authorize: async (ctx: Context) => (await control!.authorize({ action: "owner" }, ctx.abortSignal)).allowed,
+            claim: (operationId: string, ctx: Context) => control!.claimPersonalCredentialChange(operationId, ctx.abortSignal),
+          };
+        },
+      }),
       extensions: (given) => {
         requireOwner(given);
         commands = new CommandJobs({ broker: broker!, policy: config.jobs.policy, report: dependencies.report, prepare: async (api, ctx) => ({
@@ -87,7 +112,7 @@ export async function openCloudRuntime(configuration: CloudConfiguration, secret
       agent: async (given) => { requireOwner(given); return { model: config.model, cwd: config.jobs.cwd, extensions: [commands.extension] }; },
       goals: (given) => {
         requireOwner(given);
-        return { authorize: (request, ctx) => control!.authorize(request, ctx.abortSignal), review: dependencies.review ?? { model: config.reviewModel },
+        return { authorize: (request, ctx) => control!.authorize(request, ctx.abortSignal), review: (personal === undefined ? dependencies.review : undefined) ?? { model: config.reviewModel },
           settled: async (goal, ctx) => commands.settled((await service!.goals(owner)).store, goal, ctx),
           artifact: async (goal, artifact, sourceTaskId, ctx) => verifyPublishedArtifact((await service!.goals(owner)).store, goal.goalId, artifact, sourceTaskId, ctx),
           retryAfterMs: config.goalRetryAfterMs, report: dependencies.report,
