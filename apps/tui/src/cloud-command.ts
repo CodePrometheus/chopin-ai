@@ -40,7 +40,7 @@ export const cloudCommand: Command = {
       } else if (process.env.CHOPIN_SERVICE_KEY !== undefined) throw new Error("custody unlock cannot also receive CHOPIN_SERVICE_KEY");
       delete process.env.CHOPIN_SERVICE_KEY;
       const stop = Promise.race([once(process, "SIGINT"), once(process, "SIGTERM")]);
-      runtime = await openCloudRuntime(config, { serviceKey: key, controlToken: required("CHOPIN_CONTROL_TOKEN"), jobToken: required("CHOPIN_JOB_TOKEN"), launchToken: required("CHOPIN_TOKEN") }, {
+      runtime = await openCloudRuntime(config, { serviceKey: key, controlToken: required("CHOPIN_CONTROL_TOKEN"), ...(config.jobs !== undefined && { jobToken: required("CHOPIN_JOB_TOKEN") }), launchToken: required("CHOPIN_TOKEN") }, {
         models: async (home, catalogOnly) => {
           process.env.CHOPIN_HOME = home;
           await useConfiguredProxy();

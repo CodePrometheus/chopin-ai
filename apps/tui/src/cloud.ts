@@ -20,7 +20,7 @@ const model = Type.Object({ provider: text, modelId: text }, { additionalPropert
 export const CloudConfigurationSchema = Type.Object({
   version: Type.Literal(1), purpose: Type.Literal("execution"), keySource: Type.Union([Type.Literal("provided"), Type.Literal("custody")]), volume: text, home: text,
   control: ControlConfigurationSchema,
-  jobs: Type.Object({ transport: JobsConfigurationSchema, domain: JobIdSchema, cwd: text, policyRevision: text, inheritEnv: Type.Boolean(), policy: CommandPolicySchema }, { additionalProperties: false }),
+  jobs: Type.Optional(Type.Object({ transport: JobsConfigurationSchema, domain: JobIdSchema, cwd: text, policyRevision: text, inheritEnv: Type.Boolean(), policy: CommandPolicySchema }, { additionalProperties: false })),
   storage: InitializationConfigurationSchema.properties.storage,
   server: Type.Object({ port: Type.Integer({ minimum: 0, maximum: 65535 }), hostname: Type.Optional(text) }, { additionalProperties: false }),
   model: Type.Optional(model), reviewModel: Type.Optional(model), personalModels: Type.Optional(Type.Boolean()), subscriptionSignIn: Type.Optional(Type.Boolean()),
@@ -28,7 +28,7 @@ export const CloudConfigurationSchema = Type.Object({
   vaultSyncMs: Type.Integer({ minimum: 1, maximum: 0x7fff_ffff }),
 }, { additionalProperties: false });
 export type CloudConfiguration = Static<typeof CloudConfigurationSchema>;
-export interface CloudSecrets { controlToken: string; jobToken: string; launchToken: string; serviceKey?: Uint8Array; }
+export interface CloudSecrets { controlToken: string; jobToken?: string; launchToken: string; serviceKey?: Uint8Array; }
 export interface CloudDependencies {
   /** Called only after the existing encrypted store and trusted freshness have been verified. */
   models(home: string, catalogOnly: boolean): Promise<Models>;
@@ -60,7 +60,11 @@ export async function openCloudRuntime(configuration: CloudConfiguration, secret
   if (selected.some(({ provider }) => !hostedProviderAllowed(provider))) {
     throw new Error("the configured model provider is not available for hosted execution or review");
   }
-  if (config.jobs.transport.scopeId !== config.control.agentId) throw new Error("the command and control bindings name different agents");
+  const jobs = config.jobs;
+  if ((selection === undefined) !== (jobs === undefined)) throw new Error("command jobs are required only with background models");
+  if (jobs !== undefined && (jobs.transport.scopeId !== config.control.agentId || !secrets.jobToken)) {
+    throw new Error("the command and control bindings must name the same agent and authorize its jobs");
+  }
   for (const path of [config.volume, config.home]) if (!isAbsolute(path)) throw new Error("cloud runtime locations must be absolute");
   separate(resolve(config.volume), resolve(config.home));
   if (secrets.launchToken === "" || (config.keySource === "provided" ? secrets.serviceKey?.length !== 32 : secrets.serviceKey !== undefined)) throw new Error("the runtime requires its configured key source and a launch credential");
@@ -110,9 +114,9 @@ export async function openCloudRuntime(configuration: CloudConfiguration, secret
     }
     const personal = credentials;
     const models = personal === undefined ? catalog : personalModels(catalog, signIn === undefined ? selected : [], personal);
-    broker = await JobClient.connect(config.jobs.transport, secrets.jobToken);
+    if (jobs !== undefined) broker = await JobClient.connect(jobs.transport, secrets.jobToken!);
     const requireOwner = (given: string) => { if (given !== owner) throw new Error("this cloud runtime belongs to another execution owner"); };
-    let commands: CommandJobs;
+    let commands: CommandJobs | undefined;
     service = new AgentService({
       dataDir: join(config.home, "execution"), startPaused: true, allowClientMcp: false,
       store: async (given) => { requireOwner(given); return storage!; },
@@ -145,15 +149,16 @@ export async function openCloudRuntime(configuration: CloudConfiguration, secret
       }),
       extensions: (given) => {
         requireOwner(given);
-        commands = new CommandJobs({ broker: broker!, policy: config.jobs.policy, report: dependencies.report, prepare: async (api, ctx) => ({
+        if (jobs === undefined) return [];
+        commands = new CommandJobs({ broker: broker!, policy: jobs.policy, report: dependencies.report, prepare: async (api, ctx) => ({
           goal: await (await service!.goals(owner)).forExecution(api.conversationId, ctx),
-          domain: config.jobs.domain, cwd: config.jobs.cwd, policyRevision: config.jobs.policyRevision, inheritEnv: config.jobs.inheritEnv,
+          domain: jobs.domain, cwd: jobs.cwd, policyRevision: jobs.policyRevision, inheritEnv: jobs.inheritEnv,
         }) });
         return [commands.extension];
       },
       agent: async (given) => {
         requireOwner(given);
-        return { model: selection?.execution ?? null, cwd: config.jobs.cwd, extensions: [commands.extension] };
+        return { model: selection?.execution ?? null, ...(jobs !== undefined && { cwd: jobs.cwd }), extensions: commands === undefined ? [] : [commands.extension] };
       },
       goals: (given) => {
         requireOwner(given);
@@ -162,7 +167,10 @@ export async function openCloudRuntime(configuration: CloudConfiguration, secret
             ? { allowed: false, reason: "this workspace has no configured execution and review models" }
             : control!.authorize(request, ctx.abortSignal),
           review: selection === undefined ? {} : (personal === undefined ? dependencies.review : undefined) ?? { model: selection.review },
-          settled: async (goal, ctx) => commands.settled((await service!.goals(owner)).store, goal, ctx),
+          settled: async (goal, ctx) => {
+            if (commands === undefined) throw new Error("this workspace has no configured command reconciliation");
+            return commands.settled((await service!.goals(owner)).store, goal, ctx);
+          },
           artifact: async (goal, artifact, sourceTaskId, ctx) => verifyPublishedArtifact((await service!.goals(owner)).store, goal.goalId, artifact, sourceTaskId, ctx),
           retryAfterMs: config.goalRetryAfterMs, report: dependencies.report,
         };

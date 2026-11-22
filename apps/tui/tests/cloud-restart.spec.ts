@@ -555,7 +555,7 @@ async function verifyRestart(mode: RestartMode, onTestFinished: (cleanup: () => 
   await first.client.close();
   if (mode === "changed-config") {
     const changed = JSON.parse(await readFile(file, "utf8"));
-    changed.jobs.cwd = join(root, "other-workspace");
+    changed.jobs!.cwd = join(root, "other-workspace");
     await writeFile(file, JSON.stringify(changed));
   }
   process.kill(first.pid, "SIGKILL");
