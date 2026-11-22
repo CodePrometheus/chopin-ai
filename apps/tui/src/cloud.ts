@@ -6,6 +6,7 @@ import { AgentService, CommandJobs, CommandPolicySchema, JobIdSchema, launchToke
 import { Type, type Static } from "typebox";
 import { Value } from "typebox/value";
 import { ControlConfigurationSchema, ControlHost } from "./control.js";
+import { hostedModels, hostedProviderAllowed } from "./hosted-models.js";
 import { InitializationConfigurationSchema } from "./initialize-command.js";
 import { JobClient, JobsConfigurationSchema } from "./jobs.js";
 import { PersonalCredentials } from "./personal-credentials.js";
@@ -22,7 +23,8 @@ export const CloudConfigurationSchema = Type.Object({
   jobs: Type.Object({ transport: JobsConfigurationSchema, domain: JobIdSchema, cwd: text, policyRevision: text, inheritEnv: Type.Boolean(), policy: CommandPolicySchema }, { additionalProperties: false }),
   storage: InitializationConfigurationSchema.properties.storage,
   server: Type.Object({ port: Type.Integer({ minimum: 0, maximum: 65535 }), hostname: Type.Optional(text) }, { additionalProperties: false }),
-  model, reviewModel: model, personalModels: Type.Optional(Type.Boolean()), subscriptionSignIn: Type.Optional(Type.Boolean()), goalRetryAfterMs: positive,
+  model, reviewModel: model, personalModels: Type.Optional(Type.Boolean()), subscriptionSignIn: Type.Optional(Type.Boolean()),
+  subscriptionProviders: Type.Optional(Type.Array(Type.Literal("qwen"), { maxItems: 1 })), goalRetryAfterMs: positive,
   vaultSyncMs: Type.Integer({ minimum: 1, maximum: 0x7fff_ffff }),
 }, { additionalProperties: false });
 export type CloudConfiguration = Static<typeof CloudConfigurationSchema>;
@@ -45,6 +47,12 @@ export async function openCloudRuntime(configuration: CloudConfiguration, secret
   }
   if (config.subscriptionSignIn === true && config.personalModels !== true) {
     throw new Error("hosted subscription sign-in requires the personal model runtime");
+  }
+  if ((config.subscriptionProviders?.length ?? 0) !== 0 && config.subscriptionSignIn !== true) {
+    throw new Error("an enabled subscription provider requires hosted subscription sign-in");
+  }
+  if ([config.model, config.reviewModel].some(({ provider }) => !hostedProviderAllowed(provider))) {
+    throw new Error("the configured model provider is not available for hosted execution or review");
   }
   if (config.jobs.transport.scopeId !== config.control.agentId) throw new Error("the command and control bindings name different agents");
   for (const path of [config.volume, config.home]) if (!isAbsolute(path)) throw new Error("cloud runtime locations must be absolute");
@@ -82,12 +90,13 @@ export async function openCloudRuntime(configuration: CloudConfiguration, secret
     if (config.subscriptionSignIn === true) {
       subscriptions = new SubscriptionSignInRuntime(
         join(config.home, "subscription-profiles"), config.volume, key,
-        JSON.stringify([config.control.agentId, owner]), () => vault!.sync(), authorizeOwner, dependencies.report,
+        JSON.stringify([config.control.agentId, owner]), config.subscriptionProviders ?? [],
+        () => vault!.sync(), authorizeOwner, dependencies.report,
       );
     }
     const signIn = subscriptions;
     const selected = [config.model, config.reviewModel];
-    const catalog = await dependencies.models(config.home, config.personalModels === true);
+    const catalog = hostedModels(await dependencies.models(config.home, config.personalModels === true));
     if (config.personalModels === true) {
       credentials = new PersonalCredentials(join(config.volume, "personal-credentials"), key, config.control.agentId, owner);
     } else {

@@ -6,12 +6,9 @@ import type {
   SubscriptionProviderId, SubscriptionSignInAccount, SubscriptionSignInAttempt,
   SubscriptionSignInMode, SubscriptionSignInSnapshot,
 } from "@chopin-ai/harness-pi/protocol";
-import { CodexSubscriptionClient } from "./codex-subscription.js";
 import { openQwenSubscription } from "./qwen-subscription.js";
 
-const PROVIDERS = [
-  { id: "qwen", name: "Qwen Code" }, { id: "openai-codex", name: "OpenAI Codex" },
-] as const;
+const QWEN = { id: "qwen", name: "Qwen Code" } as const;
 const REQUEST_MS = 15_000;
 const POLL_MS = 1_000;
 const LOGIN_MS = 15 * 60_000;
@@ -56,6 +53,7 @@ export class SubscriptionSignInRuntime {
   readonly #home: string;
   readonly #volume: string;
   readonly #binding: string;
+  readonly #providers: SubscriptionSignInSnapshot["providers"];
   readonly #persist: () => Promise<void>;
   readonly #authorize: () => Promise<boolean>;
   readonly #report: (error: Error) => void;
@@ -67,6 +65,7 @@ export class SubscriptionSignInRuntime {
     volume: string,
     key: Uint8Array,
     binding: string,
+    providers: readonly "qwen"[],
     persist: () => Promise<void>,
     authorize: () => Promise<boolean>,
     report: (error: Error) => void,
@@ -75,6 +74,7 @@ export class SubscriptionSignInRuntime {
     this.#volume = volume;
     this.#key = subkey(key, "subscription profiles");
     this.#binding = binding;
+    this.#providers = providers.includes(QWEN.id) ? [QWEN] : [];
     this.#persist = persist;
     this.#authorize = authorize;
     this.#report = report;
@@ -82,9 +82,9 @@ export class SubscriptionSignInRuntime {
 
   snapshot(): Promise<SubscriptionSignInSnapshot> {
     return this.#run(async () => ({
-      providers: PROVIDERS.map(({ id, name }) => ({ id, name })),
+      providers: this.#providers.map(({ id, name }) => ({ id, name })),
       attempts: [...this.#attempts.values()].map(({ view }) => ({ ...view })),
-      accounts: await Promise.all(PROVIDERS.map(async ({ id: provider }): Promise<SubscriptionSignInAccount> => {
+      accounts: await Promise.all(this.#providers.map(async ({ id: provider }): Promise<SubscriptionSignInAccount> => {
         const active = await this.#load(provider).catch(() => null);
         if (active === null) return { provider, status: "unknown" };
         if (active === undefined) return { provider, status: "signed_out" };
@@ -94,8 +94,13 @@ export class SubscriptionSignInRuntime {
     }));
   }
 
+  #admits(provider: SubscriptionProviderId): boolean {
+    return this.#providers.some(({ id }) => id === provider);
+  }
+
   start(provider: SubscriptionProviderId, mode: SubscriptionSignInMode): Promise<string> {
     return this.#run(async () => {
+      if (!this.#admits(provider)) throw failure();
       if (!await this.#authorize()) throw failure();
       const active = await this.#load(provider);
       const signedIn = active?.account.status === "signed_in";
@@ -103,7 +108,7 @@ export class SubscriptionSignInRuntime {
       const previous = this.#attempts.get(provider);
       if (previous?.view.status === "waiting") await this.#finish(previous, "cancelled");
       const id = randomUUID();
-      const client = await openClient(provider, this.#profile(provider, id));
+      const client = await openClient(this.#profile(provider, id));
       const attempt: Attempt = {
         view: { id, provider, mode, status: "waiting", challengeAvailable: false },
         client, challenge: undefined, deadline: Date.now() + LOGIN_MS,
@@ -132,6 +137,7 @@ export class SubscriptionSignInRuntime {
 
   disconnect(provider: SubscriptionProviderId, expectedAccountId: string): Promise<boolean> {
     return this.#run(async () => {
+      if (!this.#admits(provider)) return false;
       if (!await this.#authorize()) throw failure();
       const active = await this.#load(provider);
       // A delayed confirmation must not affect a subsequent login or its pending replacement.
@@ -181,7 +187,7 @@ export class SubscriptionSignInRuntime {
 
   #attempt(id: string): Attempt {
     const attempt = [...this.#attempts.values()].find(({ view }) => view.id === id);
-    if (attempt === undefined) throw failure();
+    if (attempt === undefined || !this.#admits(attempt.view.provider)) throw failure();
     return attempt;
   }
 
@@ -190,7 +196,7 @@ export class SubscriptionSignInRuntime {
   #association(provider: SubscriptionProviderId): string { return JSON.stringify(["subscription profile", this.#binding, provider]); }
 
   async #load(provider: SubscriptionProviderId): Promise<Active | undefined> {
-    if (this.#unavailable.has(provider)) throw failure();
+    if (!this.#admits(provider) || this.#unavailable.has(provider)) throw failure();
     const cached = this.#active.get(provider);
     if (cached !== undefined) return cached;
     const encoded = await readFile(this.#pointer(provider)).catch((error: NodeJS.ErrnoException) => {
@@ -201,7 +207,7 @@ export class SubscriptionSignInRuntime {
     const id = unseal(this.#key, this.#association(provider), encoded).toString("utf8");
     if (id === "") return undefined;
     if (!PROFILE_ID.test(id)) throw failure();
-    const client = await openClient(provider, this.#profile(provider, id));
+    const client = await openClient(this.#profile(provider, id));
     try {
       const active = { id, client, account: await client.account() };
       this.#active.set(provider, active);
@@ -233,7 +239,7 @@ export class SubscriptionSignInRuntime {
 
   async #poll(attempt: Attempt): Promise<void> {
     const client = attempt.client;
-    if (attempt.view.status !== "waiting" || client === undefined) return;
+    if (attempt.view.status !== "waiting" || client === undefined || !this.#admits(attempt.view.provider)) return;
     if (Date.now() >= attempt.deadline) { await this.#finish(attempt, "expired"); return; }
     try {
       const login = await client.poll();
@@ -282,53 +288,25 @@ export class SubscriptionSignInRuntime {
   }
 }
 
-async function openClient(provider: SubscriptionProviderId, profile: string): Promise<Client> {
+async function openClient(profile: string): Promise<Client> {
   await mkdir(profile, { recursive: true, mode: 0o700 });
-  if (provider === "qwen") {
-    const { client, activate, close } = await openQwenSubscription(profile, REQUEST_MS);
-    let id: string | undefined;
-    return {
-      account: async () => {
-        const { status, accountLabel, plan, entitlement } = await client.account();
-        return { status, entitlement, ...(accountLabel !== null && { accountLabel }), ...(plan !== undefined && { plan }) };
-      },
-      begin: async () => { id = (await client.startLogin()).id; },
-      poll: async () => {
-        if (id === undefined) throw failure();
-        const flow = await client.loginStatus(id);
-        const status = flow.status === "authorized" ? "ready" : flow.status === "unknown" ? "failed" : flow.status;
-        return { status, ...(flow.authorizationUrl !== undefined && { challenge: { verificationUrl: flow.authorizationUrl } }) };
-      },
-      activate,
-      cancel: async () => { if (id !== undefined) await client.cancelLogin(id); },
-      logout: () => client.logout(),
-      close,
-    };
-  }
-  const client = await CodexSubscriptionClient.open(profile, REQUEST_MS);
-  let challenge: Awaited<ReturnType<typeof client.startLogin>> | undefined;
+  const { client, activate, close } = await openQwenSubscription(profile, REQUEST_MS);
+  let id: string | undefined;
   return {
     account: async () => {
-      const account = await client.account();
-      if (account.status !== "signed_in") return { status: account.status };
-      const { status, accountLabel, plan } = account;
-      return { status, ...(accountLabel !== null && { accountLabel }), ...(plan !== undefined && { plan }) };
+      const { status, accountLabel, plan, entitlement } = await client.account();
+      return { status, entitlement, ...(accountLabel !== null && { accountLabel }), ...(plan !== undefined && { plan }) };
     },
-    begin: async () => { challenge = await client.startLogin(); },
+    begin: async () => { id = (await client.startLogin()).id; },
     poll: async () => {
-      if (challenge === undefined) throw failure();
-      const { loginId, verificationUrl, displayCode } = challenge;
-      const status = client.loginStatus(loginId);
-      switch (status) {
-        case "waiting": return { status, challenge: { verificationUrl, displayCode } };
-        case "authorized": return { status: "ready" };
-        case "expired": return { status };
-        default: return { status: "failed" };
-      }
+      if (id === undefined) throw failure();
+      const flow = await client.loginStatus(id);
+      const status = flow.status === "authorized" ? "ready" : flow.status === "unknown" ? "failed" : flow.status;
+      return { status, ...(flow.authorizationUrl !== undefined && { challenge: { verificationUrl: flow.authorizationUrl } }) };
     },
-    activate: async () => {},
-    cancel: async () => { if (challenge !== undefined) await client.cancelLogin(challenge.loginId); },
+    activate,
+    cancel: async () => { if (id !== undefined) await client.cancelLogin(id); },
     logout: () => client.logout(),
-    close: () => client.close(),
+    close,
   };
 }
