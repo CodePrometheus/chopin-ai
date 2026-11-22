@@ -485,7 +485,8 @@ export class AgentService {
       admitted.has(providerId) ? [{ provider: providerId, type }] : []);
     const connected = new Set(credentials.map(({ provider }) => provider));
     const registry = this.#options.models(owner);
-    const available = subscriptionMode ? await registry.getAvailable() : registry.getModels().filter(({ provider }) => connected.has(provider));
+    const available = subscriptionMode ? await registry.getAvailable(undefined, { signal: context.abortSignal })
+      : registry.getModels().filter(({ provider }) => connected.has(provider));
     const models = available.map(modelChoice);
     const usable = ({ provider, modelId }: ModelRef) => models.some((model) => model.provider === provider && model.modelId === modelId) ? { provider, modelId } : null;
     return { providers, credentials, models, execution: usable(settings.execution), review: usable(settings.review) };
