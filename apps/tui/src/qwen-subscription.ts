@@ -206,6 +206,7 @@ export async function openQwenSubscription(profile: string, timeoutMs: number): 
       ui: { enableFollowupSuggestions: false },
     }), { mode: 0o600 });
     const bearer = randomBytes(32).toString("base64url");
+    const proxy = process.env.HTTPS_PROXY ?? process.env.https_proxy;
     const child = spawn(EXECUTABLE, [
       "serve", "--hostname", "127.0.0.1", "--port", "0", "--workspace", workspace,
       "--no-web", "--no-token-qr", "--require-auth",
@@ -216,6 +217,7 @@ export async function openQwenSubscription(profile: string, timeoutMs: number): 
         QWEN_HOME: profile, QWEN_RUNTIME_DIR: join(runtime, "runtime"),
         QWEN_SERVER_TOKEN: bearer, QWEN_CODE_SYSTEM_SETTINGS_PATH: settings,
         QWEN_CODE_MODELS_DEV_REFRESH: "off",
+        ...(proxy ? { HTTPS_PROXY: proxy, NO_PROXY: "127.0.0.1,localhost", NODE_USE_ENV_PROXY: "1" } : {}),
       },
       stdio: ["ignore", "pipe", "pipe"],
     });

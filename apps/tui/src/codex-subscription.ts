@@ -84,11 +84,16 @@ export class CodexSubscriptionClient {
 
   private constructor(profile: string, timeoutMs: number) {
     this.#timeoutMs = timeoutMs;
+    const proxy = process.env.HTTPS_PROXY ?? process.env.https_proxy;
     this.#child = spawn(EXECUTABLE, [
       "-c", 'cli_auth_credentials_store="file"',
       "-c", 'forced_login_method="chatgpt"',
       "app-server", "--listen", "stdio://",
-    ], { cwd: profile, env: { CODEX_HOME: profile }, stdio: ["pipe", "pipe", "pipe"] });
+    ], {
+      cwd: profile,
+      env: { CODEX_HOME: profile, ...(proxy ? { HTTPS_PROXY: proxy, NO_PROXY: "127.0.0.1,localhost" } : {}) },
+      stdio: ["pipe", "pipe", "pipe"],
+    });
     this.#child.stderr.resume();
     this.#child.stdin.on("error", () => this.#disconnect());
     this.#child.on("error", () => this.#disconnect());
