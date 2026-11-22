@@ -3293,6 +3293,335 @@
         }
       ]
     },
+    "chopin.subscriptions": {
+      "version": 1,
+      "fingerprint": "44790860530a1305",
+      "address": {
+        "kind": "chopin",
+        "params": {}
+      },
+      "params": {},
+      "variants": [
+        {
+          "name": "owner",
+          "state": [],
+          "methods": [
+            "cancelSubscriptionSignIn",
+            "deliverSubscriptionChallenge",
+            "disconnectSubscription",
+            "startSubscriptionSignIn",
+            "subscriptionSnapshot"
+          ],
+          "schemas": {
+            "state": {},
+            "methods": {
+              "subscriptionSnapshot": {
+                "args": {
+                  "type": "null"
+                },
+                "result": {
+                  "type": "object",
+                  "properties": {
+                    "providers": {
+                      "type": "array",
+                      "items": {
+                        "type": "object",
+                        "properties": {
+                          "id": {
+                            "anyOf": [
+                              {
+                                "type": "string",
+                                "const": "qwen"
+                              },
+                              {
+                                "type": "string",
+                                "const": "openai-codex"
+                              }
+                            ]
+                          },
+                          "name": {
+                            "type": "string"
+                          }
+                        },
+                        "required": [
+                          "id",
+                          "name"
+                        ],
+                        "additionalProperties": false
+                      }
+                    },
+                    "attempts": {
+                      "type": "array",
+                      "items": {
+                        "type": "object",
+                        "properties": {
+                          "id": {
+                            "type": "string"
+                          },
+                          "provider": {
+                            "anyOf": [
+                              {
+                                "type": "string",
+                                "const": "qwen"
+                              },
+                              {
+                                "type": "string",
+                                "const": "openai-codex"
+                              }
+                            ]
+                          },
+                          "mode": {
+                            "anyOf": [
+                              {
+                                "type": "string",
+                                "const": "connect"
+                              },
+                              {
+                                "type": "string",
+                                "const": "switch_account"
+                              }
+                            ]
+                          },
+                          "status": {
+                            "anyOf": [
+                              {
+                                "type": "string",
+                                "const": "waiting"
+                              },
+                              {
+                                "type": "string",
+                                "const": "authorized"
+                              },
+                              {
+                                "type": "string",
+                                "const": "cancelled"
+                              },
+                              {
+                                "type": "string",
+                                "const": "expired"
+                              },
+                              {
+                                "type": "string",
+                                "const": "failed"
+                              }
+                            ]
+                          },
+                          "challengeAvailable": {
+                            "type": "boolean"
+                          }
+                        },
+                        "required": [
+                          "id",
+                          "provider",
+                          "mode",
+                          "status",
+                          "challengeAvailable"
+                        ],
+                        "additionalProperties": false
+                      }
+                    },
+                    "accounts": {
+                      "type": "array",
+                      "items": {
+                        "type": "object",
+                        "properties": {
+                          "provider": {
+                            "anyOf": [
+                              {
+                                "type": "string",
+                                "const": "qwen"
+                              },
+                              {
+                                "type": "string",
+                                "const": "openai-codex"
+                              }
+                            ]
+                          },
+                          "status": {
+                            "anyOf": [
+                              {
+                                "type": "string",
+                                "const": "signed_in"
+                              },
+                              {
+                                "type": "string",
+                                "const": "signed_out"
+                              },
+                              {
+                                "type": "string",
+                                "const": "unknown"
+                              }
+                            ]
+                          },
+                          "accountLabel": {
+                            "type": "string"
+                          },
+                          "plan": {
+                            "type": "string"
+                          },
+                          "entitlement": {
+                            "anyOf": [
+                              {
+                                "type": "string",
+                                "const": "eligible"
+                              },
+                              {
+                                "type": "string",
+                                "const": "ineligible"
+                              },
+                              {
+                                "type": "string",
+                                "const": "unknown"
+                              }
+                            ]
+                          },
+                          "accountId": {
+                            "type": "string",
+                            "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$"
+                          }
+                        },
+                        "required": [
+                          "provider",
+                          "status"
+                        ],
+                        "additionalProperties": false
+                      }
+                    }
+                  },
+                  "required": [
+                    "providers",
+                    "attempts",
+                    "accounts"
+                  ],
+                  "additionalProperties": false
+                }
+              },
+              "startSubscriptionSignIn": {
+                "args": {
+                  "type": "object",
+                  "properties": {
+                    "provider": {
+                      "anyOf": [
+                        {
+                          "type": "string",
+                          "const": "qwen"
+                        },
+                        {
+                          "type": "string",
+                          "const": "openai-codex"
+                        }
+                      ]
+                    },
+                    "mode": {
+                      "anyOf": [
+                        {
+                          "type": "string",
+                          "const": "connect"
+                        },
+                        {
+                          "type": "string",
+                          "const": "switch_account"
+                        }
+                      ]
+                    }
+                  },
+                  "required": [
+                    "provider",
+                    "mode"
+                  ],
+                  "additionalProperties": false
+                },
+                "result": {
+                  "type": "object",
+                  "properties": {
+                    "attemptId": {
+                      "type": "string",
+                      "minLength": 1
+                    }
+                  },
+                  "required": [
+                    "attemptId"
+                  ],
+                  "additionalProperties": false
+                }
+              },
+              "cancelSubscriptionSignIn": {
+                "args": {
+                  "type": "object",
+                  "properties": {
+                    "attemptId": {
+                      "type": "string",
+                      "minLength": 1
+                    }
+                  },
+                  "required": [
+                    "attemptId"
+                  ],
+                  "additionalProperties": false
+                },
+                "result": {
+                  "type": "null"
+                }
+              },
+              "disconnectSubscription": {
+                "args": {
+                  "type": "object",
+                  "properties": {
+                    "provider": {
+                      "anyOf": [
+                        {
+                          "type": "string",
+                          "const": "qwen"
+                        },
+                        {
+                          "type": "string",
+                          "const": "openai-codex"
+                        }
+                      ]
+                    },
+                    "expectedAccountId": {
+                      "type": "string",
+                      "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$"
+                    }
+                  },
+                  "required": [
+                    "provider",
+                    "expectedAccountId"
+                  ],
+                  "additionalProperties": false
+                },
+                "result": {
+                  "type": "null"
+                }
+              },
+              "deliverSubscriptionChallenge": {
+                "args": {
+                  "type": "object",
+                  "properties": {
+                    "attemptId": {
+                      "type": "string",
+                      "minLength": 1
+                    },
+                    "operationId": {
+                      "type": "string",
+                      "minLength": 1
+                    }
+                  },
+                  "required": [
+                    "attemptId",
+                    "operationId"
+                  ],
+                  "additionalProperties": false
+                },
+                "result": {
+                  "type": "null"
+                }
+              }
+            }
+          }
+        }
+      ]
+    },
     "chopin.vault": {
       "version": 2,
       "fingerprint": "7a47031b95cc1632",
