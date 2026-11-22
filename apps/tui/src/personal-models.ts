@@ -29,12 +29,10 @@ export function personalModels(catalog: Models, selected: readonly ModelRef[], c
     const call = (simple: boolean, model: Model<Api>, context: TranscriptContext, options?: SimpleStreamOptions) => lazyStream(model, async () => {
       const selected = entries.get(model.id);
       if (selected === undefined) throw new Error("this model is not admitted");
-      const stored = await credentials.read(id, { signal: options?.signal });
-      if (stored?.type !== "api_key" || !stored.key) throw new Error("a personal API key is required");
       const guarded = {
         ...options, apiKey: ADAPTER_KEY, env: undefined, headers: undefined,
         onResponse: undefined, onProviderStreamEvent: undefined, telemetry: undefined,
-        fetch: boundFetch(selected.model, stored.key), transport: "sse" as const,
+        fetch: boundFetch(selected.model, credentials), transport: "sse" as const,
       };
       try {
         const stream = simple ? selected.streams.streamSimple(selected.model, context, guarded) : selected.streams.stream(selected.model, context, guarded);
@@ -72,12 +70,16 @@ function modelOrigin(baseUrl: string): string | undefined {
   return undefined;
 }
 
-function boundFetch(model: Model<Api>, key: string): FetchFunction {
+function boundFetch(model: Model<Api>, credentials: CredentialStore): FetchFunction {
   const origin = modelOrigin(model.baseUrl);
   return async (input, init) => {
     const request = new Request(input, init);
     const url = new URL(request.url);
-    if (url.origin !== origin || url.username || url.password || [...url.searchParams.values()].includes(key)) throw new Error(REQUEST_FAILED);
+    if (url.origin !== origin || url.username || url.password) throw new Error(REQUEST_FAILED);
+    const stored = await credentials.read(model.provider, { signal: request.signal });
+    if (stored?.type !== "api_key" || !stored.key) throw new Error("a personal API key is required");
+    const key = stored.key;
+    if ([...url.searchParams.values()].includes(key)) throw new Error(REQUEST_FAILED);
     const headers = new Headers(request.headers);
     for (const header of ["authorization", "x-api-key", "openai-organization", "openai-project"]) headers.delete(header);
     if (model.api === "anthropic-messages") headers.set("x-api-key", key);
