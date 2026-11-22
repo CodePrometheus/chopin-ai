@@ -1,4 +1,4 @@
-import { arr, bool, evolve, hostKind, int, lit, map, method, nul, num, obj, opt, remote, str, union, unknown, type Ctx, type RefState, type NullSchema, type NumberSchema, type Reference, type Schema, type Static } from "@earendil-works/chord";
+import { arr, bool, evolve, hostKind, int, lit, map, method, nul, num, obj, opt, remote, str, union, unknown, type Contract, type Ctx, type RefState, type NullSchema, type NumberSchema, type Reference, type Schema, type Static } from "@earendil-works/chord";
 import { CALL_TIMEOUT_MS, within, type CallOptions, type Client } from "./client.js";
 export { CALL_TIMEOUT_MS, CallTimeout, connect, subscribe, within } from "./client.js";
 export type { CallOptions, Client, ConnectOptions } from "./client.js";
@@ -358,12 +358,9 @@ const CredentialsV2Spec = {
 const snapshotMethod = method(undefined, ModelSettingsSchema) as Query<undefined, typeof ModelSettingsSchema>;
 const PersonalCredentialChangeArgs = obj({ operationId: str({ pattern: "^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$" }) });
 const applyPersonalCredentialChange = method(PersonalCredentialChangeArgs) as Call<typeof PersonalCredentialChangeArgs>;
-export const Credentials = evolve(remote("chopin.credentials", CredentialsV2Spec),
-  (edit) => edit.addMethod("owner", "snapshot", snapshotMethod.args, snapshotMethod.result)
-    .addMethod("owner", "applyPersonalCredentialChange", applyPersonalCredentialChange.args, applyPersonalCredentialChange.result));
 const CredentialsSpec = {
   ...CredentialsV2Spec,
-  version: Credentials.version,
+  version: 3,
   variants: {
     owner: {
       ...CredentialsV2Spec.variants.owner,
@@ -371,6 +368,18 @@ const CredentialsSpec = {
     },
   },
 } as const;
+type CredentialsContract = Contract<{
+  kind: "remote";
+  name: "chopin.credentials";
+  params: typeof CredentialsSpec.params;
+  history: [
+    { version: "2"; variants: typeof CredentialsV2Spec.variants; changes: never },
+    { version: "3"; variants: typeof CredentialsSpec.variants; changes: readonly ["owner", "snapshot" | "applyPersonalCredentialChange", "args" | "result"] },
+  ];
+}>;
+export const Credentials: CredentialsContract = evolve(remote("chopin.credentials", CredentialsV2Spec),
+  (edit) => edit.addMethod("owner", "snapshot", snapshotMethod.args, snapshotMethod.result)
+    .addMethod("owner", "applyPersonalCredentialChange", applyPersonalCredentialChange.args, applyPersonalCredentialChange.result));
 
 /** An MCP server a client set, and how many tools it offers, or why it offers none yet; never its headers. */
 export const McpServerSchema = obj({ name: str(), url: str(), tools: num(), error: opt(str()) });
@@ -700,8 +709,14 @@ export function resender(): (text: string, submit: (request: string) => Promise<
   };
 }
 
+type ContractExport = {
+  readonly type: Contract;
+  readonly spec: typeof GoalsSpec | typeof GoalSpec | typeof ConversationsSpec | typeof ConversationSpec |
+    typeof CredentialsSpec | typeof McpSpec | typeof EnvironmentSpec | typeof VaultSpec | typeof LoopSpec;
+};
+
 /** Application-owned declarations used by native clients and compatibility checks. */
-export const contracts = [
+export const contracts: readonly ContractExport[] = [
   { type: Goals, spec: GoalsSpec },
   { type: Goal, spec: GoalSpec },
   { type: Conversations, spec: ConversationsSpec },
