@@ -602,7 +602,12 @@ export async function createAgentHost(source: AgentService | Sealed, loop?: Loop
           subscriptionSnapshot: async (ctx) => (await access(ctx)).snapshot(),
           startSubscriptionSignIn: async ({ provider, mode }, ctx) => ({ attemptId: await (await access(ctx)).start(provider, mode) }),
           cancelSubscriptionSignIn: async ({ attemptId }, ctx) => { await (await access(ctx)).cancel(attemptId); return null; },
-          disconnectSubscription: async ({ provider }, ctx) => { await (await access(ctx)).disconnect(provider); return null; },
+          disconnectSubscription: async ({ provider, expectedAccountId }, ctx) => {
+            if (!await (await access(ctx)).disconnect(provider, expectedAccountId)) {
+              throw refusal("credential_refused", "the confirmed subscription account is no longer current");
+            }
+            return null;
+          },
           deliverSubscriptionChallenge: async ({ attemptId, operationId }, ctx) => {
             await (await access(ctx)).deliver(attemptId, operationId, durable(ctx));
             return null;

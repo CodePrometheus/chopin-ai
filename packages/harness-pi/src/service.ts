@@ -65,7 +65,7 @@ interface SubscriptionSignIn {
   snapshot(): Promise<SubscriptionSignInSnapshot>;
   start(provider: SubscriptionProviderId, mode: SubscriptionSignInMode): Promise<string>;
   cancel(attemptId: string): Promise<void>;
-  disconnect(provider: SubscriptionProviderId): Promise<void>;
+  disconnect(provider: SubscriptionProviderId, expectedAccountId: string): Promise<boolean>;
   deliver(attemptId: string, operationId: string, context: Context): Promise<void>;
 }
 

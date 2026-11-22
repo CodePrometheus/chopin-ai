@@ -85,9 +85,11 @@ export class SubscriptionSignInRuntime {
       providers: PROVIDERS.map(({ id, name }) => ({ id, name })),
       attempts: [...this.#attempts.values()].map(({ view }) => ({ ...view })),
       accounts: await Promise.all(PROVIDERS.map(async ({ id: provider }): Promise<SubscriptionSignInAccount> => {
-        const account = await this.#load(provider).then((active) => active?.account ?? { status: "signed_out" } as const)
-          .catch(() => ({ status: "unknown" } as const));
-        return { provider, ...account };
+        const active = await this.#load(provider).catch(() => null);
+        if (active === null) return { provider, status: "unknown" };
+        if (active === undefined) return { provider, status: "signed_out" };
+        const { account, id } = active;
+        return { provider, ...account, ...(account.status === "signed_in" && { accountId: id }) };
       })),
     }));
   }
@@ -128,13 +130,14 @@ export class SubscriptionSignInRuntime {
     });
   }
 
-  disconnect(provider: SubscriptionProviderId): Promise<void> {
+  disconnect(provider: SubscriptionProviderId, expectedAccountId: string): Promise<boolean> {
     return this.#run(async () => {
       if (!await this.#authorize()) throw failure();
+      const active = await this.#load(provider);
+      // A delayed confirmation must not affect a subsequent login or its pending replacement.
+      if (active?.account.status !== "signed_in" || active.id !== expectedAccountId) return false;
       const pending = this.#attempts.get(provider);
       if (pending?.view.status === "waiting") await this.#finish(pending, "cancelled");
-      const active = await this.#load(provider);
-      if (active === undefined) return;
       const upstreamFailed = await active.client.logout().then(() => false, () => true);
       active.account = await active.client.account().catch((): Account => ({ status: "unknown" }));
       if (active.account.status !== "signed_out") throw failure();
@@ -142,6 +145,7 @@ export class SubscriptionSignInRuntime {
       this.#active.delete(provider);
       await this.#retire(provider, active);
       if (upstreamFailed) throw failure();
+      return true;
     });
   }
 

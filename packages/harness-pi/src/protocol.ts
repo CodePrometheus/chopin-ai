@@ -399,12 +399,13 @@ const SubscriptionMode = union([lit("connect"), lit("switch_account")]);
 const SubscriptionAttemptStatus = union([lit("waiting"), lit("authorized"), lit("cancelled"), lit("expired"), lit("failed")]);
 const SubscriptionAccountStatus = union([lit("signed_in"), lit("signed_out"), lit("unknown")]);
 const SubscriptionEntitlement = union([lit("eligible"), lit("ineligible"), lit("unknown")]);
+const SubscriptionAccountId = str({ pattern: "^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$" });
 const SubscriptionAttempt = obj({
   id: str(), provider: SubscriptionProvider, mode: SubscriptionMode, status: SubscriptionAttemptStatus, challengeAvailable: bool(),
 });
 const SubscriptionAccount = obj({
   provider: SubscriptionProvider, status: SubscriptionAccountStatus, accountLabel: opt(str()), plan: opt(str()),
-  entitlement: opt(SubscriptionEntitlement),
+  entitlement: opt(SubscriptionEntitlement), accountId: opt(SubscriptionAccountId),
 });
 const SubscriptionSnapshot = obj({
   providers: arr(obj({ id: SubscriptionProvider, name: str() })),
@@ -418,7 +419,7 @@ export type SubscriptionSignInSnapshot = Static<typeof SubscriptionSnapshot>;
 
 const SubscriptionStart = obj({ provider: SubscriptionProvider, mode: SubscriptionMode });
 const SubscriptionAttemptId = obj({ attemptId: str({ min: 1 }) });
-const SubscriptionDisconnect = obj({ provider: SubscriptionProvider });
+const SubscriptionDisconnect = obj({ provider: SubscriptionProvider, expectedAccountId: SubscriptionAccountId });
 const SubscriptionChallenge = obj({ attemptId: str({ min: 1 }), operationId: str({ min: 1 }) });
 const SubscriptionsSpec = {
   version: 1, params: {}, hostAddress: () => AgentHost({}),
