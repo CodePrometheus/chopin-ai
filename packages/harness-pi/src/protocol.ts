@@ -394,6 +394,43 @@ export const Credentials: CredentialsContract = evolve(remote("chopin.credential
   (edit) => edit.addMethod("owner", "snapshot", snapshotMethod.args, snapshotMethod.result)
     .addMethod("owner", "applyPersonalCredentialChange", applyPersonalCredentialChange.args, applyPersonalCredentialChange.result));
 
+const SubscriptionProvider = union([lit("qwen"), lit("openai-codex")]);
+const SubscriptionMode = union([lit("connect"), lit("switch_account")]);
+const SubscriptionAttemptStatus = union([lit("waiting"), lit("authorized"), lit("cancelled"), lit("expired"), lit("failed")]);
+const SubscriptionAccountStatus = union([lit("signed_in"), lit("signed_out"), lit("unknown")]);
+const SubscriptionAttempt = obj({
+  id: str(), provider: SubscriptionProvider, mode: SubscriptionMode, status: SubscriptionAttemptStatus, challengeAvailable: bool(),
+});
+const SubscriptionAccount = obj({
+  provider: SubscriptionProvider, status: SubscriptionAccountStatus, accountLabel: opt(str()), plan: opt(str()),
+});
+const SubscriptionSnapshot = obj({
+  providers: arr(obj({ id: SubscriptionProvider, name: str() })),
+  attempts: arr(SubscriptionAttempt), accounts: arr(SubscriptionAccount),
+});
+export type SubscriptionProviderId = Static<typeof SubscriptionProvider>;
+export type SubscriptionSignInMode = Static<typeof SubscriptionMode>;
+export type SubscriptionSignInAttempt = Static<typeof SubscriptionAttempt>;
+export type SubscriptionSignInAccount = Static<typeof SubscriptionAccount>;
+export type SubscriptionSignInSnapshot = Static<typeof SubscriptionSnapshot>;
+
+const SubscriptionStart = obj({ provider: SubscriptionProvider, mode: SubscriptionMode });
+const SubscriptionAttemptId = obj({ attemptId: str({ min: 1 }) });
+const SubscriptionDisconnect = obj({ provider: SubscriptionProvider });
+const SubscriptionChallenge = obj({ attemptId: str({ min: 1 }), operationId: str({ min: 1 }) });
+const SubscriptionsSpec = {
+  version: 1, params: {}, hostAddress: () => AgentHost({}),
+  variants: { owner: { state: {}, methods: {
+    subscriptionSnapshot: method(undefined, SubscriptionSnapshot) as Query<undefined, typeof SubscriptionSnapshot>,
+    startSubscriptionSignIn: method(SubscriptionStart, SubscriptionAttemptId) as Query<typeof SubscriptionStart, typeof SubscriptionAttemptId>,
+    cancelSubscriptionSignIn: method(SubscriptionAttemptId) as Call<typeof SubscriptionAttemptId>,
+    disconnectSubscription: method(SubscriptionDisconnect) as Call<typeof SubscriptionDisconnect>,
+    deliverSubscriptionChallenge: method(SubscriptionChallenge) as Call<typeof SubscriptionChallenge>,
+  } } },
+} as const;
+/** Public account status and operation IDs. The device challenge is delivered privately to the host. */
+export const Subscriptions = remote("chopin.subscriptions", SubscriptionsSpec);
+
 /** An MCP server a client set, and how many tools it offers, or why it offers none yet; never its headers. */
 export const McpServerSchema = obj({ name: str(), url: str(), tools: num(), error: opt(str()) });
 export type McpServerState = Static<typeof McpServerSchema>;
@@ -725,7 +762,7 @@ export function resender(): (text: string, submit: (request: string) => Promise<
 type ContractExport = {
   readonly type: Contract;
   readonly spec: typeof GoalsSpec | typeof GoalSpec | typeof ConversationsSpec | typeof ConversationSpec |
-    typeof CredentialsSpec | typeof McpSpec | typeof EnvironmentSpec | typeof VaultSpec | typeof LoopSpec;
+    typeof CredentialsSpec | typeof SubscriptionsSpec | typeof McpSpec | typeof EnvironmentSpec | typeof VaultSpec | typeof LoopSpec;
 };
 
 /** Application-owned declarations used by native clients and compatibility checks. */
@@ -735,6 +772,7 @@ export const contracts: readonly ContractExport[] = [
   { type: Conversations, spec: ConversationsSpec },
   { type: Conversation, spec: ConversationSpec },
   { type: Credentials, spec: CredentialsSpec },
+  { type: Subscriptions, spec: SubscriptionsSpec },
   { type: Mcp, spec: McpSpec },
   { type: Environment, spec: EnvironmentSpec },
   { type: Vault, spec: VaultSpec },

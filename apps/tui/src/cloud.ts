@@ -10,6 +10,7 @@ import { InitializationConfigurationSchema } from "./initialize-command.js";
 import { JobClient, JobsConfigurationSchema } from "./jobs.js";
 import { PersonalCredentials } from "./personal-credentials.js";
 import { personalModels } from "./personal-models.js";
+import { SubscriptionSignInRuntime } from "./subscription-sign-in.js";
 import { Vault } from "./vault.js";
 
 const text = Type.String({ minLength: 1 });
@@ -21,7 +22,7 @@ export const CloudConfigurationSchema = Type.Object({
   jobs: Type.Object({ transport: JobsConfigurationSchema, domain: JobIdSchema, cwd: text, policyRevision: text, inheritEnv: Type.Boolean(), policy: CommandPolicySchema }, { additionalProperties: false }),
   storage: InitializationConfigurationSchema.properties.storage,
   server: Type.Object({ port: Type.Integer({ minimum: 0, maximum: 65535 }), hostname: Type.Optional(text) }, { additionalProperties: false }),
-  model, reviewModel: model, personalModels: Type.Optional(Type.Boolean()), goalRetryAfterMs: positive,
+  model, reviewModel: model, personalModels: Type.Optional(Type.Boolean()), subscriptionSignIn: Type.Optional(Type.Boolean()), goalRetryAfterMs: positive,
   vaultSyncMs: Type.Integer({ minimum: 1, maximum: 0x7fff_ffff }),
 }, { additionalProperties: false });
 export type CloudConfiguration = Static<typeof CloudConfigurationSchema>;
@@ -42,6 +43,9 @@ export async function openCloudRuntime(configuration: CloudConfiguration, secret
   if (config.personalModels === true && URL.parse(config.control.url)?.protocol !== "https:") {
     throw new Error("personal model credential claims require a trusted HTTPS endpoint");
   }
+  if (config.subscriptionSignIn === true && config.personalModels !== true) {
+    throw new Error("hosted subscription sign-in requires the personal model runtime");
+  }
   if (config.jobs.transport.scopeId !== config.control.agentId) throw new Error("the command and control bindings name different agents");
   for (const path of [config.volume, config.home]) if (!isAbsolute(path)) throw new Error("cloud runtime locations must be absolute");
   separate(resolve(config.volume), resolve(config.home));
@@ -49,12 +53,13 @@ export async function openCloudRuntime(configuration: CloudConfiguration, secret
   let key: Buffer | undefined = secrets.serviceKey === undefined ? undefined : Buffer.from(secrets.serviceKey); secrets.serviceKey?.fill(0);
   let control: ControlHost | undefined; let broker: JobClient | undefined; let vault: Vault | undefined;
   let credentials: PersonalCredentials | undefined;
+  let subscriptions: SubscriptionSignInRuntime | undefined;
   let storage: Awaited<ReturnType<typeof openEncryptedStore>> | undefined;
   let service: AgentService | undefined; let server: Listening | undefined;
   let admitted = false; let closing: Promise<void> | undefined;
   const close = () => closing ??= (async () => {
     const failures: unknown[] = [];
-    for (const action of [() => server?.close(), () => service?.close(context), () => credentials?.close(), () => storage?.close(context), () => admitted ? vault?.close() : undefined, () => broker?.close(), () => control?.close()]) {
+    for (const action of [() => server?.close(), () => service?.close(context), () => subscriptions?.close(), () => credentials?.close(), () => storage?.close(context), () => admitted ? vault?.close() : undefined, () => broker?.close(), () => control?.close()]) {
       try { await action(); } catch (error) { failures.push(error); }
     }
     key?.fill(0);
@@ -73,6 +78,14 @@ export async function openCloudRuntime(configuration: CloudConfiguration, secret
     try { storage = await openEncryptedStore({ ...config.storage, ...protectedStore, anchor }); }
     finally { protectedStore.key.fill(0); }
     const owner = config.control.owner;
+    const authorizeOwner = async (ctx?: Context) => (await control!.authorize({ action: "owner" }, ctx?.abortSignal)).allowed;
+    if (config.subscriptionSignIn === true) {
+      subscriptions = new SubscriptionSignInRuntime(
+        join(config.home, "subscription-profiles"), config.volume, key,
+        JSON.stringify([config.control.agentId, owner]), () => vault!.sync(), authorizeOwner, dependencies.report,
+      );
+    }
+    const signIn = subscriptions;
     const selected = [config.model, config.reviewModel];
     const catalog = await dependencies.models(config.home, config.personalModels === true);
     if (config.personalModels === true) {
@@ -81,7 +94,7 @@ export async function openCloudRuntime(configuration: CloudConfiguration, secret
       for (const model of selected) if (catalog.getModel(model.provider, model.modelId) === undefined) throw new Error("a configured execution or review model is not available");
     }
     const personal = credentials;
-    const models = personal === undefined ? catalog : personalModels(catalog, selected, personal);
+    const models = personal === undefined ? catalog : personalModels(catalog, signIn === undefined ? selected : [], personal);
     broker = await JobClient.connect(config.jobs.transport, secrets.jobToken);
     const requireOwner = (given: string) => { if (given !== owner) throw new Error("this cloud runtime belongs to another execution owner"); };
     let commands: CommandJobs;
@@ -96,8 +109,22 @@ export async function openCloudRuntime(configuration: CloudConfiguration, secret
           return {
             execution: config.model,
             review: config.reviewModel,
-            authorize: async (ctx: Context) => (await control!.authorize({ action: "owner" }, ctx.abortSignal)).allowed,
+            authorize: authorizeOwner,
             claim: (operationId: string, ctx: Context) => control!.claimPersonalCredentialChange(operationId, ctx.abortSignal),
+          };
+        },
+      }),
+      ...(signIn !== undefined && {
+        subscriptionSignIn: (given: string) => {
+          requireOwner(given);
+          return {
+            authorize: authorizeOwner,
+            snapshot: () => signIn.snapshot(),
+            start: signIn.start.bind(signIn),
+            cancel: signIn.cancel.bind(signIn),
+            disconnect: signIn.disconnect.bind(signIn),
+            deliver: (attemptId: string, operationId: string, ctx: Context) =>
+              signIn.deliver(attemptId, (challenge) => control!.deliverSubscriptionChallenge(attemptId, operationId, challenge, ctx.abortSignal)),
           };
         },
       }),

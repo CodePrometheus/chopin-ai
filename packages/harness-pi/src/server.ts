@@ -18,7 +18,7 @@ import { ClientContextDoc } from "./client-context.js";
 import { ListingDoc, ModeDoc, NameDoc } from "./mode.js";
 import { isRunning, userText } from "./acp.js";
 import {
-  AgentHost, Conversation, Conversations, Credentials, Environment, Goal, Goals, Loop, Mcp, REWIND_KIND, Vault,
+  AgentHost, Conversation, Conversations, Credentials, Environment, Goal, Goals, Loop, Mcp, REWIND_KIND, Subscriptions, Vault,
   errorChain, errorText, type Image, type LoginEvent, type LoginPrompt, type LoginState, type LoopControl, type Principal, type Running,
 } from "./protocol.js";
 import { backoff } from "./backoff.js";
@@ -593,6 +593,23 @@ export async function createAgentHost(source: AgentService | Sealed, loop?: Loop
         }
       };
     }, { accepts: { 2: {} }, untraced: true });
+
+    provider.serve(Subscriptions, (_input, principal) => {
+      const owner = ownerOf(principal);
+      const access = (ctx: Ctx<Principal>) => current().subscriptions(owner, durable(ctx));
+      return {
+        variant: "owner", members: {
+          subscriptionSnapshot: async (ctx) => (await access(ctx)).snapshot(),
+          startSubscriptionSignIn: async ({ provider, mode }, ctx) => ({ attemptId: await (await access(ctx)).start(provider, mode) }),
+          cancelSubscriptionSignIn: async ({ attemptId }, ctx) => { await (await access(ctx)).cancel(attemptId); return null; },
+          disconnectSubscription: async ({ provider }, ctx) => { await (await access(ctx)).disconnect(provider); return null; },
+          deliverSubscriptionChallenge: async ({ attemptId, operationId }, ctx) => {
+            await (await access(ctx)).deliver(attemptId, operationId, durable(ctx));
+            return null;
+          },
+        },
+      };
+    }, { untraced: true });
 
     provider.serve(Loop, (_input, principal) => {
       ownerOf(principal);

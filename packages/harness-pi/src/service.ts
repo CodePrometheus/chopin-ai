@@ -38,7 +38,7 @@ import { layerExtension, pinLayerVersions, type LayerSource } from "./layer.js";
 import { mcpExtensionName, McpServers } from "./mcp.js";
 import { drain } from "./pages.js";
 import { ListingDoc, modeExtension, NameDoc, withMode } from "./mode.js";
-import { unansweredText, type Loaded, type McpServerState, type ModelChoices, type ModelSettings, type ProviderEntry, type Summary } from "./protocol.js";
+import { unansweredText, type Loaded, type McpServerState, type ModelChoices, type ModelSettings, type ProviderEntry, type SubscriptionProviderId, type SubscriptionSignInMode, type SubscriptionSignInSnapshot, type Summary } from "./protocol.js";
 import { clientContext } from "./client-context.js";
 import { contextFiles, projectContext } from "./project-context.js";
 import { runShell, ShellEntry, type ShellRun } from "./shell.js";
@@ -59,6 +59,15 @@ const MCP_RETRY_MS = 30_000;
 const FIXED_CREDENTIALS = "this service takes its credentials from where it runs, not from its clients";
 const CLAIM_REQUIRED = "the hosted service only accepts personal model credential changes from its trusted host";
 type PersonalCredentialChange = { kind: "set"; provider: string; key: string } | { kind: "remove"; provider: string };
+
+interface SubscriptionSignIn {
+  authorize(context: Context): Promise<boolean>;
+  snapshot(): Promise<SubscriptionSignInSnapshot>;
+  start(provider: SubscriptionProviderId, mode: SubscriptionSignInMode): Promise<string>;
+  cancel(attemptId: string): Promise<void>;
+  disconnect(provider: SubscriptionProviderId): Promise<void>;
+  deliver(attemptId: string, operationId: string, context: Context): Promise<void>;
+}
 
 /** Where the workspace image keeps the execution daemon. */
 export const DAEMON_PATH = "/usr/local/bin/pi-env";
@@ -85,6 +94,8 @@ export interface AgentServiceOptions {
     authorize(context: Context): Promise<boolean>;
     claim(operationId: string, context: Context): Promise<PersonalCredentialChange | null>;
   };
+  /** Official subscription sign-in, bound to the hosted owner's current writer. */
+  subscriptionSignIn?: (owner: string) => SubscriptionSignIn;
   /** What a new conversation of an owner runs with, such as its model; asked again for each, so a default may change. */
   agent?: AgentChange | ((owner: string) => Promise<AgentChange | undefined>);
   /** The portable layer every agent loads. */
@@ -453,6 +464,13 @@ export class AgentService {
   async authorizeModelSettings(owner: string, context: Context): Promise<void> {
     const settings = this.#options.personalModelSettings?.(owner);
     if (settings !== undefined && !await settings.authorize(context)) throw refusal("forbidden", "current owner authority is required");
+  }
+
+  async subscriptions(owner: string, context: Context): Promise<SubscriptionSignIn> {
+    const signIn = this.#options.subscriptionSignIn?.(owner);
+    if (signIn === undefined) throw refusal("credential_refused", FIXED_CREDENTIALS);
+    if (!await signIn.authorize(context)) throw refusal("forbidden", "current owner authority is required");
+    return signIn;
   }
 
   /** Read the credential metadata once and derive both uses from the same view of the static hosted catalog. */

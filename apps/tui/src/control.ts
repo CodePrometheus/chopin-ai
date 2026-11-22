@@ -71,6 +71,19 @@ export class ControlHost {
     }
   }
 
+  async deliverSubscriptionChallenge(
+    attemptId: string, operationId: string, challenge: { verificationUrl: string; displayCode?: string }, signal?: AbortSignal,
+  ): Promise<void> {
+    if (!this.#transport.secure) throw new Error("subscription challenges require a trusted HTTPS endpoint");
+    try {
+      const response = await this.#request("personal-model/subscription-challenge", { attemptId, operationId, ...challenge }, false, signal);
+      await response?.body?.cancel();
+      if (response?.status !== 204) throw new Error("the control host did not acknowledge the subscription challenge");
+    } catch {
+      throw new Error("the subscription challenge could not be delivered to the trusted host");
+    }
+  }
+
   /** Releases only the current admitted execution writer's key over the private host transport. */
   async executionKey(signal?: AbortSignal): Promise<{ revision: number; key: Buffer }> {
     const received = await this.#required("execution/key", {}, runtimeKey, signal);
