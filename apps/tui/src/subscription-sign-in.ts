@@ -285,8 +285,8 @@ async function openClient(provider: SubscriptionProviderId, profile: string): Pr
     let id: string | undefined;
     return {
       account: async () => {
-        const { status, accountLabel, plan } = await client.account();
-        return { status, ...(accountLabel !== null && { accountLabel }), ...(plan !== undefined && { plan }) };
+        const { status, accountLabel, plan, entitlement } = await client.account();
+        return { status, entitlement, ...(accountLabel !== null && { accountLabel }), ...(plan !== undefined && { plan }) };
       },
       begin: async () => { id = (await client.startLogin()).id; },
       poll: async () => {

@@ -398,11 +398,13 @@ const SubscriptionProvider = union([lit("qwen"), lit("openai-codex")]);
 const SubscriptionMode = union([lit("connect"), lit("switch_account")]);
 const SubscriptionAttemptStatus = union([lit("waiting"), lit("authorized"), lit("cancelled"), lit("expired"), lit("failed")]);
 const SubscriptionAccountStatus = union([lit("signed_in"), lit("signed_out"), lit("unknown")]);
+const SubscriptionEntitlement = union([lit("eligible"), lit("ineligible"), lit("unknown")]);
 const SubscriptionAttempt = obj({
   id: str(), provider: SubscriptionProvider, mode: SubscriptionMode, status: SubscriptionAttemptStatus, challengeAvailable: bool(),
 });
 const SubscriptionAccount = obj({
   provider: SubscriptionProvider, status: SubscriptionAccountStatus, accountLabel: opt(str()), plan: opt(str()),
+  entitlement: opt(SubscriptionEntitlement),
 });
 const SubscriptionSnapshot = obj({
   providers: arr(obj({ id: SubscriptionProvider, name: str() })),
