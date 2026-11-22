@@ -355,10 +355,23 @@ const CredentialsV2Spec = {
     },
   },
 } as const;
-const snapshotMethod = method(undefined, ModelSettingsSchema) as Query<undefined, typeof ModelSettingsSchema>;
+const snapshotMethod: Query<undefined, typeof ModelSettingsSchema> = method(undefined, ModelSettingsSchema);
 const PersonalCredentialChangeArgs = obj({ operationId: str({ pattern: "^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$" }) });
-const applyPersonalCredentialChange = method(PersonalCredentialChangeArgs) as Call<typeof PersonalCredentialChangeArgs>;
-const CredentialsSpec = {
+const applyPersonalCredentialChange: Call<typeof PersonalCredentialChangeArgs> = method(PersonalCredentialChangeArgs);
+type CredentialsVariants = {
+  readonly owner: {
+    readonly state: typeof CredentialsV2Spec.variants.owner.state;
+    readonly methods: typeof CredentialsV2Spec.variants.owner.methods & {
+      readonly snapshot: Query<undefined, typeof ModelSettingsSchema>;
+      readonly applyPersonalCredentialChange: Call<typeof PersonalCredentialChangeArgs>;
+    };
+  };
+};
+type CredentialsDeclaration = Omit<typeof CredentialsV2Spec, "version" | "variants"> & {
+  readonly version: 3;
+  readonly variants: CredentialsVariants;
+};
+const CredentialsSpec: CredentialsDeclaration = {
   ...CredentialsV2Spec,
   version: 3,
   variants: {
@@ -367,14 +380,14 @@ const CredentialsSpec = {
       methods: { ...CredentialsV2Spec.variants.owner.methods, snapshot: snapshotMethod, applyPersonalCredentialChange },
     },
   },
-} as const;
+};
 type CredentialsContract = Contract<{
   kind: "remote";
   name: "chopin.credentials";
   params: typeof CredentialsSpec.params;
   history: [
     { version: "2"; variants: typeof CredentialsV2Spec.variants; changes: never },
-    { version: "3"; variants: typeof CredentialsSpec.variants; changes: readonly ["owner", "snapshot" | "applyPersonalCredentialChange", "args" | "result"] },
+    { version: "3"; variants: CredentialsVariants; changes: readonly ["owner", "snapshot" | "applyPersonalCredentialChange", "args" | "result"] },
   ];
 }>;
 export const Credentials: CredentialsContract = evolve(remote("chopin.credentials", CredentialsV2Spec),
