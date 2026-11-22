@@ -9,10 +9,28 @@ FROM scratch AS qwen-arm64
 ADD --checksum=sha256:bea39bd732c1c9cbc1054da1f9f6c7a28848e8e72fb916b7eade488aa36b7e38 \
     https://github.com/QwenLM/qwen-code/releases/download/v0.28.3/qwen-code-linux-arm64.tar.gz /qwen-code.tar.gz
 
+FROM scratch AS codex-amd64
+ADD --checksum=sha256:01baa2e47809f8597be5b2f8abd4e4dfe3fb5bcb6e504c2fbaaad97056c15e8d \
+    https://github.com/openai/codex/releases/download/rust-v0.171.0/codex-x86_64-unknown-linux-musl.tar.gz /codex.tar.gz
+
+FROM scratch AS codex-arm64
+ADD --checksum=sha256:bcf50b836385e51bd2976ab2bbe92b1b08a1cbe37712eb8dbe378aa78d24871c \
+    https://github.com/openai/codex/releases/download/rust-v0.171.0/codex-aarch64-unknown-linux-musl.tar.gz /codex.tar.gz
+
 FROM qwen-${TARGETARCH} AS qwen-archive
-FROM ${NODE_IMAGE} AS qwen-client
+FROM codex-${TARGETARCH} AS codex-archive
+FROM ${NODE_IMAGE} AS subscription-clients
+ARG TARGETARCH
 RUN --network=none --mount=type=bind,from=qwen-archive,source=/qwen-code.tar.gz,target=/tmp/qwen-code.tar.gz \
     tar --extract --gzip --file=/tmp/qwen-code.tar.gz --directory=/opt --no-same-owner
+RUN --network=none --mount=type=bind,from=codex-archive,source=/codex.tar.gz,target=/tmp/codex.tar.gz \
+    set -eu; \
+    case "${TARGETARCH}" in \
+        amd64) binary=codex-x86_64-unknown-linux-musl ;; \
+        arm64) binary=codex-aarch64-unknown-linux-musl ;; \
+    esac; \
+    tar --extract --gzip --to-stdout --file=/tmp/codex.tar.gz "$binary" > /usr/local/bin/codex; \
+    chmod 0755 /usr/local/bin/codex
 
 FROM ${RUST_IMAGE} AS native
 ARG TARGETARCH
@@ -49,7 +67,8 @@ RUN --mount=type=cache,id=chopin-pnpm-store,target=/pnpm/store,sharing=locked \
     pnpm --filter=chopin-ai... install --store-dir=/pnpm/store --prod --frozen-lockfile --ignore-scripts
 
 FROM production AS runtime
-COPY --from=qwen-client /opt/qwen-code/ /opt/qwen-code/
+COPY --from=subscription-clients /opt/qwen-code/ /opt/qwen-code/
+COPY --from=subscription-clients /usr/local/bin/codex /usr/local/bin/codex
 COPY --from=compiled /app/packages/core/dist/ packages/core/dist/
 COPY --from=compiled /app/packages/workspace/dist/ packages/workspace/dist/
 COPY --from=compiled --chmod=0755 /app/packages/workspace/loopback-listener.sh packages/workspace/loopback-listener.sh
@@ -59,6 +78,7 @@ COPY --from=native --chmod=0444 /native-output/chopin-storage.node packages/harn
 RUN chmod -R a+rX /app
 USER node
 RUN --network=none qwen_version="$(/opt/qwen-code/bin/qwen --version)" && test "$qwen_version" = "0.28.3"
+RUN --network=none codex_version="$(/usr/local/bin/codex --version)" && test "$codex_version" = "codex-cli 0.171.0"
 RUN --network=none node -e 'const binding = require("/app/packages/harness-pi/native/chopin-storage.node"); if (typeof binding.openNativeStore !== "function") throw new Error("native storage ABI is unavailable");'
 RUN --network=none node -e 'const {spawnSync} = require("node:child_process"); const result = spawnSync(process.execPath, ["/app/apps/tui/dist/bin.js", "cloud", "--supervise"], {encoding:"utf8"}); if (result.error || result.status !== 1 || result.stdout !== "" || !result.stderr.includes("--config")) throw new Error("cloud CLI did not require its trusted configuration");'
 ENTRYPOINT ["node", "/app/apps/tui/dist/bin.js"]
