@@ -1,7 +1,7 @@
 import { mkdir, realpath } from "node:fs/promises";
 import { isAbsolute, join, resolve, sep } from "node:path";
 import { BACKGROUND_CONTEXT as context, type Context } from "@earendil-works/chord/context";
-import type { Models } from "@earendil-works/pi-ai";
+import { createModels, type Models } from "@earendil-works/pi-ai";
 import { AgentService, CommandJobs, CommandPolicySchema, JobIdSchema, launchToken, listen, openEncryptedStore, verifyPublishedArtifact, type GoalOptions, type Listening } from "@chopin-ai/harness-pi";
 import { Type, type Static } from "typebox";
 import { Value } from "typebox/value";
@@ -23,7 +23,7 @@ export const CloudConfigurationSchema = Type.Object({
   jobs: Type.Object({ transport: JobsConfigurationSchema, domain: JobIdSchema, cwd: text, policyRevision: text, inheritEnv: Type.Boolean(), policy: CommandPolicySchema }, { additionalProperties: false }),
   storage: InitializationConfigurationSchema.properties.storage,
   server: Type.Object({ port: Type.Integer({ minimum: 0, maximum: 65535 }), hostname: Type.Optional(text) }, { additionalProperties: false }),
-  model, reviewModel: model, personalModels: Type.Optional(Type.Boolean()), subscriptionSignIn: Type.Optional(Type.Boolean()),
+  model: Type.Optional(model), reviewModel: Type.Optional(model), personalModels: Type.Optional(Type.Boolean()), subscriptionSignIn: Type.Optional(Type.Boolean()),
   subscriptionProviders: Type.Optional(Type.Array(Type.Literal("qwen"), { maxItems: 1 })), goalRetryAfterMs: positive,
   vaultSyncMs: Type.Integer({ minimum: 1, maximum: 0x7fff_ffff }),
 }, { additionalProperties: false });
@@ -51,7 +51,13 @@ export async function openCloudRuntime(configuration: CloudConfiguration, secret
   if ((config.subscriptionProviders?.length ?? 0) !== 0 && config.subscriptionSignIn !== true) {
     throw new Error("an enabled subscription provider requires hosted subscription sign-in");
   }
-  if ([config.model, config.reviewModel].some(({ provider }) => !hostedProviderAllowed(provider))) {
+  const selection = config.model === undefined || config.reviewModel === undefined ? undefined
+    : { execution: config.model, review: config.reviewModel };
+  if ((config.model === undefined) !== (config.reviewModel === undefined) || selection === undefined && config.personalModels === true) {
+    throw new Error("cloud execution and review models must be configured together");
+  }
+  const selected = selection === undefined ? [] : [selection.execution, selection.review];
+  if (selected.some(({ provider }) => !hostedProviderAllowed(provider))) {
     throw new Error("the configured model provider is not available for hosted execution or review");
   }
   if (config.jobs.transport.scopeId !== config.control.agentId) throw new Error("the command and control bindings name different agents");
@@ -95,8 +101,8 @@ export async function openCloudRuntime(configuration: CloudConfiguration, secret
       );
     }
     const signIn = subscriptions;
-    const selected = [config.model, config.reviewModel];
-    const catalog = hostedModels(await dependencies.models(config.home, config.personalModels === true));
+    const catalog = selection === undefined ? createModels({ authContext: { env: async () => undefined, fileExists: async () => false } })
+      : hostedModels(await dependencies.models(config.home, config.personalModels === true));
     if (config.personalModels === true) {
       credentials = new PersonalCredentials(join(config.volume, "personal-credentials"), key, config.control.agentId, owner);
     } else {
@@ -111,13 +117,13 @@ export async function openCloudRuntime(configuration: CloudConfiguration, secret
       dataDir: join(config.home, "execution"), startPaused: true, allowClientMcp: false,
       store: async (given) => { requireOwner(given); return storage!; },
       models: (given) => { requireOwner(given); return models; },
-      ...(personal !== undefined && {
+      ...(personal !== undefined && selection !== undefined && {
         credentials: (given: string) => { requireOwner(given); return personal; },
         personalModelSettings: (given: string) => {
           requireOwner(given);
           return {
-            execution: config.model,
-            review: config.reviewModel,
+            execution: selection.execution,
+            review: selection.review,
             authorize: authorizeOwner,
             claim: (operationId: string, ctx: Context) => control!.claimPersonalCredentialChange(operationId, ctx.abortSignal),
           };
@@ -145,10 +151,17 @@ export async function openCloudRuntime(configuration: CloudConfiguration, secret
         }) });
         return [commands.extension];
       },
-      agent: async (given) => { requireOwner(given); return { model: config.model, cwd: config.jobs.cwd, extensions: [commands.extension] }; },
+      agent: async (given) => {
+        requireOwner(given);
+        return { model: selection?.execution ?? null, cwd: config.jobs.cwd, extensions: [commands.extension] };
+      },
       goals: (given) => {
         requireOwner(given);
-        return { authorize: (request, ctx) => control!.authorize(request, ctx.abortSignal), review: (personal === undefined ? dependencies.review : undefined) ?? { model: config.reviewModel },
+        return {
+          authorize: async (request, ctx) => selection === undefined && request.action !== "owner"
+            ? { allowed: false, reason: "this workspace has no configured execution and review models" }
+            : control!.authorize(request, ctx.abortSignal),
+          review: selection === undefined ? {} : (personal === undefined ? dependencies.review : undefined) ?? { model: selection.review },
           settled: async (goal, ctx) => commands.settled((await service!.goals(owner)).store, goal, ctx),
           artifact: async (goal, artifact, sourceTaskId, ctx) => verifyPublishedArtifact((await service!.goals(owner)).store, goal.goalId, artifact, sourceTaskId, ctx),
           retryAfterMs: config.goalRetryAfterMs, report: dependencies.report,

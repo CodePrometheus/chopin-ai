@@ -9,7 +9,7 @@ import { RunAudit } from "./audit.js";
 import { GoalDoc, setBlock, type GoalCheckpoint, type GoalOutcome, type GoalStore } from "./store.js";
 
 /** Explicit host selection, persisted with each review before any reviewer request. */
-export interface GoalReviewOptions { model: ModelRef; }
+export interface GoalReviewOptions { model?: ModelRef; }
 type ReviewInput = { reviewId: string; goal: GoalSnapshot; submission: number; before: number; model: ModelRef; instructions: string; retryAfterMs: number };
 type ReviewState = { phase: "prepare" } | { phase: "submit"; attempt: number } | { phase: "run"; submission: number; attempt: number };
 type ReviewRecord = {
@@ -56,7 +56,7 @@ export class GoalReviewer {
   readonly #validate: (goal: GoalSnapshot, decision: GoalDecision, context: Context) => Promise<void>;
 
   constructor(options: GoalReviewOptions, retryAfterMs: number, store: () => GoalStore, guard: () => Extension, validate: (goal: GoalSnapshot, decision: GoalDecision, context: Context) => Promise<void>) {
-    if (options.model.provider.trim() === "" || options.model.modelId.trim() === "") throw new Error("a review model is required");
+    if (options.model !== undefined && (options.model.provider.trim() === "" || options.model.modelId.trim() === "")) throw new Error("a valid review model is required");
     this.#options = options; this.#retryAfterMs = retryAfterMs; this.#store = store; this.#guard = guard; this.#validate = validate;
     const history = defineTool({ name: "goal_history", description: "Read a page of the immutable source history for this review. Round-trip the returned cursor to continue.",
       parameters: obj({ limit: int({ min: 1, max: Number.MAX_SAFE_INTEGER }), cursor: opt(map(unknown())) }), replay: "safe", callers: ["model"],
@@ -111,10 +111,12 @@ export class GoalReviewer {
     await runtime.commit(async (tx) => {
       const record = await tx.doc(ReviewDoc, reviewId, null);
       if (record.input === null) {
+        const model = this.#options.model;
+        if (model === undefined) throw new Error("this workspace has no configured review model");
         const before = await tx.latestEntryId(goal.conversationId as ConversationId);
         if (before === undefined) throw new Error("review source history is missing");
         const task = await tx.createTask(this.task, { reviewId }, { ownership: { kind: "task", taskId: runtime.taskId } });
-        record.input = { reviewId, goal: structuredClone(goal), submission, before: Number(before), model: structuredClone(this.#options.model), instructions: POLICY, retryAfterMs: this.#retryAfterMs };
+        record.input = { reviewId, goal: structuredClone(goal), submission, before: Number(before), model: structuredClone(model), instructions: POLICY, retryAfterMs: this.#retryAfterMs };
         record.task = Number(task);
       } else if (record.input.goal.goalId !== goal.goalId || record.input.submission !== submission || record.input.goal.conversationId !== goal.conversationId) throw new Error("review identity belongs to another source");
       taskId = record.task;
