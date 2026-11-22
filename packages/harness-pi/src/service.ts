@@ -473,17 +473,20 @@ export class AgentService {
     return signIn;
   }
 
-  /** Read the credential metadata once and derive both uses from the same view of the static hosted catalog. */
+  /** Derives both configured uses from one snapshot of the available hosted models. */
   async modelSettings(owner: string, context: Context = BACKGROUND_CONTEXT): Promise<ModelSettings> {
     const settings = this.#options.personalModelSettings?.(owner);
     if (settings === undefined) throw refusal("credential_refused", FIXED_CREDENTIALS);
     await this.authorizeModelSettings(owner, context);
-    const providers = this.catalog(owner);
+    const subscriptionMode = this.#options.subscriptionSignIn?.(owner) !== undefined;
+    const providers = subscriptionMode ? [] : this.catalog(owner);
     const admitted = new Set(providers.map(({ id }) => id));
-    const credentials = (await this.credentials(owner)).flatMap(({ providerId, type }) =>
+    const credentials = subscriptionMode ? [] : (await this.credentials(owner)).flatMap(({ providerId, type }) =>
       admitted.has(providerId) ? [{ provider: providerId, type }] : []);
     const connected = new Set(credentials.map(({ provider }) => provider));
-    const models = this.#options.models(owner).getModels().filter(({ provider }) => connected.has(provider)).map(modelChoice);
+    const registry = this.#options.models(owner);
+    const available = subscriptionMode ? await registry.getAvailable() : registry.getModels().filter(({ provider }) => connected.has(provider));
+    const models = available.map(modelChoice);
     const usable = ({ provider, modelId }: ModelRef) => models.some((model) => model.provider === provider && model.modelId === modelId) ? { provider, modelId } : null;
     return { providers, credentials, models, execution: usable(settings.execution), review: usable(settings.review) };
   }
