@@ -833,8 +833,8 @@
       ]
     },
     "chopin.credentials": {
-      "version": 2,
-      "fingerprint": "e069db4271972dd5",
+      "version": 3,
+      "fingerprint": "48e109a17d648cf2",
       "address": {
         "kind": "chopin",
         "params": {}
@@ -849,10 +849,12 @@
           ],
           "methods": [
             "answer",
+            "applyPersonalCredentialChange",
             "cancelLogin",
             "catalog",
             "remove",
             "setKey",
+            "snapshot",
             "startLogin"
           ],
           "schemas": {
@@ -1286,6 +1288,217 @@
                 "result": {
                   "type": "null"
                 }
+              },
+              "snapshot": {
+                "args": {
+                  "type": "null"
+                },
+                "result": {
+                  "type": "object",
+                  "properties": {
+                    "providers": {
+                      "type": "array",
+                      "items": {
+                        "type": "object",
+                        "properties": {
+                          "id": {
+                            "type": "string"
+                          },
+                          "name": {
+                            "type": "string"
+                          },
+                          "ways": {
+                            "type": "array",
+                            "items": {
+                              "type": "object",
+                              "properties": {
+                                "type": {
+                                  "anyOf": [
+                                    {
+                                      "type": "string",
+                                      "const": "api_key"
+                                    },
+                                    {
+                                      "type": "string",
+                                      "const": "oauth"
+                                    }
+                                  ]
+                                },
+                                "name": {
+                                  "type": "string"
+                                },
+                                "subscription": {
+                                  "type": "boolean"
+                                }
+                              },
+                              "required": [
+                                "type",
+                                "name",
+                                "subscription"
+                              ],
+                              "additionalProperties": false
+                            }
+                          },
+                          "hosts": {
+                            "type": "array",
+                            "items": {
+                              "type": "string"
+                            }
+                          }
+                        },
+                        "required": [
+                          "id",
+                          "name",
+                          "ways",
+                          "hosts"
+                        ],
+                        "additionalProperties": false
+                      }
+                    },
+                    "credentials": {
+                      "type": "array",
+                      "items": {
+                        "type": "object",
+                        "properties": {
+                          "provider": {
+                            "type": "string"
+                          },
+                          "type": {
+                            "anyOf": [
+                              {
+                                "type": "string",
+                                "const": "api_key"
+                              },
+                              {
+                                "type": "string",
+                                "const": "oauth"
+                              }
+                            ]
+                          }
+                        },
+                        "required": [
+                          "provider",
+                          "type"
+                        ],
+                        "additionalProperties": false
+                      }
+                    },
+                    "models": {
+                      "type": "array",
+                      "items": {
+                        "type": "object",
+                        "properties": {
+                          "provider": {
+                            "type": "string"
+                          },
+                          "modelId": {
+                            "type": "string"
+                          },
+                          "name": {
+                            "type": "string"
+                          },
+                          "contextWindow": {
+                            "type": "number"
+                          },
+                          "images": {
+                            "type": "boolean"
+                          },
+                          "thinkingLevels": {
+                            "type": "array",
+                            "items": {
+                              "type": "string"
+                            }
+                          }
+                        },
+                        "required": [
+                          "provider",
+                          "modelId",
+                          "name",
+                          "contextWindow",
+                          "images",
+                          "thinkingLevels"
+                        ],
+                        "additionalProperties": false
+                      }
+                    },
+                    "execution": {
+                      "anyOf": [
+                        {
+                          "type": "object",
+                          "properties": {
+                            "provider": {
+                              "type": "string",
+                              "minLength": 1
+                            },
+                            "modelId": {
+                              "type": "string",
+                              "minLength": 1
+                            }
+                          },
+                          "required": [
+                            "provider",
+                            "modelId"
+                          ],
+                          "additionalProperties": false
+                        },
+                        {
+                          "type": "null"
+                        }
+                      ]
+                    },
+                    "review": {
+                      "anyOf": [
+                        {
+                          "type": "object",
+                          "properties": {
+                            "provider": {
+                              "type": "string",
+                              "minLength": 1
+                            },
+                            "modelId": {
+                              "type": "string",
+                              "minLength": 1
+                            }
+                          },
+                          "required": [
+                            "provider",
+                            "modelId"
+                          ],
+                          "additionalProperties": false
+                        },
+                        {
+                          "type": "null"
+                        }
+                      ]
+                    }
+                  },
+                  "required": [
+                    "providers",
+                    "credentials",
+                    "models",
+                    "execution",
+                    "review"
+                  ],
+                  "additionalProperties": false
+                }
+              },
+              "applyPersonalCredentialChange": {
+                "args": {
+                  "type": "object",
+                  "properties": {
+                    "operationId": {
+                      "type": "string",
+                      "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$"
+                    }
+                  },
+                  "required": [
+                    "operationId"
+                  ],
+                  "additionalProperties": false
+                },
+                "result": {
+                  "type": "null"
+                }
               }
             }
           }
@@ -1366,8 +1579,8 @@
       ]
     },
     "chopin.goal": {
-      "version": 2,
-      "fingerprint": "8348f5c9205b96ce",
+      "version": 3,
+      "fingerprint": "35b2ad421cc03915",
       "address": {
         "kind": "chopin",
         "params": {}
@@ -1384,7 +1597,10 @@
           "state": [
             "snapshot"
           ],
-          "methods": [],
+          "methods": [
+            "artifactContent",
+            "artifacts"
+          ],
           "schemas": {
             "state": {
               "snapshot": {
@@ -1620,7 +1836,115 @@
                 "additionalProperties": false
               }
             },
-            "methods": {}
+            "methods": {
+              "artifacts": {
+                "args": {
+                  "type": "null"
+                },
+                "result": {
+                  "type": "array",
+                  "items": {
+                    "type": "object",
+                    "properties": {
+                      "artifactId": {
+                        "type": "string",
+                        "minLength": 1
+                      },
+                      "goalId": {
+                        "type": "string",
+                        "minLength": 1
+                      },
+                      "operationId": {
+                        "type": "string",
+                        "minLength": 1
+                      },
+                      "name": {
+                        "type": "string",
+                        "minLength": 1
+                      },
+                      "sha256": {
+                        "type": "string",
+                        "pattern": "^[a-f0-9]{64}$"
+                      },
+                      "sizeBytes": {
+                        "type": "integer",
+                        "minimum": 0,
+                        "maximum": 9007199254740991
+                      }
+                    },
+                    "required": [
+                      "artifactId",
+                      "goalId",
+                      "operationId",
+                      "name",
+                      "sha256",
+                      "sizeBytes"
+                    ],
+                    "additionalProperties": false
+                  }
+                }
+              },
+              "artifactContent": {
+                "args": {
+                  "type": "object",
+                  "properties": {
+                    "artifactId": {
+                      "type": "string",
+                      "minLength": 1
+                    },
+                    "offset": {
+                      "type": "integer",
+                      "minimum": 0,
+                      "maximum": 9007199254740991
+                    }
+                  },
+                  "required": [
+                    "artifactId",
+                    "offset"
+                  ],
+                  "additionalProperties": false
+                },
+                "result": {
+                  "anyOf": [
+                    {
+                      "type": "object",
+                      "properties": {
+                        "offset": {
+                          "type": "integer",
+                          "minimum": 0,
+                          "maximum": 9007199254740991
+                        },
+                        "data": {
+                          "type": "string",
+                          "pattern": "^[A-Za-z0-9_-]*$"
+                        },
+                        "nextOffset": {
+                          "anyOf": [
+                            {
+                              "type": "integer",
+                              "minimum": 1,
+                              "maximum": 9007199254740991
+                            },
+                            {
+                              "type": "null"
+                            }
+                          ]
+                        }
+                      },
+                      "required": [
+                        "offset",
+                        "data",
+                        "nextOffset"
+                      ],
+                      "additionalProperties": false
+                    },
+                    {
+                      "type": "null"
+                    }
+                  ]
+                }
+              }
+            }
           }
         }
       ]
@@ -2957,6 +3281,335 @@
                   },
                   "required": [
                     "name"
+                  ],
+                  "additionalProperties": false
+                },
+                "result": {
+                  "type": "null"
+                }
+              }
+            }
+          }
+        }
+      ]
+    },
+    "chopin.subscriptions": {
+      "version": 1,
+      "fingerprint": "44790860530a1305",
+      "address": {
+        "kind": "chopin",
+        "params": {}
+      },
+      "params": {},
+      "variants": [
+        {
+          "name": "owner",
+          "state": [],
+          "methods": [
+            "cancelSubscriptionSignIn",
+            "deliverSubscriptionChallenge",
+            "disconnectSubscription",
+            "startSubscriptionSignIn",
+            "subscriptionSnapshot"
+          ],
+          "schemas": {
+            "state": {},
+            "methods": {
+              "subscriptionSnapshot": {
+                "args": {
+                  "type": "null"
+                },
+                "result": {
+                  "type": "object",
+                  "properties": {
+                    "providers": {
+                      "type": "array",
+                      "items": {
+                        "type": "object",
+                        "properties": {
+                          "id": {
+                            "anyOf": [
+                              {
+                                "type": "string",
+                                "const": "qwen"
+                              },
+                              {
+                                "type": "string",
+                                "const": "openai-codex"
+                              }
+                            ]
+                          },
+                          "name": {
+                            "type": "string"
+                          }
+                        },
+                        "required": [
+                          "id",
+                          "name"
+                        ],
+                        "additionalProperties": false
+                      }
+                    },
+                    "attempts": {
+                      "type": "array",
+                      "items": {
+                        "type": "object",
+                        "properties": {
+                          "id": {
+                            "type": "string"
+                          },
+                          "provider": {
+                            "anyOf": [
+                              {
+                                "type": "string",
+                                "const": "qwen"
+                              },
+                              {
+                                "type": "string",
+                                "const": "openai-codex"
+                              }
+                            ]
+                          },
+                          "mode": {
+                            "anyOf": [
+                              {
+                                "type": "string",
+                                "const": "connect"
+                              },
+                              {
+                                "type": "string",
+                                "const": "switch_account"
+                              }
+                            ]
+                          },
+                          "status": {
+                            "anyOf": [
+                              {
+                                "type": "string",
+                                "const": "waiting"
+                              },
+                              {
+                                "type": "string",
+                                "const": "authorized"
+                              },
+                              {
+                                "type": "string",
+                                "const": "cancelled"
+                              },
+                              {
+                                "type": "string",
+                                "const": "expired"
+                              },
+                              {
+                                "type": "string",
+                                "const": "failed"
+                              }
+                            ]
+                          },
+                          "challengeAvailable": {
+                            "type": "boolean"
+                          }
+                        },
+                        "required": [
+                          "id",
+                          "provider",
+                          "mode",
+                          "status",
+                          "challengeAvailable"
+                        ],
+                        "additionalProperties": false
+                      }
+                    },
+                    "accounts": {
+                      "type": "array",
+                      "items": {
+                        "type": "object",
+                        "properties": {
+                          "provider": {
+                            "anyOf": [
+                              {
+                                "type": "string",
+                                "const": "qwen"
+                              },
+                              {
+                                "type": "string",
+                                "const": "openai-codex"
+                              }
+                            ]
+                          },
+                          "status": {
+                            "anyOf": [
+                              {
+                                "type": "string",
+                                "const": "signed_in"
+                              },
+                              {
+                                "type": "string",
+                                "const": "signed_out"
+                              },
+                              {
+                                "type": "string",
+                                "const": "unknown"
+                              }
+                            ]
+                          },
+                          "accountLabel": {
+                            "type": "string"
+                          },
+                          "plan": {
+                            "type": "string"
+                          },
+                          "entitlement": {
+                            "anyOf": [
+                              {
+                                "type": "string",
+                                "const": "eligible"
+                              },
+                              {
+                                "type": "string",
+                                "const": "ineligible"
+                              },
+                              {
+                                "type": "string",
+                                "const": "unknown"
+                              }
+                            ]
+                          },
+                          "accountId": {
+                            "type": "string",
+                            "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$"
+                          }
+                        },
+                        "required": [
+                          "provider",
+                          "status"
+                        ],
+                        "additionalProperties": false
+                      }
+                    }
+                  },
+                  "required": [
+                    "providers",
+                    "attempts",
+                    "accounts"
+                  ],
+                  "additionalProperties": false
+                }
+              },
+              "startSubscriptionSignIn": {
+                "args": {
+                  "type": "object",
+                  "properties": {
+                    "provider": {
+                      "anyOf": [
+                        {
+                          "type": "string",
+                          "const": "qwen"
+                        },
+                        {
+                          "type": "string",
+                          "const": "openai-codex"
+                        }
+                      ]
+                    },
+                    "mode": {
+                      "anyOf": [
+                        {
+                          "type": "string",
+                          "const": "connect"
+                        },
+                        {
+                          "type": "string",
+                          "const": "switch_account"
+                        }
+                      ]
+                    }
+                  },
+                  "required": [
+                    "provider",
+                    "mode"
+                  ],
+                  "additionalProperties": false
+                },
+                "result": {
+                  "type": "object",
+                  "properties": {
+                    "attemptId": {
+                      "type": "string",
+                      "minLength": 1
+                    }
+                  },
+                  "required": [
+                    "attemptId"
+                  ],
+                  "additionalProperties": false
+                }
+              },
+              "cancelSubscriptionSignIn": {
+                "args": {
+                  "type": "object",
+                  "properties": {
+                    "attemptId": {
+                      "type": "string",
+                      "minLength": 1
+                    }
+                  },
+                  "required": [
+                    "attemptId"
+                  ],
+                  "additionalProperties": false
+                },
+                "result": {
+                  "type": "null"
+                }
+              },
+              "disconnectSubscription": {
+                "args": {
+                  "type": "object",
+                  "properties": {
+                    "provider": {
+                      "anyOf": [
+                        {
+                          "type": "string",
+                          "const": "qwen"
+                        },
+                        {
+                          "type": "string",
+                          "const": "openai-codex"
+                        }
+                      ]
+                    },
+                    "expectedAccountId": {
+                      "type": "string",
+                      "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$"
+                    }
+                  },
+                  "required": [
+                    "provider",
+                    "expectedAccountId"
+                  ],
+                  "additionalProperties": false
+                },
+                "result": {
+                  "type": "null"
+                }
+              },
+              "deliverSubscriptionChallenge": {
+                "args": {
+                  "type": "object",
+                  "properties": {
+                    "attemptId": {
+                      "type": "string",
+                      "minLength": 1
+                    },
+                    "operationId": {
+                      "type": "string",
+                      "minLength": 1
+                    }
+                  },
+                  "required": [
+                    "attemptId",
+                    "operationId"
                   ],
                   "additionalProperties": false
                 },

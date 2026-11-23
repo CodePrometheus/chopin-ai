@@ -4,6 +4,7 @@ import { readFile } from "node:fs/promises";
 import { parseArgs } from "node:util";
 import type { Command } from "@chopin-ai/core";
 import { errorText } from "@chopin-ai/harness-pi/protocol";
+import { InMemoryCredentialStore } from "@earendil-works/pi-ai";
 import { Value } from "typebox/value";
 import { CloudConfigurationSchema, openCloudRuntime, type CloudConfiguration, type CloudRuntime } from "./cloud.js";
 import { SUPERVISED_CONFIG_DIGEST, superviseCloud } from "./cloud-supervisor.js";
@@ -39,8 +40,12 @@ export const cloudCommand: Command = {
       } else if (process.env.CHOPIN_SERVICE_KEY !== undefined) throw new Error("custody unlock cannot also receive CHOPIN_SERVICE_KEY");
       delete process.env.CHOPIN_SERVICE_KEY;
       const stop = Promise.race([once(process, "SIGINT"), once(process, "SIGTERM")]);
-      runtime = await openCloudRuntime(config, { serviceKey: key, controlToken: required("CHOPIN_CONTROL_TOKEN"), jobToken: required("CHOPIN_JOB_TOKEN"), launchToken: required("CHOPIN_TOKEN") }, {
-        models: async (home) => { process.env.CHOPIN_HOME = home; await useConfiguredProxy(); return chopinModels(undefined, (notice) => io.err(`chopin cloud: ${notice}`)); },
+      runtime = await openCloudRuntime(config, { serviceKey: key, controlToken: required("CHOPIN_CONTROL_TOKEN"), ...(config.jobs !== undefined && { jobToken: required("CHOPIN_JOB_TOKEN") }), launchToken: required("CHOPIN_TOKEN") }, {
+        models: async (home, catalogOnly) => {
+          process.env.CHOPIN_HOME = home;
+          await useConfiguredProxy();
+          return chopinModels(catalogOnly ? new InMemoryCredentialStore() : undefined, (notice) => io.err(`chopin cloud: ${notice}`), !catalogOnly);
+        },
         report: (error) => io.err(`chopin cloud: ${errorText(error)}`),
       });
       const restored = { state: "restored", startupPaused: true, port: runtime.server.port };

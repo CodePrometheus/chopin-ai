@@ -1,5 +1,6 @@
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
+use uuid::Uuid;
 
 use crate::{ChordClient, ProtocolError, Result, StateObserver};
 
@@ -215,6 +216,37 @@ pub struct GoalArtifact {
     /// Verified content digest.
     pub sha256: String,
 }
+
+/// Immutable publication associated with one completed goal and its source command.
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct PublishedArtifact {
+    /// Stable publication identifier.
+    pub artifact_id: Uuid,
+    /// Original owning goal.
+    pub goal_id: String,
+    /// Original command that declared the file.
+    pub operation_id: Uuid,
+    /// Validated attachment filename.
+    pub name: String,
+    /// Lowercase SHA-256 of the original bytes.
+    pub sha256: String,
+    /// Length of the original bytes.
+    pub size_bytes: u64,
+}
+
+/// One retained page of the original bytes, encoded independently of tool output.
+#[derive(Clone, Debug, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct ArtifactContentPage {
+    /// Byte offset in the retained publication.
+    pub offset: u64,
+    /// Unpadded base64url with no text conversion.
+    pub data: String,
+    /// Byte offset to request next, absent on the final page.
+    pub next_offset: Option<u64>,
+}
 /// Source evidence associated with an explicit completion criterion.
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -326,6 +358,65 @@ pub struct EngineWake {
     pub at: Option<f64>,
 }
 impl ChordClient {
+    /// Lists committed publications in the authenticated owner's goal.
+    pub async fn goal_artifacts(&mut self, goal: &str) -> Result<Vec<PublishedArtifact>> {
+        if goal.is_empty() {
+            return Err(ProtocolError::InvalidArguments);
+        }
+        let artifacts: Vec<PublishedArtifact> = serde_json::from_value(
+            self.invoke("chopin.goal", json!({"goal": goal}), "artifacts", None)
+                .await?,
+        )?;
+        if artifacts.iter().any(|artifact| {
+            artifact.goal_id != goal
+                || artifact.operation_id.is_nil()
+                || artifact.artifact_id.is_nil()
+                || artifact.size_bytes > crate::wire::MAX_SAFE_INTEGER
+                || artifact.name.is_empty()
+                || matches!(artifact.name.as_str(), "." | "..")
+                || artifact.name.contains(['/', '\\'])
+                || artifact.name.chars().any(char::is_control)
+                || artifact.sha256.len() != 64
+                || !artifact
+                    .sha256
+                    .bytes()
+                    .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+        }) {
+            return Err(ProtocolError::InvalidState);
+        }
+        Ok(artifacts)
+    }
+
+    /// Reads an exact publication page by its source-owned offset.
+    pub async fn goal_artifact_page(
+        &mut self,
+        goal: &str,
+        artifact_id: Uuid,
+        offset: u64,
+    ) -> Result<Option<ArtifactContentPage>> {
+        if goal.is_empty() || artifact_id.is_nil() || offset > crate::wire::MAX_SAFE_INTEGER {
+            return Err(ProtocolError::InvalidArguments);
+        }
+        let page: Option<ArtifactContentPage> = serde_json::from_value(
+            self.invoke(
+                "chopin.goal",
+                json!({"goal": goal}),
+                "artifactContent",
+                Some(json!({"artifactId": artifact_id, "offset": offset})),
+            )
+            .await?,
+        )?;
+        if page.as_ref().is_some_and(|page| {
+            page.offset != offset
+                || page
+                    .next_offset
+                    .is_some_and(|next| next <= offset || next > crate::wire::MAX_SAFE_INTEGER)
+        }) {
+            return Err(ProtocolError::InvalidState);
+        }
+        Ok(page)
+    }
+
     /// Submit the original envelope once. A transport failure leaves admission unknown.
     pub async fn execute(&mut self, envelope: &EngineCommand) -> Result<EngineReceipt> {
         if envelope.version != 1 || envelope.request_id.is_empty() {

@@ -3,6 +3,7 @@ import { withAbortSignal, BACKGROUND_CONTEXT, type Context } from "@earendil-wor
 import { AssistantEntry, CompactionTask, defineExtension, defineTask, GenerationTask, hook, LiveDoc, runEndTask, section, ToolResultEntry, ToolTask, type AgentChange, type ConversationId, type Cursor, type EntryId, type EntryRecord, type Extension, type Harness, type HarnessSettings, type HookApi, type RegistryReader, type Storage, type TaskId, type TaskRuntime } from "@earendil-works/pi-durable";
 import { refusal } from "../service-error.js";
 import { GOAL_CONTROL_KIND, terminal, validateCommand, type EngineCommand, type EngineReceipt, type GoalArtifact, type GoalGrant, type GoalPage, type GoalResult, type GoalSnapshot } from "./contracts.js";
+import { artifactContent, artifactList } from "./artifact.js";
 import { ActiveGoals, bump, GoalBinding, GoalDoc, GoalStore, requireSnapshot, setBlock, type GoalBlock, type GoalCheckpoint, type GoalOutcome, type GoalRecord, type GoalTask } from "./store.js";
 import { Decision, type GoalDecision } from "./decisions.js";
 import { GoalReviewer, ReviewBinding, type GoalReviewOptions } from "./reviewer.js";
@@ -22,8 +23,8 @@ export interface GoalOptions {
   review: GoalReview | GoalReviewOptions;
   /** Resolve only when original external operations and their output are reconciled; unknown state must reject or wait. */
   settled(goal: GoalSnapshot, context: Context): Promise<void>;
-  /** Verify actual artifact bytes under this goal's resource authority, including the proposed digest. */
-  artifact?(goal: GoalSnapshot, artifact: GoalArtifact, context: Context): Promise<void>;
+  /** Verify a publication by the task that committed the evidence entry. */
+  artifact?(goal: GoalSnapshot, artifact: GoalArtifact, sourceTaskId: number, context: Context): Promise<void>;
   /** Published dependency-recovery policy, in milliseconds; no retry count is synthesized. */
   retryAfterMs: number;
   report(error: unknown): void;
@@ -143,6 +144,14 @@ export class GoalEngine {
   }
   async request(id: string, context: Context): Promise<EngineReceipt | undefined> { await this.#authorize({ action: "owner" }, context); return this.store.request(id, context); }
   async snapshot(id: string, context: Context): Promise<GoalSnapshot> { await this.#authorize({ action: "owner" }, context); return this.store.snapshot(id, context); }
+  async artifacts(id: string, context: Context) {
+    await this.#authorize({ action: "owner" }, context);
+    return artifactList(this.store, id, context);
+  }
+  async artifactContent(id: string, artifactId: string, offset: number, context: Context) {
+    await this.#authorize({ action: "owner" }, context);
+    return artifactContent(this.store, id, artifactId, offset, context);
+  }
   async page(limit: number, cursor: Cursor | undefined, context: Context): Promise<GoalPage> { await this.#authorize({ action: "owner" }, context); return this.store.page(limit, cursor, context); }
   async forConversation(id: ConversationId, context: Context): Promise<GoalSnapshot | undefined> { await this.#authorize({ action: "owner" }, context); return this.store.forConversation(id, context); }
   async wake(context: Context): Promise<{ active: boolean; at?: number }> {
@@ -316,13 +325,15 @@ export class GoalEngine {
         : entry.kind === ToolResultEntry.kind && entry.model?.some((message) => message.role === "toolResult" && !message.isError);
       if (!valid) throw new Error("evidence does not record a successful source result");
       if (item.kind === "tool") {
-        const task = entry.byTaskId === undefined ? undefined : await this.store.storage.task(entry.byTaskId, context);
+        const taskId = entry.byTaskId;
+        if (taskId === undefined) throw new Error("tool evidence has no completed execution record");
+        const task = await this.store.storage.task(taskId, context);
         if (task?.kind !== ToolTask.definition.name || task.state.status !== "terminal" || task.state.outcome.status !== "completed") throw new Error("tool evidence has no completed execution record");
         const result = task.state.outcome.result;
         if (result === null || typeof result !== "object" || Array.isArray(result) || result.entryId !== entry.id) throw new Error("tool evidence is not the committed task result");
         if (item.artifact !== undefined) {
           if (this.#options.artifact === undefined) throw new Error("artifact verification is unavailable");
-          await this.#options.artifact(goal, item.artifact, context);
+          await this.#options.artifact(goal, item.artifact, Number(taskId), context);
         }
       }
       covered.add(item.criterion);

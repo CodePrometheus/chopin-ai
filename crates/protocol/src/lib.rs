@@ -10,6 +10,7 @@ mod error;
 mod goals;
 mod learning;
 mod legacy_vault;
+mod model_settings;
 mod observation;
 #[cfg(feature = "schema")]
 mod schema;
@@ -22,8 +23,9 @@ pub use conversation::{
 };
 pub use error::{CommandRejection, ProtocolError, TransportError};
 pub use goals::{
-    EngineCommand, EngineReceipt, EngineWake, GoalArtifact, GoalCommand, GoalContinuation,
-    GoalEvidence, GoalGrant, GoalPage, GoalResult, GoalSnapshot, GoalStatus, GoalWaiting,
+    ArtifactContentPage, EngineCommand, EngineReceipt, EngineWake, GoalArtifact, GoalCommand,
+    GoalContinuation, GoalEvidence, GoalGrant, GoalPage, GoalResult, GoalSnapshot, GoalStatus,
+    GoalWaiting, PublishedArtifact,
 };
 pub use learning::{
     CorrectionKind, HeldChange, LoopChange, LoopSettings, LoopSettingsPatch, LoopStanding,
@@ -31,6 +33,10 @@ pub use learning::{
 pub use legacy_vault::{
     KEY_VERIFICATION_PURPOSE, KeyVerificationBindings, KeyVerificationCapability,
     KeyVerificationRequest, KeyVerificationResponse, SealedKeyVerification,
+};
+pub use model_settings::{
+    ModelCredentialInfo, ModelCredentialKind, ModelLoginWay, ModelSettingsProvider,
+    ModelSettingsSnapshot,
 };
 pub use observation::{StateObserver, StateUpdate};
 pub use tokio_tungstenite::Connector as TlsConnector;

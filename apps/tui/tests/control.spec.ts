@@ -121,6 +121,16 @@ it("enforces the configured response budget against an actual HTTP body", async 
   finally { await host.close(); await target.close(); }
 });
 
+it("refuses a personal credential claim before sending anything over HTTP", async () => {
+  let calls = 0;
+  const target = await listen(createServer((_request, response) => { calls++; response.writeHead(204).end(); }));
+  const host = await ControlHost.connect({ url: target.url, ...binding }, "synthetic-control-credential");
+  try {
+    await expect(host.claimPersonalCredentialChange("00000000-0000-4000-8000-000000000001")).rejects.toThrow("require a trusted HTTPS endpoint");
+    expect(calls).toBe(0);
+  } finally { await host.close(); await target.close(); }
+});
+
 it("uses the host's declared certificate authority and never disables verification", async () => {
   const directory = await mkdtemp(join(tmpdir(), "chopin-control-tls-"));
   const key = join(directory, "key.pem"); const cert = join(directory, "certificate.pem"); const config = join(directory, "request.conf");

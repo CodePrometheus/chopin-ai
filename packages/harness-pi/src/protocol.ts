@@ -1,9 +1,9 @@
-import { arr, bool, hostKind, int, lit, map, method, nul, num, obj, opt, remote, str, union, unknown, type Ctx, type RefState, type NullSchema, type NumberSchema, type Reference, type Schema, type Static } from "@earendil-works/chord";
+import { arr, bool, evolve, hostKind, int, lit, map, method, nul, num, obj, opt, remote, str, union, unknown, type Contract, type Ctx, type RefState, type NullSchema, type NumberSchema, type Reference, type Schema, type Static } from "@earendil-works/chord";
 import { CALL_TIMEOUT_MS, within, type CallOptions, type Client } from "./client.js";
 export { CALL_TIMEOUT_MS, CallTimeout, connect, subscribe, within } from "./client.js";
 export type { CallOptions, Client, ConnectOptions } from "./client.js";
 import { serviceKey, type DataKey } from "./keys.js";
-import { EngineCommandSchema, EngineReceiptSchema, GoalPageSchema, GoalSnapshotSchema } from "./goals/contracts.js";
+import { ArtifactContentPageSchema, EngineCommandSchema, EngineReceiptSchema, GoalPageSchema, GoalSnapshotSchema, PublishedArtifactSchema } from "./goals/contracts.js";
 export * from "./goals/contracts.js";
 
 /**
@@ -23,6 +23,11 @@ const GoalPageArgs = obj({ limit: int({ min: 1, max: Number.MAX_SAFE_INTEGER }),
 const GoalConversationArgs = obj({ conversation: int({ min: 1, max: Number.MAX_SAFE_INTEGER }) });
 const GoalReceiptResult = union([EngineReceiptSchema, nul()]);
 const GoalLookupResult = union([GoalSnapshotSchema, nul()]);
+const GoalArtifactsResult = arr(PublishedArtifactSchema);
+const ArtifactContentArgs = obj({
+  artifactId: str({ min: 1 }), offset: int({ min: 0, max: Number.MAX_SAFE_INTEGER }),
+});
+const ArtifactPageResult = union([ArtifactContentPageSchema, nul()]);
 export const WakeSchema = obj({ active: bool(), at: opt(int({ min: -Number.MAX_SAFE_INTEGER, max: Number.MAX_SAFE_INTEGER })) });
 const GoalsSpec = {
   version: 2, params: {}, hostAddress: () => AgentHost({}), variants: { owner: { state: {}, methods: {
@@ -37,8 +42,11 @@ const GoalsSpec = {
 /** Durable command admission and source-owned goal queries. */
 export const Goals = remote("chopin.goals", GoalsSpec);
 const GoalSpec = {
-  version: 2, params: { goal: str({ min: 1 }) }, hostAddress: () => AgentHost({}),
-  variants: { owner: { state: { snapshot: GoalSnapshotSchema }, methods: {} } },
+  version: 3, params: { goal: str({ min: 1 }) }, hostAddress: () => AgentHost({}),
+  variants: { owner: { state: { snapshot: GoalSnapshotSchema }, methods: {
+    artifacts: method(undefined, GoalArtifactsResult) as Query<undefined, typeof GoalArtifactsResult>,
+    artifactContent: method(ArtifactContentArgs, ArtifactPageResult) as Query<typeof ArtifactContentArgs, typeof ArtifactPageResult>,
+  } } },
 } as const;
 /** One goal's persisted authoritative state, independent of the observing connection. */
 export const Goal = remote("chopin.goal", GoalSpec);
@@ -278,6 +286,16 @@ export const ProviderEntrySchema = obj({ id: str(), name: str(), ways: arr(Login
 export type ProviderEntry = Static<typeof ProviderEntrySchema>;
 const ProviderList = arr(ProviderEntrySchema);
 
+/** A point-in-time view of this owner's model connections and usable configured models. */
+export const ModelSettingsSchema = obj({
+  providers: ProviderList,
+  credentials: CredentialList,
+  models: arr(ModelChoiceSchema),
+  execution: union([ModelArgs, nul()]),
+  review: union([ModelArgs, nul()]),
+});
+export type ModelSettings = Static<typeof ModelSettingsSchema>;
+
 /** News from a login as the provider gives it: a page to open, a code to enter on any device, a note, or progress. */
 export const LoginEventSchema = union([
   obj({ type: lit("auth_url"), url: str(), instructions: opt(str()) }),
@@ -315,7 +333,7 @@ const LoginIdArgs = obj({ login: num() });
  * login, which the service runs and every client of the owner follows. Secrets only ever travel to the service, which
  * keeps each where it keeps that owner's credentials.
  */
-const CredentialsSpec = {
+const CredentialsV2Spec = {
   version: 2,
   params: {},
   hostAddress: () => AgentHost({}),
@@ -337,7 +355,84 @@ const CredentialsSpec = {
     },
   },
 } as const;
-export const Credentials = remote("chopin.credentials", CredentialsSpec);
+const snapshotMethod: Query<undefined, typeof ModelSettingsSchema> = method(undefined, ModelSettingsSchema);
+const PersonalCredentialChangeArgs = obj({ operationId: str({ pattern: "^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$" }) });
+const applyPersonalCredentialChange: Call<typeof PersonalCredentialChangeArgs> = method(PersonalCredentialChangeArgs);
+type CredentialsVariants = {
+  readonly owner: {
+    readonly state: typeof CredentialsV2Spec.variants.owner.state;
+    readonly methods: typeof CredentialsV2Spec.variants.owner.methods & {
+      readonly snapshot: Query<undefined, typeof ModelSettingsSchema>;
+      readonly applyPersonalCredentialChange: Call<typeof PersonalCredentialChangeArgs>;
+    };
+  };
+};
+type CredentialsDeclaration = Omit<typeof CredentialsV2Spec, "version" | "variants"> & {
+  readonly version: 3;
+  readonly variants: CredentialsVariants;
+};
+const CredentialsSpec: CredentialsDeclaration = {
+  ...CredentialsV2Spec,
+  version: 3,
+  variants: {
+    owner: {
+      ...CredentialsV2Spec.variants.owner,
+      methods: { ...CredentialsV2Spec.variants.owner.methods, snapshot: snapshotMethod, applyPersonalCredentialChange },
+    },
+  },
+};
+type CredentialsContract = Contract<{
+  kind: "remote";
+  name: "chopin.credentials";
+  params: typeof CredentialsSpec.params;
+  history: [
+    { version: "2"; variants: typeof CredentialsV2Spec.variants; changes: never },
+    { version: "3"; variants: CredentialsVariants; changes: readonly ["owner", "snapshot" | "applyPersonalCredentialChange", "args" | "result"] },
+  ];
+}>;
+export const Credentials: CredentialsContract = evolve(remote("chopin.credentials", CredentialsV2Spec),
+  (edit) => edit.addMethod("owner", "snapshot", snapshotMethod.args, snapshotMethod.result)
+    .addMethod("owner", "applyPersonalCredentialChange", applyPersonalCredentialChange.args, applyPersonalCredentialChange.result));
+
+const SubscriptionProvider = union([lit("qwen"), lit("openai-codex")]);
+const SubscriptionMode = union([lit("connect"), lit("switch_account")]);
+const SubscriptionAttemptStatus = union([lit("waiting"), lit("authorized"), lit("cancelled"), lit("expired"), lit("failed")]);
+const SubscriptionAccountStatus = union([lit("signed_in"), lit("signed_out"), lit("unknown")]);
+const SubscriptionEntitlement = union([lit("eligible"), lit("ineligible"), lit("unknown")]);
+const SubscriptionAccountId = str({ pattern: "^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$" });
+const SubscriptionAttempt = obj({
+  id: str(), provider: SubscriptionProvider, mode: SubscriptionMode, status: SubscriptionAttemptStatus, challengeAvailable: bool(),
+});
+const SubscriptionAccount = obj({
+  provider: SubscriptionProvider, status: SubscriptionAccountStatus, accountLabel: opt(str()), plan: opt(str()),
+  entitlement: opt(SubscriptionEntitlement), accountId: opt(SubscriptionAccountId),
+});
+const SubscriptionSnapshot = obj({
+  providers: arr(obj({ id: SubscriptionProvider, name: str() })),
+  attempts: arr(SubscriptionAttempt), accounts: arr(SubscriptionAccount),
+});
+export type SubscriptionProviderId = Static<typeof SubscriptionProvider>;
+export type SubscriptionSignInMode = Static<typeof SubscriptionMode>;
+export type SubscriptionSignInAttempt = Static<typeof SubscriptionAttempt>;
+export type SubscriptionSignInAccount = Static<typeof SubscriptionAccount>;
+export type SubscriptionSignInSnapshot = Static<typeof SubscriptionSnapshot>;
+
+const SubscriptionStart = obj({ provider: SubscriptionProvider, mode: SubscriptionMode });
+const SubscriptionAttemptId = obj({ attemptId: str({ min: 1 }) });
+const SubscriptionDisconnect = obj({ provider: SubscriptionProvider, expectedAccountId: SubscriptionAccountId });
+const SubscriptionChallenge = obj({ attemptId: str({ min: 1 }), operationId: str({ min: 1 }) });
+const SubscriptionsSpec = {
+  version: 1, params: {}, hostAddress: () => AgentHost({}),
+  variants: { owner: { state: {}, methods: {
+    subscriptionSnapshot: method(undefined, SubscriptionSnapshot) as Query<undefined, typeof SubscriptionSnapshot>,
+    startSubscriptionSignIn: method(SubscriptionStart, SubscriptionAttemptId) as Query<typeof SubscriptionStart, typeof SubscriptionAttemptId>,
+    cancelSubscriptionSignIn: method(SubscriptionAttemptId) as Call<typeof SubscriptionAttemptId>,
+    disconnectSubscription: method(SubscriptionDisconnect) as Call<typeof SubscriptionDisconnect>,
+    deliverSubscriptionChallenge: method(SubscriptionChallenge) as Call<typeof SubscriptionChallenge>,
+  } } },
+} as const;
+/** Public account status and operation IDs. The device challenge is delivered privately to the host. */
+export const Subscriptions = remote("chopin.subscriptions", SubscriptionsSpec);
 
 /** An MCP server a client set, and how many tools it offers, or why it offers none yet; never its headers. */
 export const McpServerSchema = obj({ name: str(), url: str(), tools: num(), error: opt(str()) });
@@ -667,13 +762,20 @@ export function resender(): (text: string, submit: (request: string) => Promise<
   };
 }
 
+type ContractExport = {
+  readonly type: Contract;
+  readonly spec: typeof GoalsSpec | typeof GoalSpec | typeof ConversationsSpec | typeof ConversationSpec |
+    typeof CredentialsSpec | typeof SubscriptionsSpec | typeof McpSpec | typeof EnvironmentSpec | typeof VaultSpec | typeof LoopSpec;
+};
+
 /** Application-owned declarations used by native clients and compatibility checks. */
-export const contracts = [
+export const contracts: readonly ContractExport[] = [
   { type: Goals, spec: GoalsSpec },
   { type: Goal, spec: GoalSpec },
   { type: Conversations, spec: ConversationsSpec },
   { type: Conversation, spec: ConversationSpec },
   { type: Credentials, spec: CredentialsSpec },
+  { type: Subscriptions, spec: SubscriptionsSpec },
   { type: Mcp, spec: McpSpec },
   { type: Environment, spec: EnvironmentSpec },
   { type: Vault, spec: VaultSpec },

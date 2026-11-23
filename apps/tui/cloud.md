@@ -58,6 +58,29 @@ Goal completion uses the configured private reviewer and actual external-operati
 reconciliation. A normal process shutdown drains local activity and seals updated
 home metadata; it does not invent a successful result or restart an accepted command.
 
+## Personal model credentials
+
+Set `personalModels: true` to enable owner-managed API keys. The configured
+`model` and `reviewModel` still select the execution and private review models.
+The listener starts with an empty usable catalog when there is no personal
+authorization. It lists the registered selections that support key-authenticated
+chat requests. The hosted adapters support the completions, responses, and
+messages APIs with a provider API key.
+
+Point `control.url` at the trusted HTTPS control endpoint. Configure `control.caFile`
+when it has a private trust root. The owner settings client sends an operation
+identifier on `chopin.credentials`. The execution process claims the change once
+over that authenticated HTTPS connection. The host binds the claim to the
+admitted writer, owner, and operation. The process serializes changes from claim
+through durable acknowledgement. Query the same resource's `snapshot()` after a
+lost acknowledgement to read the current credential metadata.
+
+Keys are authenticated and encrypted on the protected volume. Execution and
+private review resolve the current key for each request and use it only in the
+provider's authentication header. An acknowledged removal makes the next request
+require a personal key. Fixed-credential configurations continue to use their
+existing model runtime.
+
 ## Embedding the hosted runtime
 
 Install matching versions of the CLI and adapter. An embedding application can
